@@ -39,32 +39,32 @@ class EventStereoMatchingNetwork(nn.Module):
             event_stack[loc] = rearrange(event_stack[loc], 'b c h w t s -> b (c s t) h w')
             concentrated_event_stack[loc] = self.concentration_net(event_stack[loc])
         
-        if not self.onnx_program:
-            torch.onnx.export(
-                self.concentration_net,
-                event_stack['l'][0].unsqueeze(0),
-                "/home/runqiu/code/se-cff/concentrate_events.onnx",
-                export_params=True,
-                opset_version=16,
-                do_constant_folding=True,
-                input_names=["input"],
-                output_names=["output"],
-                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
-            )
-            self.onnx_program = True
-        else:
-            # providers=["CPUExecutionProvider"]
-            providers = [("CUDAExecutionProvider", {"device_id": torch.cuda.current_device()})]
-            ort_session = onnxruntime.InferenceSession("/home/runqiu/code/se-cff/concentrate_events.onnx", providers=providers)
-            aa = concentrated_event_stack['l']
-            for indexSlice in range(aa.shape[0]):
-                ort_inputs = {ort_session.get_inputs()[0].name: to_numpy(event_stack['l'][indexSlice].unsqueeze(0))}
-                ort_outs = ort_session.run(None, ort_inputs) 
-                oneImg = numpy.squeeze(ort_outs)
-                oneImg -= oneImg.min()
-                oneImg *= 255 / oneImg.max()
-                cv2.imwrite("/media/runqiu/HDD1/opensource-dataset/dsec/concentrated/" + str(self.count).zfill(6) + ".png", oneImg.astype(numpy.uint8))
-                self.count += 1
+        # if not self.onnx_program:
+        #     torch.onnx.export(
+        #         self.concentration_net,
+        #         event_stack['l'][0].unsqueeze(0),
+        #         "/home/runqiu/code/se-cff/concentrate_events.onnx",
+        #         export_params=True,
+        #         opset_version=16,
+        #         do_constant_folding=True,
+        #         input_names=["input"],
+        #         output_names=["output"],
+        #         dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
+        #     )
+        #     self.onnx_program = True
+        # else:
+        #     # providers=["CPUExecutionProvider"]
+        #     providers = [("CUDAExecutionProvider", {"device_id": torch.cuda.current_device()})]
+        #     ort_session = onnxruntime.InferenceSession("/home/runqiu/code/se-cff/concentrate_events.onnx", providers=providers)
+        #     aa = concentrated_event_stack['l']
+        #     for indexSlice in range(aa.shape[0]):
+        #         ort_inputs = {ort_session.get_inputs()[0].name: to_numpy(event_stack['l'][indexSlice].unsqueeze(0))}
+        #         ort_outs = ort_session.run(None, ort_inputs) 
+        #         oneImg = numpy.squeeze(ort_outs)
+        #         oneImg -= oneImg.min()
+        #         oneImg *= 255 / oneImg.max()
+        #         cv2.imwrite("/media/runqiu/HDD1/opensource-dataset/dsec/concentrated/" + str(self.count).zfill(6) + ".png", oneImg.astype(numpy.uint8))
+        #         self.count += 1
 
         pred_disparity_pyramid = self.stereo_matching_net(
             concentrated_event_stack['l'],

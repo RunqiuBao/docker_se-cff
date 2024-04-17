@@ -23,7 +23,10 @@ class EventSlicer(torch.utils.data.Dataset):
             self.ms_to_idx = np.asarray(h5f['ms_to_idx'], dtype='int64').squeeze()         
             self.t_offset = int(h5f['t_offset'][()]) if h5f['t_offset'][()].size > 0 else 0
             self.t_final = int(h5f['events/t'][-1]) + self.t_offset
-            self.min_time = int(h5f['events/t'][num_of_event]) + self.t_offset
+            try:
+                self.min_time = int(h5f['events/t'][num_of_event]) + self.t_offset
+            except:
+                from IPython import embed; embed()
             self.max_time = int(h5f['events/t'][-1 - num_of_future_event]) + self.t_offset
             self.total_event = len(h5f['events/t'])
             
@@ -69,7 +72,15 @@ class EventSlicer(torch.utils.data.Dataset):
         events = dict()
         with h5py.File(self.event_root, 'r') as h5f:            
             time_array_conservative = np.asarray(h5f['events/{}'.format('t')][t_start_ms_idx:t_end_ms_idx]).squeeze()
-        
+            if isinstance(time_array_conservative, int):
+                time_array_conservative = [time_array_conservative]
+            try:
+                if len(time_array_conservative) == 0:
+                    print("events t: \n{}".format(np.asarray(h5f['events/{}'.format('t')])))
+                    print("t_start_us, t_end_us: {}, {}".format(t_start_us, t_end_us))
+                    print("time_array_conservative: \n{}".format(time_array_conservative))
+            except:
+                print("time_array_conservative: \n{}".format(time_array_conservative))
         _, idx_end_offset = self.get_time_indices_offsets(time_array_conservative, t_start_us, t_end_us)
         t_end_us_idx = t_start_ms_idx + idx_end_offset
         # Again add t_offset to get gps time
@@ -128,7 +139,8 @@ class EventSlicer(torch.utils.data.Dataset):
         time_start_us <= time_array[idx_start:idx_end] < time_end_us
         """        
 
-        assert time_array.ndim == 1
+        if time_array.ndim != 1:
+            return 0, 0
 
         idx_start = -1
         if time_array[-1] < time_start_us:

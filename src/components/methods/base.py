@@ -18,14 +18,17 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
         ('2PE', NPixelError(n=2, average_by='image', string_format='%6.3lf')),
         ('RMSE', RootMeanSquareError(average_by='image', string_format='%6.3lf')),
     ])
-    
-    for batch_data in tqdm(data_loader):        
-        batch_data = batch_to_cuda(batch_data)
+
+    pbar = tqdm(total=len(data_loader.dataset))
+    data_iter = iter(data_loader)
+
+    for indexBatch in range(len(data_loader.dataset)):
+        batch_data = batch_to_cuda(next(data_iter))
 
         mask = batch_data['disparity'] > 0
         if not mask.any():
             continue
-        
+
         pred, loss = model(left_event=batch_data['event']['left'],
                            right_event=batch_data['event']['right'],
                            gt_disparity=batch_data['disparity'])
@@ -48,6 +51,9 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
         log_dict['2PE'].update(pred, batch_data['disparity'], mask)
         log_dict['RMSE'].update(pred, batch_data['disparity'], mask)
 
+        pbar.update(1)
+    pbar.close()
+
     return log_dict
 
 
@@ -56,8 +62,10 @@ def test(model, data_loader):
     model.eval()
     pred_list = []
 
-    for batch_data in tqdm(data_loader):
-        batch_data = batch_to_cuda(batch_data)
+    pbar = tqdm(total=len(data_loader.dataset))
+    data_iter = iter(data_loader)
+    for indexBatch in range(len(data_loader.dataset)):
+        batch_data = batch_to_cuda(next(data_iter))
 
         pred, _ = model(left_event=batch_data['event']['left'],
                         right_event=batch_data['event']['right'],
@@ -73,6 +81,8 @@ def test(model, data_loader):
                 'pred_magma': visualizer.tensor_to_disparity_magma_image(cur_pred, vmax=100),
             }
             pred_list.append(cur_pred_dict)
+        pbar.update(1)
+    pbar.close()
 
     return pred_list
 

@@ -36,8 +36,8 @@ class CarlaDataset(torch.utils.data.Dataset):
                                                            crop_height=crop_height,
                                                            crop_width=crop_width,
                                                            num_workers=num_workers,
-                                                           **kwargs))        
-        
+                                                           **kwargs))
+
         if len(self.sequence_data_list) == 0:
             self.dataset = []
         else:
@@ -128,7 +128,8 @@ def get_sequence_dataloader(dataset, dataloader_cfg, num_workers, is_distributed
 def get_dataloader(args, dataset_cfg, dataloader_cfg, is_distributed=False):
     dataset = CarlaDataset(root=args.data_root,
                           num_workers=args.num_workers,
-                          **dataset_cfg.PARAMS)    
+                          **dataset_cfg.PARAMS)
+
     dataloader = globals()[dataloader_cfg.NAME](dataset=dataset,
                                                 dataloader_cfg=dataloader_cfg,
                                                 num_workers=args.num_workers,

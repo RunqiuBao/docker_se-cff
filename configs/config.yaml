@@ -7,7 +7,7 @@ DATASET:
       split: trainval
       sampling_ratio: 1
       crop_height: 360
-      crop_width: 640
+      crop_width: 576
       event_cfg:
         NAME: sbn
         PARAMS:
@@ -24,7 +24,7 @@ DATASET:
       split: test
       sampling_ratio: 1
       crop_height: 360
-      crop_width: 640
+      crop_width: 576
       event_cfg:
         NAME: sbn
         PARAMS:

@@ -42,7 +42,7 @@ class EventDataset(torch.utils.data.Dataset):
             data_define = 'sbn_%d_%s_%d_%d' % (self.num_of_event, self.stack_method, self.stack_size, self.num_of_future_event)
             save_root = os.path.join(self.root, data_define)
             os.makedirs(save_root, exist_ok=True)
-            save_path = os.path.join(save_root, '%ld.npy' % timestamp)
+            save_path = os.path.join(save_root, '%ld.pt' % timestamp)
             if os.path.exists(save_path):
                 event_data = torch.load(save_path)
             else:

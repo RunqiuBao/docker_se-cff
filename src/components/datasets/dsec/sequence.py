@@ -16,7 +16,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         'event': 'events',
         'disparity': 'disparity',
     }
-    HEIGHT = 480
+    HEIGHT = 360
     WIDTH = 640
 
     def __init__(self, root, split, sampling_ratio, event_cfg, disparity_cfg, 
