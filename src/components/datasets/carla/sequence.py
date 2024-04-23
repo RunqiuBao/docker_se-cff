@@ -44,7 +44,11 @@ class SequenceDataset(torch.utils.data.Dataset):
         
         # Timestamps
         if split in ['train', 'validation', 'trainval']:
-            self.timestamps = copy.copy(self.disparity_dataset.timestamps)
+            try:
+                self.timestamps = copy.copy(self.disparity_dataset.timestamps)
+            except:
+                from IPython import embed; embed()
+
             if event_cfg.NAME != 'none':
                 minimum_timestamp = max(self.event_dataset.event_slicer['left'].t_offset,
                                         self.event_dataset.event_slicer['right'].t_offset)

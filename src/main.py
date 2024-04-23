@@ -30,5 +30,6 @@ cfg = get_cfg(args.config_path)
 exp_manager = DLManager(args, cfg)
 if args.checkpoint is not None:
     exp_manager.load(args.checkpoint)
-exp_manager.train()
-exp_manager.test()
+# exp_manager.train()
+# exp_manager.test()
+exp_manager.trainAndValid()

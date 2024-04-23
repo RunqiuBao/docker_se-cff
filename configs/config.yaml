@@ -4,6 +4,23 @@ DATASET:
   TRAIN:
     NAME: carla
     PARAMS:
+      split: train
+      sampling_ratio: 1
+      crop_height: 360
+      crop_width: 576
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 5000000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: True
+      disparity_cfg:
+        NAME: base
+        PARAMS: { }
+  VALID:
+    NAME: carla
+    PARAMS:
       split: trainval
       sampling_ratio: 1
       crop_height: 360
@@ -37,6 +54,12 @@ DATASET:
         PARAMS: { }
 DATALOADER:
   TRAIN:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 4
+      shuffle: True
+      drop_last: True
+  VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
       batch_size: 4

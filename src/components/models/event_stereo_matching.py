@@ -124,7 +124,7 @@ class EventStereoMatchingNetwork(nn.Module):
                                     gt_disparity.size(-1) / pred_disp.size(-1))
                 pred_disp = pred_disp.squeeze(1)
 
-            cur_loss = self.criterion(pred_disp[mask], gt_disparity[mask])
+            cur_loss = self.criterion(pred_disp[mask] * 256, gt_disparity[mask] * 256) # Note: gt_disparity was divided by 256
             loss += weight * cur_loss
 
         return loss

@@ -99,6 +99,7 @@ class Metric:
         error /= data_count
 
         self.average_meter.update(val=error, n=data_count)
+        return error 
 
     def calculate_error(self, pred, ground_truth, mask):
         raise NotImplementedError
@@ -127,7 +128,7 @@ class EndPointError(Metric):
     def calculate_error(self, pred, ground_truth, mask):
         # pred, ground_truth, mask: (H, W)
         pred, ground_truth = pred[mask], ground_truth[mask]
-        error = torch.abs(pred - ground_truth)
+        error = torch.abs(pred - ground_truth) * 256
 
         if self.average_by == 'pixel':
             final_error = error.sum()
@@ -147,7 +148,7 @@ class NPixelError(Metric):
     def calculate_error(self, pred, ground_truth, mask):
         # pred, ground_truth, mask: (H, W)
         pred, ground_truth = pred[mask], ground_truth[mask]
-        error = torch.abs(pred - ground_truth)
+        error = torch.abs(pred - ground_truth) * 256  # in disparity.base, gt is divided by 256.
         error_mask = error > self.n
         error_mask = error_mask.to(torch.float)
 
@@ -158,14 +159,14 @@ class NPixelError(Metric):
         else:
             raise NotImplementedError
 
-        return final_error * 100.0
+        return final_error * 100
 
 
 class RootMeanSquareError(Metric):
     def calculate_error(self, pred, ground_truth, mask):
         # pred, ground_truth, mask: (H, W)
         pred, ground_truth = pred[mask], ground_truth[mask]
-        error = ((pred - ground_truth) ** 2).mean().sqrt()
+        error = (((pred - ground_truth) * 256) ** 2).mean().sqrt()
 
         if self.average_by == 'image':
             final_error = error

@@ -17,6 +17,7 @@ class DisparityDataset(torch.utils.data.Dataset):
     def __init__(self, root):
         self.root = root
         self.timestamps = load_timestamp(os.path.join(root, self._PATH_DICT['timestamp']))
+
         if root.split('train')[-1] == '/seq0/disparity':
             self.timestamps = np.array([timeT // 10000 for timeT in self.timestamps])
         else:

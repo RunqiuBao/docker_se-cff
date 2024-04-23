@@ -50,7 +50,6 @@ class ExpLogger:
         self._save_root = save_root
         self._mode = mode
         self._tensor_log = None
-
         os.makedirs(self._save_root, exist_ok=True)
 
     def train(self):
