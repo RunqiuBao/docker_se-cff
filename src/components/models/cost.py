@@ -51,7 +51,6 @@ class CostVolume(nn.Module):
             raise NotImplementedError
 
         cost_volume = cost_volume.contiguous()  # [B, C, D, H, W] or [B, D, H, W]
-
         return cost_volume
 
 

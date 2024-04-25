@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy
 import cv2
 import onnxruntime
+from thop import profile
 
 from einops import rearrange
 
@@ -19,7 +20,7 @@ class EventStereoMatchingNetwork(nn.Module):
     count = 0
     onnx_program = False
 
-    def __init__(self, 
+    def __init__(self,
                  concentration_net=None,
                  disparity_estimator=None):
         super(EventStereoMatchingNetwork, self).__init__()
@@ -128,3 +129,12 @@ class EventStereoMatchingNetwork(nn.Module):
             loss += weight * cur_loss
 
         return loss
+
+    @staticmethod
+    def ComputeCostProfile(model, inputShape):
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        left_event = torch.randn(*inputShape).to(device)
+        right_event = torch.randn(*inputShape).to(device)
+        model = model.to(device)
+        flops, params = profile(model, inputs=(left_event, right_event), verbose=False)
+        return flops, params

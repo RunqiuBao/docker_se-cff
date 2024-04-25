@@ -52,6 +52,12 @@ class DLManager:
                                              dataset_cfg=self.cfg.DATASET.VALID,
                                              dataloader_cfg=self.cfg.DATALOADER.VALID,
                                              is_distributed=self.args.is_distributed)
+	# profiling the network
+        netWorkClass = getattr(models, self.cfg.MODEL.NAME)
+        profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
+        flops, numParams = netWorkClass.ComputeCostProfile(profile_model, next(iter(train_loader))['event']['left'].shape)
+        self.logger.write('[Profile] model(%s) computation cost: gFlops %f | numParams %f M' % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6)))
+        del profile_model
         
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
@@ -60,17 +66,17 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
-#            train_log_dict = self.method.train(model=self.model,
-#                                               data_loader=train_loader,
-#                                               optimizer=self.optimizer,
-#                                               is_distributed=self.args.is_distributed,
-#                                               world_size=self.args.world_size)
-#
-#            self.scheduler.step()
-#            if self.args.is_distributed:
-#                train_log_dict = self._gather_log(train_log_dict)
-#            if self.args.is_master:
-#                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, 'train', isSaveFinal = False)
+            train_log_dict = self.method.train(model=self.model,
+                                                data_loader=train_loader,
+                                                optimizer=self.optimizer,
+                                                is_distributed=self.args.is_distributed,
+                                                world_size=self.args.world_size)
+
+            self.scheduler.step()
+            if self.args.is_distributed:
+                train_log_dict = self._gather_log(train_log_dict)
+            if self.args.is_master:
+                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, 'train', isSaveFinal = False)
 
             if self.args.is_distributed:
                 dist.barrier()
@@ -214,6 +220,7 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None):
     parameters = model_cfg.PARAMS
 
     model = getattr(models, name)(**parameters)
+
     if is_distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
