@@ -118,7 +118,7 @@ class ResNetFeature(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
 
-        stride = 3
+        stride = 3  # !!!Note: originally 3. bao changed for event based object training.
         self.conv1 = nn.Sequential(nn.Conv2d(in_channels, self.inplanes, kernel_size=7, stride=stride,
                                              padding=3, bias=False),
                                    nn.BatchNorm2d(self.inplanes),
@@ -230,7 +230,7 @@ class FeaturePyramidNetwork(nn.Module):
 
 class FeatureExtractor(nn.Module):
     def __init__(self, in_channels=3):
-        super().__init__()
+        super().__init__()        
         self.resnet_feature_network = ResNetFeature(in_channels=in_channels)
         self.feature_pyramid_network = FeaturePyramidNetwork(in_channels=[32 * 4, 32 * 8, 32 * 16, ],
                                                              out_channels=32 * 4)

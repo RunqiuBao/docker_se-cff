@@ -28,7 +28,7 @@ class StereoMatchingNetwork(nn.Module):
         self.num_downsample = num_downsample
         self.num_scales = num_scales
 
-        # Feature extractor
+        # Feature extractor        
         self.feature_extractor = FeatureExtractor(in_channels=in_channels)
         max_disp = max_disp // 3
 
@@ -80,9 +80,10 @@ class StereoMatchingNetwork(nn.Module):
     def forward(self, left_img, right_img):
         left_feature = self.feature_extractor(left_img)
         right_feature = self.feature_extractor(right_img)
-        cost_volume = self.cost_volume_constructor(left_feature, right_feature)
+        cost_volume = self.cost_volume_constructor(left_feature, right_feature)        
         aggregation = self.aggregation(cost_volume)
         disparity_pyramid = self.disparity_estimation(aggregation)
         disparity_pyramid += self.disparity_refinement(left_img, right_img, disparity_pyramid[-1])
 
         return disparity_pyramid
+

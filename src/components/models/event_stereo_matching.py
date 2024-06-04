@@ -24,6 +24,7 @@ class EventStereoMatchingNetwork(nn.Module):
                  concentration_net=None,
                  disparity_estimator=None):
         super(EventStereoMatchingNetwork, self).__init__()
+        
         self.concentration_net = ConcentrationNet(**concentration_net.PARAMS)
         self.stereo_matching_net = StereoMatchingNetwork(**disparity_estimator.PARAMS)
 
