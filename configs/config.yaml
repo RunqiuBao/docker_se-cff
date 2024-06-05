@@ -57,13 +57,13 @@ DATALOADER:
     NAME: get_multi_epochs_dataloader
     PARAMS:
       batch_size: 4
-      shuffle: True
+      shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
       batch_size: 4
-      shuffle: True
+      shuffle: False
       drop_last: True
   TEST:
     NAME: get_multi_epochs_dataloader
