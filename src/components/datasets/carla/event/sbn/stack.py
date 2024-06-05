@@ -50,6 +50,7 @@ class MixedDensityEventStacking:
             for stack_idx in range(self.stack_size - 1, -1, -1):
                 stacked_polarity.put(pf_stacked_event['index'][stack_idx],
                                      pf_stacked_event['stacked_polarity'][stack_idx])
+
                 cur_stacked_event_list.append(np.stack([stacked_polarity], axis=2))
             stacked_event_list.append(np.concatenate(cur_stacked_event_list[::-1], axis=2))
         if len(stacked_event_list) == 2:

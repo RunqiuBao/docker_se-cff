@@ -89,6 +89,7 @@ def get_multi_epochs_dataloader(dataset, dataloader_cfg, num_workers, is_distrib
                                                         drop_last=drop_last,
                                                         sampler=sampler)
     else:
+        print("baodebug dataloader_cfg.PARAMS.shuffle: {}".format(dataloader_cfg.PARAMS.shuffle))
         multi_epochs_dataloader = MultiEpochsDataLoader(dataset=dataset,
                                                         num_workers=num_workers,
                                                         pin_memory=True,

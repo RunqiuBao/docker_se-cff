@@ -131,6 +131,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         disparity_data = self.disparity_dataset[timestamp]
 
         data['file_index'] = self.timestamp_to_index[timestamp]
+        data['end_timestamp'] = timestamp
         if event_data is not None:
             data['event'] = event_data
         if disparity_data is not None:
