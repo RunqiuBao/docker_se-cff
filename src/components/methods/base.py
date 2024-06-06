@@ -6,7 +6,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 from collections import OrderedDict
 
-from utils.metric import AverageMeter, EndPointError, NPixelError, RootMeanSquareError
+from utils.metrics import AverageMeter, EndPointError, NPixelError, RootMeanSquareError
 from utils import visualizer
 
 

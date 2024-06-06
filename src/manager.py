@@ -11,7 +11,7 @@ from components import datasets
 from components import methods
 
 from utils.logger import ExpLogger, TimeCheck
-from utils.metric import SummationMeter, Metric
+from utils.metrics import SummationMeter, Metric
 
 
 class DLManager:

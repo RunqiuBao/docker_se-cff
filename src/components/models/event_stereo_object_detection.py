@@ -5,8 +5,10 @@ from thop import profile
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
 from .objectdetection import Cylinder5DDetectionHead
-import ..utils.loss as losses
-import ..utils.metric as metrics
+from .feature_extractor import FeatureExtractor
+
+from ...utils import losses as losses
+from ...utils import metrics as metrics
 
 
 class EventStereoObjectDetectionNet(nn.Module):
@@ -32,7 +34,7 @@ class EventStereoObjectDetectionNet(nn.Module):
         self._disp_head = StereoMatchingNetwork(**disp_head_cfg.PARAM)
 
         self._objdet_loss = getattr(losses, loss_cfg.OBJDET.NAME)(loss_cfg.OBJDET.PARAMS)
-        self._disp_loss = getattr(losses, loss_cfg.DISP.NAME)(loss_cfg.DISP,PARAMS)
+        self._disp_loss = getattr(losses, loss_cfg.DISP.NAME)(loss_cfg.DISP.PARAMS)
 
     def forward(self, left_event, right_event, gt_labels=None):
         """
@@ -49,8 +51,8 @@ class EventStereoObjectDetectionNet(nn.Module):
         for loc in ['l', 'r']:
             concentrated_event_stack[loc] = self._concentration_net(event_stack[loc])
 
-        left_feature = self._feature_extraction_net(left_img)  # Note: multi-scale
-        right_feature = self._feature_extraction_net(right_img)  # Note: multi-scale
+        left_feature = self._feature_extraction_net(left_event)  # Note: multi-scale
+        right_feature = self._feature_extraction_net(right_event)  # Note: multi-scale
 
         pred_disparity_pyramid = self._disp_head(left_feature, right_feature)
         object_detection_prediction = self._object_detection_head(left_feature, right_feature, pred_disparity_pyramid)
