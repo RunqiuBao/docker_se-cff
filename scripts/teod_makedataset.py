@@ -28,8 +28,8 @@ from utils.config import get_cfg
 from components import datasets
 
 
-def CreatePath(path):
-    if os.path.isdir(path):
+def CreatePath(path, isOverwrite=True):
+    if isOverwrite and os.path.isdir(path):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
     return path
@@ -91,6 +91,7 @@ def main(args):
     # create dataloader
     dataset_type = 'train' if args.dataset_type == 'train' else 'valid'
     get_data_loader = getattr(datasets, cfg.DATASET.TRAIN.NAME if dataset_type == 'train' else cfg.DATASET.VALID.NAME).get_dataloader
+    batch_size = cfg.DATALOADER.TRAIN.PARAMS.batch_size if dataset_type == 'train' else cfg.DATALOADER.VALID.PARAMS.batch_size
     data_loader = get_data_loader(
         args=args,
         dataset_cfg=cfg.DATASET.TRAIN if dataset_type == 'train' else cfg.DATASET.VALID,
@@ -101,20 +102,19 @@ def main(args):
     data_iter = iter(data_loader)
 
     # iterate over the dataset
-    pbar = tqdm(total=len(data_loader.dataset))
-    CreatePath(args.lmdb_dir)
+    pbar = tqdm(total=len(data_loader.dataset) // batch_size)
+    CreatePath(args.lmdb_dir, isOverwrite=False)
     CreatePath(os.path.join(args.view4label_dir, '{}_left'.format(args.seq_idx)))
     CreatePath(os.path.join(args.view4label_dir, '{}_right'.format(args.seq_idx)))
     lmdb_writer = LmdbWriter(args.lmdb_dir, isDummyMode=False)
     with open(os.path.join(args.lmdb_dir, '{}_timestamp.txt'.format(args.seq_idx)), 'w') as tsFile:
-        for indexBatch in range(len(data_loader.dataset)):
+        for indexBatch in range(len(data_loader.dataset) // batch_size):
             batch_data = next(data_iter)
-            for indexInBatch in range(batch_data['event']['left'].shape[0]):
+            for indexInBatch in range(batch_size):
                 ts = int(batch_data['end_timestamp'][indexInBatch].numpy())
-
                 tsFile.write(str(ts) + '\n')
 
-                code = '%03d_l' % (args.seq_idx)
+                code = '%03d_%06d_l' % (args.seq_idx, indexBatch * batch_size + indexInBatch)
                 code = code.encode()
                 leftEvents = numpy.ascontiguousarray(
                     numpy.squeeze(
@@ -123,7 +123,7 @@ def main(args):
                 ).astype('int8')
                 lmdb_writer.write(code, leftEvents)
 
-                code = '%03d_r' % (args.seq_idx)
+                code = '%03d_%06d_r' % (args.seq_idx, indexBatch * batch_size + indexInBatch)
                 code = code.encode()
                 rightEvents = numpy.ascontiguousarray(
                     numpy.squeeze(
@@ -132,7 +132,7 @@ def main(args):
                 ).astype('int8')
                 lmdb_writer.write(code, rightEvents)
 
-                code = '%03d_ts' % (args.seq_idx)
+                code = '%03d_%06d_ts' % (args.seq_idx, indexBatch * batch_size + indexInBatch)
                 code = code.encode()
                 lmdb_writer.write(code, numpy.array([ts], dtype='int'))
 
