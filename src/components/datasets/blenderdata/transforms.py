@@ -12,10 +12,12 @@ class Compose:
 
 
 class ToTensor:
-    def __init__(self, event_module, disparity_module=None):
+    def __init__(self, event_module, disparity_module=None, objdet_module=None):
         self.event_transform = event_module.transforms.ToTensor()
         if disparity_module is not None:
             self.disparity_transform = disparity_module.transforms.ToTensor()
+        if objdet_module is not None:
+            self.objdet_transform = objdet_module.transforms.ToTensor()
 
     def __call__(self, sample):
         if 'event' in sample.keys():
@@ -23,6 +25,9 @@ class ToTensor:
 
         if 'disparity' in sample.keys():
             sample['disparity'] = self.disparity_transform(sample['disparity'])
+
+        if 'objdet' in sample.keys():
+            sample['objdet'] = self.objdet_transform(sample['objdet'])       
 
         return sample
 
@@ -56,8 +61,15 @@ class RandomCrop:
 
 
 class Padding:
-    def __init__(self, event_module,
-                 img_height, img_width, no_event_value=0, no_disparity_value=0, disparity_module=None):
+    def __init__(
+        self,
+        event_module,
+        img_height,
+        img_width,
+        no_event_value=0,
+        no_disparity_value=0,
+        disparity_module=None
+    ):
         self.img_height = img_height
         self.img_width = img_width
         self.event_transform = event_module.transforms.Padding(img_height, img_width, no_event_value)
@@ -75,10 +87,12 @@ class Padding:
 
 
 class RandomVerticalFlip:
-    def __init__(self, event_module, disparity_module=None):
+    def __init__(self, event_module, disparity_module=None, objdet_module=None, img_height=None, img_width=None):
         self.event_transform = event_module.transforms.VerticalFlip()
         if disparity_module is not None:
             self.disparity_transform = disparity_module.transforms.VerticalFlip()
+        if objdet_module is not None:
+            self.objdet_transform = objdet_module.transforms.VerticalFlip(img_height, img_width)
 
     def __call__(self, sample):
         if np.random.random() < 0.5:
@@ -87,5 +101,37 @@ class RandomVerticalFlip:
 
             if 'disparity' in sample.keys():
                 sample['disparity'] = self.disparity_transform(sample['disparity'])
+
+            if 'objdet' in sample.keys():
+                sample['objdet'] = self.objdet_transform(sample['objdet'])
+
+        return sample
+
+
+class RandomHorizontalFlip:
+    def __init__(
+        self,
+        event_module,
+        disparity_module=None,
+        objdet_module=None,
+        img_height=None,
+        img_width=None
+    ):
+        self.event_transform = event_module.transforms.HorizontalFlip()
+        if disparity_module is not None:
+            self.disparity_transform = disparity_module.transforms.HorizontalFlip()
+        if objdet_module is not None:
+            self.objdet_transform = objdet_module.transforms.HorizontalFlip(img_height, img_width)
+
+    def __call__(self, sample):
+        if np.random.random() < 0.5:
+            if 'event' in sample.keys():
+                sample['event'] = self.event_transform(sample['event'])
+
+            if 'disparity' in sample.keys():
+                sample['disparity'] = self.disparity_transform(sample['disparity'])
+
+            if 'objdet' in sample.keys():
+                sample['objdet'] = self.objdet_transform(sample['objdet'])
 
         return sample

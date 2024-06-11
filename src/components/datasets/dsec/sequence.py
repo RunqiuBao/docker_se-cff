@@ -43,7 +43,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.disparity_dataset = disparity_module.DisparityDataset(root=disparity_root, **disparity_cfg.PARAMS)
 
         # Timestamps
-        if split in ['train', 'validation', 'trainval']:
+        if split in ['train', 'valid', 'trainval']:
             self.timestamps = copy.copy(self.disparity_dataset.timestamps)
             if event_cfg.NAME != 'none':
                 minimum_timestamp = max(self.event_dataset.event_slicer['left'].t_offset,
@@ -78,7 +78,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 transforms.ToTensor(event_module=event_module,
                                     disparity_module=disparity_module, ),
             ])
-        elif split in ['validation', 'test']:
+        elif split in ['valid', 'test']:
             self.transforms = transforms.Compose([
                 transforms.Padding(event_module=event_module,
                                    disparity_module=disparity_module,

@@ -36,7 +36,7 @@ class ExpLogger:
         'model': 'model.txt',
         'optimizer': 'optimizer.txt',
         'train': 'train_log.txt',
-        'validation': 'validation_log.txt',
+        'valid': 'valid_log.txt',
         'test': 'test_log.txt',
     }
     _DIR_NAME = {
@@ -46,7 +46,7 @@ class ExpLogger:
     }
 
     def __init__(self, save_root, mode='train'):
-        assert mode in ['train', 'validation', 'test']
+        assert mode in ['train', 'valid', 'test']
         self._save_root = save_root
         self._mode = mode
         self._tensor_log = None

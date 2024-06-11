@@ -1,4 +1,5 @@
 import os
+import lmdb
 
 import torch.utils.data
 import torch.utils.data._utils
@@ -10,10 +11,20 @@ from .constant import DATA_SPLIT
 
 
 class BlenderDataset(torch.utils.data.Dataset):
-    def __init__(self, root, split, sampling_ratio,
-                 event_cfg,
-                 crop_height, crop_width,
-                 num_workers=0, defineSeqIdx=None, **kwargs):
+    lmdb_txn = None
+    lmdb_env = None
+
+    def __init__(
+            self,
+            root,
+            split,
+            sampling_ratio,
+            event_cfg,
+            crop_height,
+            crop_width,
+            num_workers=0,
+            defineSeqIdx=None, 
+            **kwargs):
         self.root = root
         self.split = split
         self.sampling_ratio = sampling_ratio
@@ -22,6 +33,11 @@ class BlenderDataset(torch.utils.data.Dataset):
         self.crop_width = crop_width
         self.num_workers = num_workers
         assert split in DATA_SPLIT.keys()
+
+        # moving events into lmdb
+        if os.path.isdir(os.path.join(root, split, 'lmdb')):
+            self.lmdb_env = lmdb.open(os.path.join(root, split, 'lmdb'), map_size=1099511627776)
+            self.lmdb_txn = self.lmdb_env.begin()
 
         sequence_list = DATA_SPLIT[split]
         if defineSeqIdx is not None:
@@ -36,6 +52,7 @@ class BlenderDataset(torch.utils.data.Dataset):
                                                            crop_height=crop_height,
                                                            crop_width=crop_width,
                                                            num_workers=num_workers,
+                                                           lmdb_txn=self.lmdb_txn,
                                                            **kwargs))
 
         if len(self.sequence_data_list) == 0:

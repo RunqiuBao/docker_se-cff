@@ -7,7 +7,7 @@ DATA_SPLIT = {
               'train/zurich_city_04_d', 'train/zurich_city_04_e', 'train/zurich_city_04_f', 'train/zurich_city_09_a',
               'train/zurich_city_09_b', 'train/zurich_city_09_c', 'train/zurich_city_09_e', 'train/zurich_city_10_a',
               'train/zurich_city_11_a', 'train/zurich_city_11_b', 'train/zurich_city_11_c'],
-    'validation': ['train/interlaken_00_f', 'train/interlaken_00_g', 'train/thun_00_a', 'train/zurich_city_05_a',
+    'valid': ['train/interlaken_00_f', 'train/interlaken_00_g', 'train/thun_00_a', 'train/zurich_city_05_a',
                    'train/zurich_city_05_b', 'train/zurich_city_06_a', 'train/zurich_city_07_a',
                    'train/zurich_city_08_a', 'train/zurich_city_09_d', 'train/zurich_city_10_b'],
     'trainval': ['train/interlaken_00_c', 'train/interlaken_00_d', 'train/interlaken_00_e', 'train/interlaken_00_f',

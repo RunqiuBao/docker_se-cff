@@ -37,7 +37,7 @@ class DLManager:
         
         self.get_train_loader = getattr(datasets, self.cfg.DATASET.TRAIN.NAME).get_dataloader
         self.get_valid_loader = getattr(datasets, self.cfg.DATASET.VALID.NAME).get_dataloader
-        self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
+        # self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
 
         self.method = getattr(methods, self.cfg.METHOD)
     
@@ -55,6 +55,7 @@ class DLManager:
 	# profiling the network
         netWorkClass = getattr(models, self.cfg.MODEL.NAME)
         profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
+        # torch.Size([4, 1, 360, 576, 1, 10])
         flops, numParams = netWorkClass.ComputeCostProfile(profile_model, next(iter(train_loader))['event']['left'].shape)
         self.logger.write('[Profile] model(%s) computation cost: gFlops %f | numParams %f M' % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6)))
         del profile_model

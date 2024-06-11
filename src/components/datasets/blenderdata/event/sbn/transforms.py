@@ -4,8 +4,8 @@ import numpy as np
 
 class ToTensor:
     def __call__(self, sample):
-        sample['left'] = torch.from_numpy(np.transpose(sample['left'], (4, 0, 1, 2, 3)))
-        sample['right'] = torch.from_numpy(np.transpose(sample['right'], (4, 0, 1, 2, 3)))
+        sample['left'] = torch.from_numpy(sample['left'])
+        sample['right'] = torch.from_numpy(sample['right'])
 
         return sample
 
@@ -17,19 +17,19 @@ class Padding:
         self.no_event_value = no_event_value
 
     def __call__(self, sample):
-        ori_height, ori_width = sample['left'].shape[:2]
+        ori_height, ori_width = sample['left'].shape[-2:]
 
-        top_pad = self.img_height - ori_height
+        bottom_pad = self.img_height - ori_height
         right_pad = self.img_width - ori_width
 
-        assert top_pad >= 0 and right_pad >= 0
+        assert bottom_pad >= 0 and right_pad >= 0
 
         sample['left'] = np.lib.pad(sample['left'],
-                                    ((top_pad, 0), (0, right_pad), (0, 0), (0, 0), (0, 0)),
+                                    ((0, 0), (0, bottom_pad), (0, right_pad)),
                                     mode='constant',
                                     constant_values=self.no_event_value)
         sample['right'] = np.lib.pad(sample['right'],
-                                     ((top_pad, 0), (0, right_pad), (0, 0), (0, 0), (0, 0)),
+                                     ((0, 0), (0, bottom_pad), (0, right_pad)),
                                      mode='constant',
                                      constant_values=self.no_event_value)
 
@@ -54,6 +54,19 @@ class Crop:
 class VerticalFlip:
     def __call__(self, sample):
         for location in ['left', 'right']:
-            sample[location] = np.copy(np.flipud(sample[location]))
+            sample[location] = np.copy(np.flipud(sample[location].transpose((1, 2, 0))))  # Note: x need to be dim0
+            sample[location] = sample[location].transpose(2, 0, 1)
+
+        return sample
+
+class HorizontalFlip:
+    def __call__(self, sample):
+        for location in ['left', 'right']:
+            try:
+                sample[location] = np.copy(np.fliplr(sample[location].transpose((1, 2, 0))))  # Note: y need to be dim1
+            except:
+                print("location: {}, data shape: {}".format(location, sample[location].shape))
+                raise
+            sample[location] = sample[location].transpose(2, 0, 1)
 
         return sample

@@ -14,16 +14,44 @@ class EventDataset(torch.utils.data.Dataset):
     }
     _LOCATION = ['left', 'right']
     NO_VALUE = None
+    lmdb_txn = None
+    lmdb_env = None
+    sequence_name = None
+    sequence_length = None
 
-    def __init__(self, root, num_of_event, stack_method, stack_size,
-                 num_of_future_event=0, use_preprocessed_image=False, **kwargs):
+    # image meta data
+    event_h = None
+    event_w = None
+    event_channels = None
+
+    def __init__(
+            self,
+            root,
+            num_of_event,
+            stack_method,
+            stack_size,
+            num_of_future_event=0,
+            use_preprocessed_image=False,
+            sequence_name='0',
+            sequence_length=0,
+            lmdb_txn=None,
+            **kwargs):
         self.root = root
         self.num_of_event = num_of_event
         self.stack_method = stack_method
         self.stack_size = stack_size
         self.num_of_future_event = num_of_future_event
         self.use_preprocessed_image = use_preprocessed_image
-        
+        self.event_h = constant.EVENT_HEIGHT
+        self.event_w = constant.EVENT_WIDTH
+        self.event_channels = constant.EVENT_CHANNELS
+        self.sequence_length = sequence_length
+
+        # moving events into lmdb
+        if lmdb_txn is not None:
+            self.lmdb_txn = lmdb_txn
+            self.sequence_name = sequence_name
+
         self.event_slicer = {}
         for location in self._LOCATION:
             event_path = os.path.join(root, location, 'events.h5')
@@ -35,23 +63,28 @@ class EventDataset(torch.utils.data.Dataset):
         self.NO_VALUE = self.stack_function.NO_VALUE
 
     def __len__(self):
-        return 0
+        return self.sequence_length
 
-    def __getitem__(self, timestamp):
-        if self.use_preprocessed_image:
-            data_define = 'sbn_%d_%s_%d_%d' % (self.num_of_event, self.stack_method, self.stack_size, self.num_of_future_event)
-            save_root = os.path.join(self.root, data_define)
-            os.makedirs(save_root, exist_ok=True)
-            save_path = os.path.join(save_root, '%ld.pt' % timestamp)
-            if os.path.exists(save_path):
-                event_data = torch.load(save_path)
-            else:
-                event_data = self._pre_load_event_data(timestamp=timestamp)
-                torch.save(event_data, save_path)
+    def __getitem__(self, x):
+        idx, timestamp = x
+        if self.lmdb_txn is not None:
+            code = '%03d_%06d_l' % (int(self.sequence_name.split('seq')[-1]), idx)
+            code = code.encode()
+            left_events = self.lmdb_txn.get(code)
+            left_events = np.frombuffer(left_events, dtype='int8')
+            left_events = left_events.reshape(constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS).transpose(2, 0, 1)
+            code = '%03d_%06d_r' % (int(self.sequence_name.split('seq')[-1]), idx)
+            code = code.encode()
+            right_events = self.lmdb_txn.get(code)
+            right_events = np.frombuffer(right_events, dtype='int8')
+            right_events = right_events.reshape(constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS).transpose(2, 0, 1)
+            event_data = {
+                'left': left_events,
+                'right': right_events
+            }
         else:
             event_data = self._pre_load_event_data(timestamp=timestamp)
-
-        event_data = self._post_load_event_data(event_data)
+            event_data = self._post_load_event_data(event_data)
         return event_data
 
     def _pre_load_event_data(self, timestamp):
@@ -79,7 +112,13 @@ class EventDataset(torch.utils.data.Dataset):
 
         return event_data
 
-    def collate_fn(self, batch):
-        batch = self.stack_function.collate_fn(batch)
+    @staticmethod
+    def collate_fn(batch):
+        batch = torch.utils.data._utils.collate.default_collate(batch)
 
         return batch
+
+    # def collate_fn(self, batch):
+    #     batch = self.stack_function.collate_fn(batch)
+
+    #     return batch
