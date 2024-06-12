@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 100
+TOTAL_EPOCH: 400
 METHOD: base
 DATASET:
   TRAIN:
@@ -12,7 +12,7 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 5000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -27,7 +27,7 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 5000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -35,19 +35,19 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   TEST:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: False
 MODEL:

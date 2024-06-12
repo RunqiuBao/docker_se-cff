@@ -1,10 +1,13 @@
 import os
 import shutil
+import numpy as np
 
 from datetime import datetime
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.utils
+import matplotlib.pyplot as plt
 
 from ..config import get_cfg
 
@@ -69,6 +72,20 @@ class ExpLogger:
         if self._tensor_log is None:
             self._tensor_log = SummaryWriter(self._save_root)
         self._tensor_log.add_scalar(tag=tag, scalar_value=scalar_value, global_step=global_step)
+
+    def add_image(self, imgTitle, img):
+        """
+        Args:
+            imgTitle: string.
+            img: h*w shape tensor.
+        """
+        if self._tensor_log is None:
+            self._tensor_log = SummaryWriter(self._save_root)
+        img_grid = torchvision.utils.make_grid(img)
+        npimg = img_grid.numpy()
+        npimg = np.transpose(npimg, (1, 2, 0))
+        plt.imshow(npimg)
+        self._tensor_log.add_image(imgTitle, img_grid)
 
     def save_args(self, args):
         args_log = ''

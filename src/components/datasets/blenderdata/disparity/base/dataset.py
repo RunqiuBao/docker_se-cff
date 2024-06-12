@@ -33,7 +33,7 @@ class DisparityDataset(torch.utils.data.Dataset):
         else:
             disparity = make_disparity(objdet_data, self.img_metadata, self.NO_VALUE)
             self.disparity_cache[idx]= disparity
-        disparity /= 256  # Note: normalize disparity as in event_stereo_matching.py.
+        # disparity /= 1000  # Note: normalize disparity as in event_stereo_matching.py.
         return disparity
 
     @staticmethod
@@ -52,7 +52,7 @@ def get_path_list(root):
 
 
 def load_disparity(root):
-    disparity = np.array(Image.open(root)).astype(np.float32) / 256.
+    disparity = np.array(Image.open(root)).astype(np.float32)
     return disparity
 
 def make_disparity(objdet_data, metadata, no_value):

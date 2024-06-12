@@ -34,6 +34,19 @@ class DLManager:
                                     local_rank=self.args.local_rank if self.args.is_distributed else None)
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
+        if self.args.resume_cpt is not None:
+            device = torch.device(f'cuda:{self.args.local_rank}')
+            checkpoint = torch.load(self.args.resume_cpt, map_location=device)
+            if self.logger:
+                self.logger.write('loading checkpoint {} ...'.format(self.args.resume_cpt))
+            self.args.start_epoch = checkpoint['epoch'] + 1
+            # FIXME: adding 'module.' to each key in model state dict
+            model_statedict = {}
+            for key, value in checkpoint['model'].items():
+                model_statedict['module.' + key] = value
+            self.model.load_state_dict(model_statedict)
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.scheduler.load_state_dict(checkpoint['scheduler'])
         
         self.get_train_loader = getattr(datasets, self.cfg.DATASET.TRAIN.NAME).get_dataloader
         self.get_valid_loader = getattr(datasets, self.cfg.DATASET.VALID.NAME).get_dataloader
@@ -57,13 +70,14 @@ class DLManager:
         profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
         # torch.Size([4, 1, 360, 576, 1, 10])
         flops, numParams = netWorkClass.ComputeCostProfile(profile_model, next(iter(train_loader))['event']['left'].shape)
-        self.logger.write('[Profile] model(%s) computation cost: gFlops %f | numParams %f M' % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6)))
+        if self.args.is_master:
+            self.logger.write('[Profile] model(%s) computation cost: gFlops %f | numParams %f M' % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6)))
         del profile_model
         
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
         smallestValidEPE = sys.float_info.max 
-        for epoch in range(0, self.cfg.TOTAL_EPOCH):
+        for epoch in range(self.args.start_epoch, self.cfg.TOTAL_EPOCH):
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
@@ -85,7 +99,8 @@ class DLManager:
             valid_log_dict = self.method.valid(model=self.model,
                                             data_loader=valid_loader,
                                             is_distributed=self.args.is_distributed,
-                                            world_size=self.args.world_size)
+                                            world_size=self.args.world_size,
+                                            logger=self.logger)
 
             if self.args.is_distributed:
                 valid_log_dict = self._gather_log(valid_log_dict)
@@ -214,6 +229,7 @@ class DLManager:
                 self.logger.save_checkpoint(checkpoint, '%d.pth' % epoch)
             if isSaveBest:
                 self.logger.save_checkpoint(checkpoint, 'best.pth')
+                self.logger.add_scalar('%s/%s' % (part, 'metric'), log_dict['BestIndex'].avg, epoch)
 
 
 def _prepare_model(model_cfg, is_distributed=False, local_rank=None):

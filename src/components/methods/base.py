@@ -2,6 +2,7 @@ import os.path
 import numpy
 import torch
 import torch.distributed as dist
+import cv2
 
 from tqdm import tqdm
 from collections import OrderedDict
@@ -21,10 +22,10 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
         ('RMSE', RootMeanSquareError(average_by='image', string_format='%6.3lf')),
     ])
 
-    pbar = tqdm(total=len(data_loader.dataset))
+    pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
 
-    for indexBatch in range(len(data_loader.dataset)):
+    for indexBatch in range(len(data_loader)):
         batch_data = batch_to_cuda(next(data_iter))
 
         mask = batch_data['disparity'] > 0
@@ -60,7 +61,7 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
 
 
 @torch.no_grad()
-def valid(model, data_loader, is_distributed=False, world_size=1):
+def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
     model.eval()
 
     log_dict = OrderedDict([
@@ -71,11 +72,9 @@ def valid(model, data_loader, is_distributed=False, world_size=1):
         ('RMSE', RootMeanSquareError(average_by='image', string_format='%6.3lf')),
     ])
 
-    pbar = tqdm(total=len(data_loader.dataset))
+    pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-    isSaveDebug = True
-    saveDebugPath = '/mnt/data/datasets/DualBeamSplitterDataset/debug/'
-    for indexBatch in range(len(data_loader.dataset)):
+    for indexBatch in range(len(data_loader)):
         batch_data = batch_to_cuda(next(data_iter))
 
         mask = batch_data['disparity'] > 0
@@ -85,10 +84,14 @@ def valid(model, data_loader, is_distributed=False, world_size=1):
         pred, loss = model(left_event=batch_data['event']['left'],
                            right_event=batch_data['event']['right'],
                            gt_disparity=batch_data['disparity'])
-        if isSaveDebug:
-            numpy.save(os.path.join(saveDebugPath, '{}_ev.npy'.format(indexBatch)), batch_data['event']['left'].detach().cpu().numpy())
-            numpy.save(os.path.join(saveDebugPath, '{}_gt.npy'.format(indexBatch)), batch_data['disparity'].detach().cpu().numpy())
-            numpy.save(os.path.join(saveDebugPath, '{}.npy'.format(indexBatch)), pred.detach().cpu().numpy())
+
+        if logger is not None and indexBatch == 0:
+            logger.add_image('left event input', batch_data['event']['left'][0, 0, :, :, 0, 0].detach().cpu())
+            gt_disparity = batch_data['disparity'].detach().cpu()[0].numpy()
+            pred_one = pred.detach().cpu()[0].numpy()
+            if gt_disparity.shape == pred_one.shape:
+                blended = cv2.addWeighted(pred_one, 0.5, gt_disparity, 0.5, 0.0)
+                logger.add_image('disparity gt with prediction', torch.from_numpy(blended / 255))
 
         EPE_thisBatch = log_dict['EPE'].update(pred, batch_data['disparity'], mask)
         log_dict['BestIndex'].update(EPE_thisBatch, batch_data['disparity'].size(0))
@@ -107,7 +110,7 @@ def test(model, data_loader):
     model.eval()
     pred_list = []
 
-    pbar = tqdm(total=len(data_loader.dataset))
+    pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))

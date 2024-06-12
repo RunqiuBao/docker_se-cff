@@ -12,6 +12,7 @@ parser.add_argument('--save_root', type=str, default='/root/code/save')
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--num_workers', type=int, default=4)
 parser.add_argument('--save_term', type=int, default=25)
+parser.add_argument('--resume_cpt', type=str, default=None)
 
 args = parser.parse_args()
 
@@ -19,6 +20,7 @@ args.is_distributed = False
 args.is_master = True
 args.world_size = 1
 args.local_rank = 0
+args.start_epoch = 0
 
 assert os.path.isfile(args.config_path)
 assert os.path.isdir(args.data_root)
