@@ -1,0 +1,78 @@
+TOTAL_EPOCH: 400
+METHOD: base
+DATASET:
+  TRAIN:
+    NAME: blenderdata
+    PARAMS:
+      split: train
+      sampling_ratio: 1
+      crop_height: 720
+      crop_width: 1280
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 350000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  VALID:
+    NAME: blenderdata
+    PARAMS:
+      split: valid
+      sampling_ratio: 1
+      crop_height: 720
+      crop_width: 1280
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 350000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+DATALOADER:
+  TRAIN:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  VALID:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  TEST:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 4
+      shuffle: False
+      drop_last: False
+MODEL:
+  NAME: EventStereoMatchingNetwork
+  PARAMS:
+    concentration_net:
+      PARAMS:
+        in_channels: 10
+        attention_method: soft
+        base_channels: 32
+    disparity_estimator:
+      PARAMS:
+        in_channels: 1
+        max_disp: 192
+        refine_channels: 1
+OPTIMIZER:
+  NAME: Adam
+  PARAMS:
+    lr: 0.0005
+    weight_decay: 0.0001
+SCHEDULER:
+  NAME: CosineAnnealingWarmupRestarts
+  PARAMS:
+    cycle_mult: 1.0
+    first_cycle_steps: 100
+    gamma: 1.0
+    lr_ratio: 0.0001
+    warmup_steps: 3

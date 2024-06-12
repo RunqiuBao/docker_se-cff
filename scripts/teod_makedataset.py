@@ -136,8 +136,8 @@ def main(args):
                 code = code.encode()
                 lmdb_writer.write(code, numpy.array([ts], dtype='int'))
 
-                leftView = ConvertEventsToImage(leftEvents[..., -3])
-                rightView = ConvertEventsToImage(rightEvents[..., -3])
+                leftView = ConvertEventsToImage(leftEvents[..., 0])
+                rightView = ConvertEventsToImage(rightEvents[..., 0])
                 leftViewPath = os.path.join(args.view4label_dir, '{}_left'.format(args.seq_idx), '{}.png'.format(str(ts).zfill(8)))
                 rightViewPath = os.path.join(args.view4label_dir, '{}_right'.format(args.seq_idx), '{}.png'.format(str(ts).zfill(8)))
                 cv2.imwrite(leftViewPath, leftView)
