@@ -9,11 +9,8 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
     path_to_labels = None  # path to the labels folder
     num_label_files = None
 
-    def __init__(
-        self,
-        root
-    ):
-        self.path_to_labels = os.path.join(root, 'labels')
+    def __init__(self, root):
+        self.path_to_labels = os.path.join(root, "labels")
         label_files_list = glob(os.path.join(self.path_to_labels, "*.json"))
         self.num_label_files = len(label_files_list)
         pass
@@ -22,12 +19,12 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         return self.num_label_files
 
     def __getitem__(self, timestamp):
-        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(8) + '.json')
+        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(8) + ".json")
         try:
-            with open(file_path, 'r') as file:
+            with open(file_path, "r") as file:
                 labels_data = json.load(file)
         except:
-            raise FileNotFoundError(f'The label file {file_path} does not exist.')
+            raise FileNotFoundError(f"The label file {file_path} does not exist.")
 
         labels_data = self.FormatLabels(labels_data)
         return labels_data
@@ -51,25 +48,45 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         """
         bboxes = []
         labels = []
-        for oneInstance in labels_data['shapes']:
-            labels.append(numpy.array([int(oneInstance['label'])]))
-            x_keypt2 = (oneInstance['keypt2'][0][0] + oneInstance['keypt2'][1][0]) / 2
-            y_keypt2 = (oneInstance['keypt2'][0][1] + oneInstance['keypt2'][1][1]) / 2
-            bboxes.append(numpy.array([
-                oneInstance['leftPoints'][0][0],
-                oneInstance['leftPoints'][0][1],
-                oneInstance['leftPoints'][1][0],
-                oneInstance['leftPoints'][1][1],
-                oneInstance['rightPoints'][0][0],
-                oneInstance['rightPoints'][1][0],
-                (oneInstance['keypt1'][0] - oneInstance['leftPoints'][0][0]) / (oneInstance['leftPoints'][1][0] - oneInstance['leftPoints'][0][0]),
-                (oneInstance['keypt1'][1] - oneInstance['leftPoints'][0][1]) / (oneInstance['leftPoints'][1][1] - oneInstance['leftPoints'][0][1]),
-                (x_keypt2 - oneInstance['leftPoints'][0][0]) / (oneInstance['leftPoints'][1][0] - oneInstance['leftPoints'][0][0]),
-                (y_keypt2 - oneInstance['leftPoints'][0][1]) / (oneInstance['leftPoints'][1][1] - oneInstance['leftPoints'][0][1])
-            ])[numpy.newaxis, :])
+        for oneInstance in labels_data["shapes"]:
+            labels.append(numpy.array([int(oneInstance["label"])]))
+            x_keypt2 = (oneInstance["keypt2"][0][0] + oneInstance["keypt2"][1][0]) / 2
+            y_keypt2 = (oneInstance["keypt2"][0][1] + oneInstance["keypt2"][1][1]) / 2
+            bboxes.append(
+                numpy.array(
+                    [
+                        oneInstance["leftPoints"][0][0],
+                        oneInstance["leftPoints"][0][1],
+                        oneInstance["leftPoints"][1][0],
+                        oneInstance["leftPoints"][1][1],
+                        oneInstance["rightPoints"][0][0],
+                        oneInstance["rightPoints"][1][0],
+                        (oneInstance["keypt1"][0] - oneInstance["leftPoints"][0][0])
+                        / (
+                            oneInstance["leftPoints"][1][0]
+                            - oneInstance["leftPoints"][0][0]
+                        ),
+                        (oneInstance["keypt1"][1] - oneInstance["leftPoints"][0][1])
+                        / (
+                            oneInstance["leftPoints"][1][1]
+                            - oneInstance["leftPoints"][0][1]
+                        ),
+                        (x_keypt2 - oneInstance["leftPoints"][0][0])
+                        / (
+                            oneInstance["leftPoints"][1][0]
+                            - oneInstance["leftPoints"][0][0]
+                        ),
+                        (y_keypt2 - oneInstance["leftPoints"][0][1])
+                        / (
+                            oneInstance["leftPoints"][1][1]
+                            - oneInstance["leftPoints"][0][1]
+                        ),
+                    ]
+                )[numpy.newaxis, :]
+            )
         return {
-            'bboxes': numpy.concatenate(bboxes, axis=0),
-            'labels': numpy.concatenate(labels)
+            "bboxes": numpy.concatenate(bboxes, axis=0),
+            "labels": numpy.concatenate(labels),
         }
 
     def collate_fn(self, batch):

@@ -32,7 +32,7 @@ class DisparityDataset(torch.utils.data.Dataset):
             disparity = self.disparity_cache[idx]
         else:
             disparity = make_disparity(objdet_data, self.img_metadata, self.NO_VALUE)
-            self.disparity_cache[idx]= disparity
+            self.disparity_cache[idx] = disparity
         # disparity /= 1000  # Note: normalize disparity as in event_stereo_matching.py.
         return disparity
 
@@ -44,7 +44,7 @@ class DisparityDataset(torch.utils.data.Dataset):
 
 
 def load_timestamp(root):
-    return np.loadtxt(root, dtype='int64')
+    return np.loadtxt(root, dtype="int64")
 
 
 def get_path_list(root):
@@ -55,26 +55,23 @@ def load_disparity(root):
     disparity = np.array(Image.open(root)).astype(np.float32)
     return disparity
 
+
 def make_disparity(objdet_data, metadata, no_value):
     """
     method:
-        For all the left image bboxes, create approximate disparity inside the 
+        For all the left image bboxes, create approximate disparity inside the
         triangle formed by keypt1 and bottom_left corner and bottom_right corner.
         For other areas, set to no_value.
     """
-    disparity = np.full((metadata['h'], metadata['w']), no_value, dtype='float32')
-    for bbox in objdet_data['bboxes']:
-        oneInstanceMask = np.zeros_like(disparity, dtype='uint8')
+    disparity = np.full((metadata["h"], metadata["w"]), no_value, dtype="float32")
+    for bbox in objdet_data["bboxes"]:
+        oneInstanceMask = np.zeros_like(disparity, dtype="uint8")
         x_keypt1 = bbox[6] * (bbox[2] - bbox[0]) + bbox[0]
         y_keypt1 = bbox[7] * (bbox[3] - bbox[1]) + bbox[1]
-        triangle = np.array([
-            [x_keypt1, y_keypt1],
-            [bbox[2], bbox[3]],
-            [bbox[0], bbox[3]]
-        ], dtype='int')
+        triangle = np.array(
+            [[x_keypt1, y_keypt1], [bbox[2], bbox[3]], [bbox[0], bbox[3]]], dtype="int"
+        )
         cv2.fillPoly(oneInstanceMask, pts=[triangle], color=(1,))
         disparityValue = (bbox[2] + bbox[0]) / 2 - (bbox[5] + bbox[4]) / 2
-        disparity[oneInstanceMask.view('bool')] = disparityValue
+        disparity[oneInstanceMask.view("bool")] = disparityValue
     return disparity
-
-

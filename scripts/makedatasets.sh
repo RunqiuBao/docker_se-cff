@@ -8,8 +8,8 @@
 
 python3 teod_makedataset.py \
     --data_root /home/runqiu/datasets/blender-vibration \
-    --dataset_type valid \
-    --lmdb_dir /home/runqiu/datasets/blender-vibration/valid/lmdb/ \
-    --view4label_dir /home/runqiu/datasets/blender-vibration/valid/view4label/ \
+    --dataset_type train \
+    --lmdb_dir /home/runqiu/datasets/blender-vibration/train/lmdb/ \
+    --view4label_dir /home/runqiu/datasets/blender-vibration/train/view4label/ \
     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen.yaml \
     --seq_idx 0 

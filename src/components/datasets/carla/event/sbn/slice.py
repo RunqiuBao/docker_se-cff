@@ -1,7 +1,7 @@
 import math
 import h5py
 import os.path
-import hdf5plugin # noqa: F401
+import hdf5plugin  # noqa: F401
 from typing import Dict, Tuple
 from numba import jit
 
@@ -13,26 +13,34 @@ from .constant import EVENT_HEIGHT, EVENT_WIDTH
 
 
 class EventSlicer(torch.utils.data.Dataset):
-    def __init__(self, event_root, rectify_map_root, num_of_event, num_of_future_event=0):
+    def __init__(
+        self, event_root, rectify_map_root, num_of_event, num_of_future_event=0
+    ):
         self.event_root = event_root
         self.rectify_map_root = rectify_map_root
         self.num_of_event = num_of_event
         self.num_of_future_event = num_of_future_event
 
-        with h5py.File(event_root, 'r') as h5f:
-            self.ms_to_idx = np.asarray(h5f['ms_to_idx'], dtype='int64').squeeze()         
-            self.t_offset = int(h5f['t_offset'][()]) if h5f['t_offset'][()].size > 0 else 0
-            self.t_final = int(h5f['events/t'][-1]) + self.t_offset
+        with h5py.File(event_root, "r") as h5f:
+            self.ms_to_idx = np.asarray(h5f["ms_to_idx"], dtype="int64").squeeze()
+            self.t_offset = (
+                int(h5f["t_offset"][()]) if h5f["t_offset"][()].size > 0 else 0
+            )
+            self.t_final = int(h5f["events/t"][-1]) + self.t_offset
             try:
-                self.min_time = int(h5f['events/t'][num_of_event]) + self.t_offset
+                self.min_time = int(h5f["events/t"][num_of_event]) + self.t_offset
             except:
-                from IPython import embed; embed()
-            self.max_time = int(h5f['events/t'][-1 - num_of_future_event]) + self.t_offset
-            self.total_event = len(h5f['events/t'])
-            
+                from IPython import embed
+
+                embed()
+            self.max_time = (
+                int(h5f["events/t"][-1 - num_of_future_event]) + self.t_offset
+            )
+            self.total_event = len(h5f["events/t"])
+
         if os.path.exists(rectify_map_root):
-            with h5py.File(rectify_map_root, 'r') as h5_rect:
-                self.rectify_map = h5_rect['rectify_map'][()]
+            with h5py.File(rectify_map_root, "r") as h5_rect:
+                self.rectify_map = h5_rect["rectify_map"][()]
         else:
             self.rectify_map = None
 
@@ -46,7 +54,9 @@ class EventSlicer(torch.utils.data.Dataset):
 
         return rectified_events
 
-    def get_events_base_number(self, number_of_event: int,  t_end_us: int) -> Dict[str, np.ndarray]:
+    def get_events_base_number(
+        self, number_of_event: int, t_end_us: int
+    ) -> Dict[str, np.ndarray]:
         """Get events (p, x, y, t) within the specified time window
         Parameters
         ----------
@@ -70,29 +80,44 @@ class EventSlicer(torch.utils.data.Dataset):
         assert t_start_ms_idx is not None or t_end_ms_idx is not None
 
         events = dict()
-        with h5py.File(self.event_root, 'r') as h5f:            
-            time_array_conservative = np.asarray(h5f['events/{}'.format('t')][t_start_ms_idx:t_end_ms_idx]).squeeze()
+        with h5py.File(self.event_root, "r") as h5f:
+            time_array_conservative = np.asarray(
+                h5f["events/{}".format("t")][t_start_ms_idx:t_end_ms_idx]
+            ).squeeze()
             if isinstance(time_array_conservative, int):
                 time_array_conservative = [time_array_conservative]
             try:
                 if len(time_array_conservative) == 0:
-                    print("events t: \n{}".format(np.asarray(h5f['events/{}'.format('t')])))
+                    print(
+                        "events t: \n{}".format(
+                            np.asarray(h5f["events/{}".format("t")])
+                        )
+                    )
                     print("t_start_us, t_end_us: {}, {}".format(t_start_us, t_end_us))
-                    print("time_array_conservative: \n{}".format(time_array_conservative))
+                    print(
+                        "time_array_conservative: \n{}".format(time_array_conservative)
+                    )
             except:
                 print("time_array_conservative: \n{}".format(time_array_conservative))
-        _, idx_end_offset = self.get_time_indices_offsets(time_array_conservative, t_start_us, t_end_us)
+        _, idx_end_offset = self.get_time_indices_offsets(
+            time_array_conservative, t_start_us, t_end_us
+        )
         t_end_us_idx = t_start_ms_idx + idx_end_offset
         # Again add t_offset to get gps time
 
         t_start_us_idx = max(0, t_end_us_idx - number_of_event)
         t_end_us_idx = min(self.total_event, t_end_us_idx + self.num_of_future_event)
 
-        with h5py.File(self.event_root, 'r') as h5f:
-            events['t'] = np.asarray(h5f['events/{}'.format('t')][t_start_us_idx:t_end_us_idx]) + self.t_offset
-            for dset_str in ['p', 'x', 'y']:
-                events[dset_str] = np.asarray(h5f['events/{}'.format(dset_str)][t_start_us_idx:t_end_us_idx])
-                assert events[dset_str].size == events['t'].size
+        with h5py.File(self.event_root, "r") as h5f:
+            events["t"] = (
+                np.asarray(h5f["events/{}".format("t")][t_start_us_idx:t_end_us_idx])
+                + self.t_offset
+            )
+            for dset_str in ["p", "x", "y"]:
+                events[dset_str] = np.asarray(
+                    h5f["events/{}".format(dset_str)][t_start_us_idx:t_end_us_idx]
+                )
+                assert events[dset_str].size == events["t"].size
         return events
 
     @staticmethod
@@ -117,9 +142,8 @@ class EventSlicer(torch.utils.data.Dataset):
     @staticmethod
     @jit(nopython=True)
     def get_time_indices_offsets(
-            time_array: np.ndarray,
-            time_start_us: int,
-            time_end_us: int) -> Tuple[int, int]:
+        time_array: np.ndarray, time_start_us: int, time_end_us: int
+    ) -> Tuple[int, int]:
         """Compute index offset of start and end timestamps in microseconds
         Parameters
         ----------
@@ -137,7 +161,7 @@ class EventSlicer(torch.utils.data.Dataset):
         time_array[idx_end - 1] < time_end_us
         this means that
         time_start_us <= time_array[idx_start:idx_end] < time_end_us
-        """        
+        """
 
         if time_array.ndim != 1:
             return 0, 0
@@ -183,18 +207,23 @@ class EventSlicer(torch.utils.data.Dataset):
 
     def rectify_events(self, event_data):
         if self.rectify_map is None:
-            x_rect = event_data['x']
-            y_rect = event_data['y']
-        else:    
-            xy_rect = self.rectify_map[event_data['y'], event_data['x']]
+            x_rect = event_data["x"]
+            y_rect = event_data["y"]
+        else:
+            xy_rect = self.rectify_map[event_data["y"], event_data["x"]]
             x_rect = xy_rect[:, 0]
             y_rect = xy_rect[:, 1]
 
-        mask = (0 <= x_rect) & (x_rect < EVENT_WIDTH) & (0 <= y_rect) & (y_rect < EVENT_HEIGHT)
+        mask = (
+            (0 <= x_rect)
+            & (x_rect < EVENT_WIDTH)
+            & (0 <= y_rect)
+            & (y_rect < EVENT_HEIGHT)
+        )
 
         return {
-            'x': x_rect[mask],
-            'y': y_rect[mask],
-            't': event_data['t'][mask],
-            'p': event_data['p'][mask],
+            "x": x_rect[mask],
+            "y": y_rect[mask],
+            "t": event_data["t"][mask],
+            "p": event_data["p"][mask],
         }

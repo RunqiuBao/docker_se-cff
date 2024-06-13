@@ -15,7 +15,7 @@ from utils.metrics import SummationMeter, Metric
 
 
 class DLManager:
-    def __init__(self, args, cfg=None):        
+    def __init__(self, args, cfg=None):
         self.args = args
         self.cfg = cfg
         self.logger = ExpLogger(save_root=args.save_root) if args.is_master else None
@@ -29,137 +29,175 @@ class DLManager:
         assert cfg is not None
         self.cfg = cfg
 
-        self.model = _prepare_model(self.cfg.MODEL,
-                                    is_distributed=self.args.is_distributed,
-                                    local_rank=self.args.local_rank if self.args.is_distributed else None)
+        self.model = _prepare_model(
+            self.cfg.MODEL,
+            is_distributed=self.args.is_distributed,
+            local_rank=self.args.local_rank if self.args.is_distributed else None,
+            logger=self.logger,
+        )
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
         if self.args.resume_cpt is not None:
-            device = torch.device(f'cuda:{self.args.local_rank}')
+            device = torch.device(f"cuda:{self.args.local_rank}")
             checkpoint = torch.load(self.args.resume_cpt, map_location=device)
             if self.logger:
-                self.logger.write('loading checkpoint {} ...'.format(self.args.resume_cpt))
-            self.args.start_epoch = checkpoint['epoch'] + 1
+                self.logger.write(
+                    "loading checkpoint {} ...".format(self.args.resume_cpt)
+                )
+            self.args.start_epoch = checkpoint["epoch"] + 1
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = {}
-            for key, value in checkpoint['model'].items():
-                model_statedict['module.' + key] = value
+            for key, value in checkpoint["model"].items():
+                model_statedict["module." + key] = value
             self.model.load_state_dict(model_statedict)
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
-            self.scheduler.load_state_dict(checkpoint['scheduler'])
-        
-        self.get_train_loader = getattr(datasets, self.cfg.DATASET.TRAIN.NAME).get_dataloader
-        self.get_valid_loader = getattr(datasets, self.cfg.DATASET.VALID.NAME).get_dataloader
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+
+        self.get_train_loader = getattr(
+            datasets, self.cfg.DATASET.TRAIN.NAME
+        ).get_dataloader
+        self.get_valid_loader = getattr(
+            datasets, self.cfg.DATASET.VALID.NAME
+        ).get_dataloader
         # self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
 
         self.method = getattr(methods, self.cfg.METHOD)
-    
+
     def trainAndValid(self):
         if self.args.is_master:
             self._log_before_train()
-        train_loader = self.get_train_loader(args=self.args,
-                                             dataset_cfg=self.cfg.DATASET.TRAIN,
-                                             dataloader_cfg=self.cfg.DATALOADER.TRAIN,
-                                             is_distributed=self.args.is_distributed)
-        valid_loader = self.get_valid_loader(args=self.args,
-                                             dataset_cfg=self.cfg.DATASET.VALID,
-                                             dataloader_cfg=self.cfg.DATALOADER.VALID,
-                                             is_distributed=self.args.is_distributed)
-	# profiling the network
+        train_loader = self.get_train_loader(
+            args=self.args,
+            dataset_cfg=self.cfg.DATASET.TRAIN,
+            dataloader_cfg=self.cfg.DATALOADER.TRAIN,
+            is_distributed=self.args.is_distributed,
+        )
+        valid_loader = self.get_valid_loader(
+            args=self.args,
+            dataset_cfg=self.cfg.DATASET.VALID,
+            dataloader_cfg=self.cfg.DATALOADER.VALID,
+            is_distributed=self.args.is_distributed,
+        )
+        # profiling the network
         netWorkClass = getattr(models, self.cfg.MODEL.NAME)
         profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
         # torch.Size([4, 1, 360, 576, 1, 10])
-        flops, numParams = netWorkClass.ComputeCostProfile(profile_model, next(iter(train_loader))['event']['left'].shape)
+        flops, numParams = netWorkClass.ComputeCostProfile(
+            profile_model, next(iter(train_loader))["event"]["left"].shape
+        )
         if self.args.is_master:
-            self.logger.write('[Profile] model(%s) computation cost: gFlops %f | numParams %f M' % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6)))
+            self.logger.write(
+                "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+                % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6))
+            )
         del profile_model
-        
+
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
-        smallestValidEPE = sys.float_info.max 
+        smallestValidEPE = sys.float_info.max
         for epoch in range(self.args.start_epoch, self.cfg.TOTAL_EPOCH):
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
-            train_log_dict = self.method.train(model=self.model,
-                                                data_loader=train_loader,
-                                                optimizer=self.optimizer,
-                                                is_distributed=self.args.is_distributed,
-                                                world_size=self.args.world_size)
+            train_log_dict = self.method.train(
+                model=self.model,
+                data_loader=train_loader,
+                optimizer=self.optimizer,
+                is_distributed=self.args.is_distributed,
+                world_size=self.args.world_size,
+            )
 
             self.scheduler.step()
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:
-                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, 'train', isSaveFinal = False)
+                self._log_after_epoch(
+                    epoch + 1, time_checker, train_log_dict, "train", isSaveFinal=False
+                )
 
             if self.args.is_distributed:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
-            valid_log_dict = self.method.valid(model=self.model,
-                                            data_loader=valid_loader,
-                                            is_distributed=self.args.is_distributed,
-                                            world_size=self.args.world_size,
-                                            logger=self.logger)
+            valid_log_dict = self.method.valid(
+                model=self.model,
+                data_loader=valid_loader,
+                is_distributed=self.args.is_distributed,
+                world_size=self.args.world_size,
+                logger=self.logger,
+            )
 
             if self.args.is_distributed:
                 valid_log_dict = self._gather_log(valid_log_dict)
             if self.args.is_master:
-                self._log_after_epoch(epoch + 1, time_checker, valid_log_dict, 'valid', isSaveBest = valid_log_dict['BestIndex'].avg < smallestValidEPE)
+                self._log_after_epoch(
+                    epoch + 1,
+                    time_checker,
+                    valid_log_dict,
+                    "valid",
+                    isSaveBest=valid_log_dict["BestIndex"].avg < smallestValidEPE,
+                )
 
-            if valid_log_dict['BestIndex'].avg < smallestValidEPE:
-                smallestValidEPE = valid_log_dict['BestIndex'].avg 
+            if valid_log_dict["BestIndex"].avg < smallestValidEPE:
+                smallestValidEPE = valid_log_dict["BestIndex"].avg
 
             self.current_epoch += 1
 
-
-    def train(self):        
+    def train(self):
         if self.args.is_master:
             self._log_before_train()
-        train_loader = self.get_train_loader(args=self.args,
-                                             dataset_cfg=self.cfg.DATASET.TRAIN,
-                                             dataloader_cfg=self.cfg.DATALOADER.TRAIN,
-                                             is_distributed=self.args.is_distributed)
+        train_loader = self.get_train_loader(
+            args=self.args,
+            dataset_cfg=self.cfg.DATASET.TRAIN,
+            dataloader_cfg=self.cfg.DATALOADER.TRAIN,
+            is_distributed=self.args.is_distributed,
+        )
 
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
-        time_checker.start()        
+        time_checker.start()
         for epoch in range(self.current_epoch, self.cfg.TOTAL_EPOCH):
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
-            train_log_dict = self.method.train(model=self.model,
-                                               data_loader=train_loader,
-                                               optimizer=self.optimizer,
-                                               is_distributed=self.args.is_distributed,
-                                               world_size=self.args.world_size)
+            train_log_dict = self.method.train(
+                model=self.model,
+                data_loader=train_loader,
+                optimizer=self.optimizer,
+                is_distributed=self.args.is_distributed,
+                world_size=self.args.world_size,
+            )
 
             self.scheduler.step()
             self.current_epoch += 1
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:
-                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, 'train')
+                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, "train")
 
-    def test(self):        
-        if self.args.is_master:            
-            test_loader = self.get_test_loader(args=self.args,
-                                               dataset_cfg=self.cfg.DATASET.TEST,
-                                               dataloader_cfg=self.cfg.DATALOADER.TEST)
+    def test(self):
+        if self.args.is_master:
+            test_loader = self.get_test_loader(
+                args=self.args,
+                dataset_cfg=self.cfg.DATASET.TEST,
+                dataloader_cfg=self.cfg.DATALOADER.TEST,
+            )
 
             self.logger.test()
 
             for sequence_dataloader in test_loader:
                 sequence_name = sequence_dataloader.dataset.sequence_name
-                sequence_pred_list = self.method.test(model=self.model,
-                                                      data_loader=sequence_dataloader)
+                sequence_pred_list = self.method.test(
+                    model=self.model, data_loader=sequence_dataloader
+                )
 
                 for cur_pred_dict in sequence_pred_list:
-                    file_name = cur_pred_dict.pop('file_name')
+                    file_name = cur_pred_dict.pop("file_name")
                     for key in cur_pred_dict:
-                        self.logger.save_visualize(image=cur_pred_dict[key],
-                                                   visual_type=key,
-                                                   sequence_name=os.path.join('test', sequence_name),
-                                                   image_name=file_name)
+                        self.logger.save_visualize(
+                            image=cur_pred_dict[key],
+                            visual_type=key,
+                            sequence_name=os.path.join("test", sequence_name),
+                            image_name=file_name,
+                        )
 
     def save(self, name):
         checkpoint = self._make_checkpoint()
@@ -167,18 +205,18 @@ class DLManager:
 
     def load(self, name):
         checkpoint = self.logger.load_checkpoint(name)
-        self._init_from_cfg(checkpoint['cfg'])
+        self._init_from_cfg(checkpoint["cfg"])
 
-        self.model.module.load_state_dict(checkpoint['model'])
+        self.model.module.load_state_dict(checkpoint["model"])
 
     def _make_checkpoint(self):
         checkpoint = {
-            'epoch': self.current_epoch,
-            'args': self.args,
-            'cfg': self.cfg,
-            'model': self.model.module.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'scheduler': self.scheduler.state_dict(),
+            "epoch": self.current_epoch,
+            "args": self.args,
+            "cfg": self.cfg,
+            "model": self.model.module.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
         }
 
         return checkpoint
@@ -188,7 +226,9 @@ class DLManager:
             return None
 
         for key in log_dict.keys():
-            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric):
+            if isinstance(log_dict[key], SummationMeter) or isinstance(
+                log_dict[key], Metric
+            ):
                 log_dict[key].all_gather(self.args.world_size)
 
         return log_dict
@@ -201,22 +241,30 @@ class DLManager:
         self.logger.log_optimizer(self.optimizer)
         self.logger.save_src(os.path.dirname(os.path.abspath(__file__)))
 
-    def _log_after_epoch(self, epoch, time_checker, log_dict, part, isSaveFinal=True, isSaveBest=False):
+    def _log_after_epoch(
+        self, epoch, time_checker, log_dict, part, isSaveFinal=True, isSaveBest=False
+    ):
         # Calculate Time
         time_checker.update(epoch)
 
         # Log Time
-        self.logger.write('Epoch: %d | time per epoch: %s | eta: %s' %
-                          (epoch, time_checker.time_per_epoch, time_checker.eta))
+        self.logger.write(
+            "Epoch: %d | time per epoch: %s | eta: %s"
+            % (epoch, time_checker.time_per_epoch, time_checker.eta)
+        )
 
         # Log Learning Process
-        log = '%5s' % part
+        log = "%5s" % part
         for key in log_dict.keys():
-            log += ' | %s: %s' % (key, str(log_dict[key]))
-            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric):
-                self.logger.add_scalar('%s/%s' % (part, key), log_dict[key].value, epoch)
+            log += " | %s: %s" % (key, str(log_dict[key]))
+            if isinstance(log_dict[key], SummationMeter) or isinstance(
+                log_dict[key], Metric
+            ):
+                self.logger.add_scalar(
+                    "%s/%s" % (part, key), log_dict[key].value, epoch
+                )
             else:
-                self.logger.add_scalar('%s/%s' % (part, key), log_dict[key], epoch)
+                self.logger.add_scalar("%s/%s" % (part, key), log_dict[key], epoch)
         self.logger.write(log=log)
 
         if isSaveFinal:
@@ -224,19 +272,21 @@ class DLManager:
             checkpoint = self._make_checkpoint()
 
             # Save Checkpoint
-            self.logger.save_checkpoint(checkpoint, 'final.pth')
+            self.logger.save_checkpoint(checkpoint, "final.pth")
             if epoch % self.args.save_term == 0:
-                self.logger.save_checkpoint(checkpoint, '%d.pth' % epoch)
+                self.logger.save_checkpoint(checkpoint, "%d.pth" % epoch)
             if isSaveBest:
-                self.logger.save_checkpoint(checkpoint, 'best.pth')
-                self.logger.add_scalar('%s/%s' % (part, 'metric'), log_dict['BestIndex'].avg, epoch)
+                self.logger.save_checkpoint(checkpoint, "best.pth")
+                self.logger.add_scalar(
+                    "%s/%s" % (part, "metric"), log_dict["BestIndex"].avg, epoch
+                )
 
 
-def _prepare_model(model_cfg, is_distributed=False, local_rank=None):
+def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None):
     name = model_cfg.NAME
     parameters = model_cfg.PARAMS
 
-    model = getattr(models, name)(**parameters)
+    model = getattr(models, name)(logger=logger, **parameters)
 
     if is_distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
@@ -263,8 +313,9 @@ def _prepare_scheduler(scheduler_cfg, optimizer):
     name = scheduler_cfg.NAME
     parameters = scheduler_cfg.PARAMS
 
-    if name == 'CosineAnnealingWarmupRestarts':
+    if name == "CosineAnnealingWarmupRestarts":
         from utils.scheduler import CosineAnnealingWarmupRestarts
+
         scheduler = CosineAnnealingWarmupRestarts(optimizer, **parameters)
     else:
         scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)

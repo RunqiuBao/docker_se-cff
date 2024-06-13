@@ -2,12 +2,8 @@ import torch.utils.data
 
 
 class DisparityDataset(torch.utils.data.Dataset):
-    _PATH_DICT = {
-        'timestamp': 'timestamps.txt',
-        'event': 'event',
-        'image': 'image'
-    }
-    _DOMAIN = ['event', 'image']
+    _PATH_DICT = {"timestamp": "timestamps.txt", "event": "event", "image": "image"}
+    _DOMAIN = ["event", "image"]
     NO_VALUE = 0.0
 
     def __init__(self, root):

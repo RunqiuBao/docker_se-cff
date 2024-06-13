@@ -3,9 +3,7 @@ from typing import Union
 import torch.nn as nn
 
 
-def freeze_module_grads(
-        module: Union(nn.Module, nn.ModuleList)
-    ):
+def freeze_module_grads(module: Union(nn.Module, nn.ModuleList)):
     """Freeze the gradients of a module or modules in a module list."""
     if isinstance(module, nn.ModuleList):
         for m in module:
@@ -36,4 +34,3 @@ def multi_apply(func, *args, **kwargs):
     pfunc = partial(func, **kwargs) if kwargs else func
     map_results = map(pfunc, *args)
     return tuple(map(list, zip(*map_results)))
-

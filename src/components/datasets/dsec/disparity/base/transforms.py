@@ -22,10 +22,12 @@ class Padding:
 
         assert top_pad >= 0 and right_pad >= 0
 
-        sample = np.lib.pad(sample,
-                            ((top_pad, 0), (0, right_pad)),
-                            mode='constant',
-                            constant_values=self.no_disparity_value)
+        sample = np.lib.pad(
+            sample,
+            ((top_pad, 0), (0, right_pad)),
+            mode="constant",
+            constant_values=self.no_disparity_value,
+        )
 
         return sample
 

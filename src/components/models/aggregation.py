@@ -5,11 +5,16 @@ from .deform import SimpleBottleneck, DeformSimpleBottleneck
 
 
 class AdaptiveAggregationModule(nn.Module):
-    def __init__(self, num_scales, num_output_branches, max_disp,
-                 num_blocks=1,
-                 simple_bottleneck=False,
-                 deformable_groups=2,
-                 mdconv_dilation=2):
+    def __init__(
+        self,
+        num_scales,
+        num_output_branches,
+        max_disp,
+        num_blocks=1,
+        simple_bottleneck=False,
+        deformable_groups=2,
+        mdconv_dilation=2,
+    ):
         super(AdaptiveAggregationModule, self).__init__()
 
         self.num_scales = num_scales
@@ -21,15 +26,21 @@ class AdaptiveAggregationModule(nn.Module):
 
         # Adaptive intra-scale aggregation
         for i in range(self.num_scales):
-            num_candidates = max_disp // (2 ** i)
+            num_candidates = max_disp // (2**i)
             branch = nn.ModuleList()
             for j in range(num_blocks):
                 if simple_bottleneck:
                     branch.append(SimpleBottleneck(num_candidates, num_candidates))
                 else:
-                    branch.append(DeformSimpleBottleneck(num_candidates, num_candidates, modulation=True,
-                                                         mdconv_dilation=mdconv_dilation,
-                                                         deformable_groups=deformable_groups))
+                    branch.append(
+                        DeformSimpleBottleneck(
+                            num_candidates,
+                            num_candidates,
+                            modulation=True,
+                            mdconv_dilation=mdconv_dilation,
+                            deformable_groups=deformable_groups,
+                        )
+                    )
 
             self.branches.append(nn.Sequential(*branch))
 
@@ -46,22 +57,47 @@ class AdaptiveAggregationModule(nn.Module):
                     self.fuse_layers[-1].append(nn.Identity())
                 elif i < j:
                     self.fuse_layers[-1].append(
-                        nn.Sequential(nn.Conv2d(max_disp // (2 ** j), max_disp // (2 ** i),
-                                                kernel_size=1, bias=False),
-                                      nn.BatchNorm2d(max_disp // (2 ** i)),
-                                      ))
+                        nn.Sequential(
+                            nn.Conv2d(
+                                max_disp // (2**j),
+                                max_disp // (2**i),
+                                kernel_size=1,
+                                bias=False,
+                            ),
+                            nn.BatchNorm2d(max_disp // (2**i)),
+                        )
+                    )
                 elif i > j:
                     layers = nn.ModuleList()
                     for k in range(i - j - 1):
-                        layers.append(nn.Sequential(nn.Conv2d(max_disp // (2 ** j), max_disp // (2 ** j),
-                                                              kernel_size=3, stride=2, padding=1, bias=False),
-                                                    nn.BatchNorm2d(max_disp // (2 ** j)),
-                                                    nn.LeakyReLU(0.2, inplace=True),
-                                                    ))
+                        layers.append(
+                            nn.Sequential(
+                                nn.Conv2d(
+                                    max_disp // (2**j),
+                                    max_disp // (2**j),
+                                    kernel_size=3,
+                                    stride=2,
+                                    padding=1,
+                                    bias=False,
+                                ),
+                                nn.BatchNorm2d(max_disp // (2**j)),
+                                nn.LeakyReLU(0.2, inplace=True),
+                            )
+                        )
 
-                    layers.append(nn.Sequential(nn.Conv2d(max_disp // (2 ** j), max_disp // (2 ** i),
-                                                          kernel_size=3, stride=2, padding=1, bias=False),
-                                                nn.BatchNorm2d(max_disp // (2 ** i))))
+                    layers.append(
+                        nn.Sequential(
+                            nn.Conv2d(
+                                max_disp // (2**j),
+                                max_disp // (2**i),
+                                kernel_size=3,
+                                stride=2,
+                                padding=1,
+                                bias=False,
+                            ),
+                            nn.BatchNorm2d(max_disp // (2**i)),
+                        )
+                    )
                     self.fuse_layers[-1].append(nn.Sequential(*layers))
 
         self.relu = nn.LeakyReLU(0.2, inplace=True)
@@ -86,8 +122,12 @@ class AdaptiveAggregationModule(nn.Module):
                 else:
                     exchange = self.fuse_layers[i][j](x[j])
                     if exchange.size()[2:] != x_fused[i].size()[2:]:
-                        exchange = F.interpolate(exchange, size=x_fused[i].size()[2:],
-                                                 mode='bilinear', align_corners=False)
+                        exchange = F.interpolate(
+                            exchange,
+                            size=x_fused[i].size()[2:],
+                            mode="bilinear",
+                            align_corners=False,
+                        )
                     x_fused[i] = x_fused[i] + exchange
 
         for i in range(len(x_fused)):
@@ -97,13 +137,18 @@ class AdaptiveAggregationModule(nn.Module):
 
 
 class AdaptiveAggregation(nn.Module):
-    def __init__(self, max_disp, num_scales=3, num_fusions=6,
-                 num_stage_blocks=1,
-                 num_deform_blocks=2,
-                 no_mdconv=False,
-                 intermediate_supervision=True,
-                 deformable_groups=2,
-                 mdconv_dilation=2):
+    def __init__(
+        self,
+        max_disp,
+        num_scales=3,
+        num_fusions=6,
+        num_stage_blocks=1,
+        num_deform_blocks=2,
+        no_mdconv=False,
+        intermediate_supervision=True,
+        deformable_groups=2,
+        mdconv_dilation=2,
+    ):
         super(AdaptiveAggregation, self).__init__()
 
         self.max_disp = max_disp
@@ -123,21 +168,27 @@ class AdaptiveAggregation(nn.Module):
             else:
                 simple_bottleneck_module = True
 
-            fusions.append(AdaptiveAggregationModule(num_scales=self.num_scales,
-                                                     num_output_branches=num_out_branches,
-                                                     max_disp=max_disp,
-                                                     num_blocks=num_stage_blocks,
-                                                     mdconv_dilation=mdconv_dilation,
-                                                     deformable_groups=deformable_groups,
-                                                     simple_bottleneck=simple_bottleneck_module))
+            fusions.append(
+                AdaptiveAggregationModule(
+                    num_scales=self.num_scales,
+                    num_output_branches=num_out_branches,
+                    max_disp=max_disp,
+                    num_blocks=num_stage_blocks,
+                    mdconv_dilation=mdconv_dilation,
+                    deformable_groups=deformable_groups,
+                    simple_bottleneck=simple_bottleneck_module,
+                )
+            )
 
         self.fusions = nn.Sequential(*fusions)
 
         self.final_conv = nn.ModuleList()
         for i in range(self.num_scales):
-            in_channels = max_disp // (2 ** i)
+            in_channels = max_disp // (2**i)
 
-            self.final_conv.append(nn.Conv2d(in_channels, max_disp // (2 ** i), kernel_size=1))
+            self.final_conv.append(
+                nn.Conv2d(in_channels, max_disp // (2**i), kernel_size=1)
+            )
 
             if not self.intermediate_supervision:
                 break

@@ -10,11 +10,11 @@ torch.backends.cudnn.benchmark = True
 
 # Argument Parser
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_root', type=str, required=True)
-parser.add_argument('--checkpoint_path', type=str, required=True)
-parser.add_argument('--save_root', type=str, required=True)
+parser.add_argument("--data_root", type=str, required=True)
+parser.add_argument("--checkpoint_path", type=str, required=True)
+parser.add_argument("--save_root", type=str, required=True)
 
-parser.add_argument('--num_workers', type=int, default=4)
+parser.add_argument("--num_workers", type=int, default=4)
 
 args = parser.parse_args()
 

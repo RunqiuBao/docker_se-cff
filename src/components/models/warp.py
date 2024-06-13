@@ -38,7 +38,7 @@ def meshgrid(img, homogeneous=False):
     return grid
 
 
-def disp_warp(img, disp, padding_mode='border'):
+def disp_warp(img, disp, padding_mode="border"):
     """Warping by disparity
     Args:
         img: [B, 3, H, W]
@@ -55,10 +55,12 @@ def disp_warp(img, disp, padding_mode='border'):
     offset = torch.cat((-disp, torch.zeros_like(disp)), dim=1)  # [B, 2, H, W]
     sample_grid = grid + offset
     sample_grid = normalize_coords(sample_grid)  # [B, H, W, 2] in [-1, 1]
-    warped_img = F.grid_sample(img, sample_grid, mode='bilinear', padding_mode=padding_mode)
+    warped_img = F.grid_sample(
+        img, sample_grid, mode="bilinear", padding_mode=padding_mode
+    )
 
     mask = torch.ones_like(img)
-    valid_mask = F.grid_sample(mask, sample_grid, mode='bilinear', padding_mode='zeros')
+    valid_mask = F.grid_sample(mask, sample_grid, mode="bilinear", padding_mode="zeros")
     valid_mask[valid_mask < 0.9999] = 0
     valid_mask[valid_mask > 0] = 1
     return warped_img, valid_mask

@@ -22,10 +22,12 @@ class Padding:
 
         assert bottom_pad >= 0 and right_pad >= 0
 
-        sample = np.lib.pad(sample,
-                            ((0, bottom_pad), (0, right_pad)),
-                            mode='constant',
-                            constant_values=self.no_disparity_value)
+        sample = np.lib.pad(
+            sample,
+            ((0, bottom_pad), (0, right_pad)),
+            mode="constant",
+            constant_values=self.no_disparity_value,
+        )
 
         return sample
 
@@ -49,6 +51,7 @@ class VerticalFlip:
         sample = np.copy(np.flipud(sample))
 
         return sample
+
 
 class HorizontalFlip:
     def __call__(self, sample):

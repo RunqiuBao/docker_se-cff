@@ -34,10 +34,10 @@ class DisparityEstimationPyramid(nn.Module):
     def __init__(self, max_disp, match_similarity=True):
         super().__init__()
         self.disparity_estimator = DisparityEstimation(max_disp, match_similarity)
-    
+
     def forward(self, cost_volume_pyramid):
         disparity_pyramid = []
-        for cost_volume in cost_volume_pyramid: # D/3, D/6, D/12
+        for cost_volume in cost_volume_pyramid:  # D/3, D/6, D/12
             disparity_pyramid.append(self.disparity_estimator(cost_volume))
 
-        return disparity_pyramid[::-1] # D/12, D/6, D/3
+        return disparity_pyramid[::-1]  # D/12, D/6, D/3

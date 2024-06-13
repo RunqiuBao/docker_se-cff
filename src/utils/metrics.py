@@ -19,7 +19,9 @@ class SummationMeter:
         return copy.copy(self.sum)
 
     def all_gather(self, world_size):
-        tensor_list = [torch.zeros([1], dtype=torch.float).cuda() for _ in range(world_size)]
+        tensor_list = [
+            torch.zeros([1], dtype=torch.float).cuda() for _ in range(world_size)
+        ]
         cur_tensor = torch.ones([1], dtype=torch.float).cuda() * self.sum
         dist.all_gather(tensor_list, cur_tensor)
         self.reset()
@@ -54,7 +56,9 @@ class AverageMeter(SummationMeter):
         return copy.copy(self.avg)
 
     def all_gather(self, world_size):
-        tensor_list = [torch.zeros([2], dtype=torch.float).cuda() for _ in range(world_size)]
+        tensor_list = [
+            torch.zeros([2], dtype=torch.float).cuda() for _ in range(world_size)
+        ]
         cur_tensor = torch.tensor([self.avg, self.count], dtype=torch.float).cuda()
         dist.all_gather(tensor_list, cur_tensor)
         self.reset()
@@ -72,13 +76,15 @@ class AverageMeter(SummationMeter):
 
 
 class Metric:
-    def __init__(self, average_by='image', string_format=None):
-        assert average_by in ['pixel', 'image']
+    def __init__(self, average_by="image", string_format=None):
+        assert average_by in ["pixel", "image"]
         self.average_meter = AverageMeter(string_format=string_format)
         self.average_by = average_by
 
     def reset(self):
-        self.__init__(average_by=self.average_by, string_format=self.average_meter.string_format)
+        self.__init__(
+            average_by=self.average_by, string_format=self.average_meter.string_format
+        )
 
     @torch.no_grad()
     def update(self, pred, ground_truth, mask):
@@ -89,9 +95,9 @@ class Metric:
             if not m.any():
                 continue
             error += self.calculate_error(p, gt, m).to(torch.float).item()
-            if self.average_by == 'pixel':
+            if self.average_by == "pixel":
                 data_count += m.sum().item()
-            elif self.average_by == 'image':
+            elif self.average_by == "image":
                 data_count += 1
             else:
                 raise NotImplementedError
@@ -99,7 +105,7 @@ class Metric:
         error /= data_count
 
         self.average_meter.update(val=error, n=data_count)
-        return error 
+        return error
 
     def calculate_error(self, pred, ground_truth, mask):
         raise NotImplementedError
@@ -130,9 +136,9 @@ class EndPointError(Metric):
         pred, ground_truth = pred[mask], ground_truth[mask]
         error = torch.abs(pred - ground_truth)
 
-        if self.average_by == 'pixel':
+        if self.average_by == "pixel":
             final_error = error.sum()
-        elif self.average_by == 'image':
+        elif self.average_by == "image":
             final_error = error.mean()
         else:
             raise NotImplementedError
@@ -141,20 +147,22 @@ class EndPointError(Metric):
 
 
 class NPixelError(Metric):
-    def __init__(self, n=1, average_by='image', string_format=None):
+    def __init__(self, n=1, average_by="image", string_format=None):
         super().__init__(average_by=average_by, string_format=string_format)
         self.n = n
 
     def calculate_error(self, pred, ground_truth, mask):
         # pred, ground_truth, mask: (H, W)
         pred, ground_truth = pred[mask], ground_truth[mask]
-        error = torch.abs(pred - ground_truth)  # in disparity.base, gt is divided by 256.
+        error = torch.abs(
+            pred - ground_truth
+        )  # in disparity.base, gt is divided by 256.
         error_mask = error > self.n
         error_mask = error_mask.to(torch.float)
 
-        if self.average_by == 'pixel':
+        if self.average_by == "pixel":
             final_error = error_mask.sum()
-        elif self.average_by == 'image':
+        elif self.average_by == "image":
             final_error = error_mask.mean()
         else:
             raise NotImplementedError
@@ -166,9 +174,9 @@ class RootMeanSquareError(Metric):
     def calculate_error(self, pred, ground_truth, mask):
         # pred, ground_truth, mask: (H, W)
         pred, ground_truth = pred[mask], ground_truth[mask]
-        error = (((pred - ground_truth)) ** 2).mean().sqrt()
+        error = ((pred - ground_truth) ** 2).mean().sqrt()
 
-        if self.average_by == 'image':
+        if self.average_by == "image":
             final_error = error
         else:
             raise NotImplementedError

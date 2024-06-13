@@ -7,11 +7,20 @@ from .warp import disp_warp
 
 
 def conv2d(in_channels, out_channels, kernel_size=3, stride=1, dilation=1, groups=1):
-    return nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size,
-                                   stride=stride, padding=dilation, dilation=dilation,
-                                   bias=False, groups=groups),
-                         nn.BatchNorm2d(out_channels),
-                         nn.LeakyReLU(0.2, inplace=True))
+    return nn.Sequential(
+        nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=dilation,
+            dilation=dilation,
+            bias=False,
+            groups=groups,
+        ),
+        nn.BatchNorm2d(out_channels),
+        nn.LeakyReLU(0.2, inplace=True),
+    )
 
 
 class StereoDRNetRefinement(nn.Module):
@@ -41,7 +50,12 @@ class StereoDRNetRefinement(nn.Module):
         if scale_factor == 1.0:
             disp = low_disp
         else:
-            disp = F.interpolate(low_disp, size=left_img.size()[-2:], mode='bilinear', align_corners=False)
+            disp = F.interpolate(
+                low_disp,
+                size=left_img.size()[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
             disp = disp * scale_factor
 
         # Warp right image to left view with current disparity
