@@ -17,6 +17,8 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
     log_dict = OrderedDict(
         [
             ("Loss", AverageMeter(string_format="%6.3lf")),
+            ("l1_loss", AverageMeter(string_format="%6.3lf")),
+            ("warp_loss", AverageMeter(string_format="%6.3lf")),
             ("EPE", EndPointError(average_by="image", string_format="%6.3lf")),
             ("1PE", NPixelError(n=1, average_by="image", string_format="%6.3lf")),
             ("2PE", NPixelError(n=2, average_by="image", string_format="%6.3lf")),
@@ -34,23 +36,17 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
         if not mask.any():
             continue
 
-        pred, loss = model(
+        pred, lossDict = model(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
             gt_disparity=batch_data["disparity"],
         )
 
         optimizer.zero_grad()
-        if is_distributed:
-            tensor_list = [
-                torch.zeros([1], dtype=torch.int).cuda() for _ in range(world_size)
-            ]
-            cur_tensor = torch.tensor([loss.size(0)], dtype=torch.int).cuda()
-            dist.all_gather(tensor_list, cur_tensor)
-            total_point = torch.sum(torch.Tensor(tensor_list))
-            loss = loss.sum() / total_point * world_size
-        else:
-            loss = loss.mean()
+        loss = 0.
+        for key, value in lossDict.items():
+            loss += value
+            log_dict[key].update(lossDict[key].item(), pred.size(0))
         loss.backward()
         optimizer.step()
 
@@ -89,27 +85,18 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
         if not mask.any():
             continue
 
-        pred, loss = model(
+        pred, lossDict = model(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
             gt_disparity=batch_data["disparity"],
         )
 
-        if logger is not None and indexBatch == 0:
-            logger.add_image(
-                "left event input",
-                batch_data["event"]["left"][0, 0, :, :, 0, 0].detach().cpu(),
-            )
-            gt_disparity = batch_data["disparity"].detach().cpu()[0].numpy()
-            pred_one = pred.detach().cpu()[0].numpy()
-            if gt_disparity.shape == pred_one.shape:
-                blended = cv2.addWeighted(pred_one, 0.5, gt_disparity, 0.5, 0.0)
-                logger.add_image(
-                    "disparity gt with prediction", torch.from_numpy(blended / 255)
-                )
-
+        loss = 0.
+        for key, value in lossDict.items():
+            loss += value
+            log_dict[key].update(lossDict[key].item(), pred.size(0))
         EPE_thisBatch = log_dict["EPE"].update(pred, batch_data["disparity"], mask)
-        log_dict["BestIndex"].update(EPE_thisBatch, batch_data["disparity"].size(0))
+        log_dict["BestIndex"].update(loss.item(), batch_data["disparity"].size(0))
         log_dict["1PE"].update(pred, batch_data["disparity"], mask)
         log_dict["2PE"].update(pred, batch_data["disparity"], mask)
         log_dict["RMSE"].update(pred, batch_data["disparity"], mask)

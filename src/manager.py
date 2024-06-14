@@ -286,7 +286,7 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None
     name = model_cfg.NAME
     parameters = model_cfg.PARAMS
 
-    model = getattr(models, name)(logger=logger, **parameters)
+    model = getattr(models, name)(logger=logger, **parameters, is_distributed=is_distributed)
 
     if is_distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()

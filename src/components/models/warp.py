@@ -41,12 +41,12 @@ def meshgrid(img, homogeneous=False):
 def disp_warp(img, disp, padding_mode="border"):
     """Warping by disparity
     Args:
-        img: [B, 3, H, W]
+        img: [B, C, H, W]
         disp: [B, 1, H, W], positive
         padding_mode: 'zeros' or 'border'
     Returns:
-        warped_img: [B, 3, H, W]
-        valid_mask: [B, 3, H, W]
+        warped_img: [B, c, H, W]
+        valid_mask: [B, c, H, W]
     """
     assert disp.min() >= 0
 

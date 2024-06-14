@@ -10,6 +10,7 @@ from einops import rearrange
 
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
+from .losses import DisparityLoss
 
 
 def to_numpy(tensor):
@@ -23,13 +24,13 @@ class EventStereoMatchingNetwork(nn.Module):
     onnx_program = False
     logger = None
 
-    def __init__(self, concentration_net=None, disparity_estimator=None, logger=None):
+    def __init__(self, concentration_net=None, disparity_estimator=None, logger=None, is_distributed=False):
         super(EventStereoMatchingNetwork, self).__init__()
 
         self.concentration_net = ConcentrationNet(**concentration_net.PARAMS)
         self.stereo_matching_net = StereoMatchingNetwork(**disparity_estimator.PARAMS)
 
-        self.criterion = nn.SmoothL1Loss(reduction="none")
+        self.criterion = DisparityLoss(is_distributed=is_distributed)
         if logger is not None:
             self.logger = logger
 
@@ -85,7 +86,23 @@ class EventStereoMatchingNetwork(nn.Module):
 
         loss_disp = None
         if gt_disparity is not None:
-            loss_disp = self._cal_loss(pred_disparity_pyramid, gt_disparity)
+            loss_disp = self.criterion((pred_disparity_pyramid, gt_disparity, concentrated_event_stack["l"], concentrated_event_stack["r"]))
+
+        if self.logger is not None and gt_disparity is not None:
+            event_view = left_event[0, 0, :, :, 0, 0].detach().cpu()
+            event_view -= event_view.min()
+            event_view /= event_view.max()
+            self.logger.add_image(
+                "left event input",
+                event_view
+            )
+            gt_one = gt_disparity.detach().cpu()[0].numpy()
+            pred_one = pred_disparity_pyramid[-1].detach().cpu()[0].numpy()
+            if gt_one.shape == pred_one.shape:
+                blended = cv2.addWeighted(pred_one, 0.5, gt_one, 0.5, 0.0)
+                self.logger.add_image(
+                    "disparity gt with prediction", torch.from_numpy(blended / 255)
+                )
 
         return pred_disparity_pyramid[-1], loss_disp
 
