@@ -84,7 +84,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         left_event = left_event.squeeze(1).squeeze(3).permute(0, 3, 1, 2)
         right_event = right_event.squeeze(1).squeeze(3).permute(0, 3, 1, 2)
 
-
         left_event_sharp = self._concentration_net(left_event)
         right_event_sharp = self._concentration_net(right_event)
 
@@ -109,20 +108,32 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             preds_final['objdet'] = object_preds
             if self.logger is not None:
                 starttime = time.time()
-                leftimage_views, rightimage_views = multi_apply(
-                    self.RenderImageWithBboxesAndKeypts,
-                    left_event_sharp.detach().squeeze(0).cpu().numpy(),
-                    right_event_sharp.detach().squeeze(0).cpu().numpy(),
-                    object_preds,
-                )
-                self.logger.add_image(
-                    "left sharp with bboxes, keypoints",
-                    leftimage_views[0]
-                )
-                self.logger.add_image(
-                    "right sharp with bboxes",
-                    rightimage_views[0]
-                )
+                if 'sbboxes' in object_preds:
+                    leftimage_views, rightimage_views = multi_apply(
+                        self.RenderImageWithBboxesAndKeypts,
+                        left_event_sharp.detach().squeeze(1).cpu().numpy(),
+                        right_event_sharp.detach().squeeze(1).cpu().numpy(),
+                        object_preds,
+                    )
+                    self.logger.add_image(
+                        "left sharp with bboxes, keypoints",
+                        leftimage_views[0]
+                    )
+                    self.logger.add_image(
+                        "right sharp with bboxes",
+                        rightimage_views[0]
+                    )
+                else:
+                    leftimage_views = []
+                    num_imgs = left_event.shape[0]
+                    for i in range(num_imgs):
+                        leftimage_views.append(
+                            self.RenderImageWithBboxes(left_event_sharp.detach().squeeze(1).cpu().numpy()[i], object_preds[i])
+                        )
+                    self.logger.add_image(
+                        "left sharp with bboxes, keypoints",
+                        leftimage_views[0]
+                    )
 
         preds_final['disparity'] = pred_disparity_pyramid[-1]
         torch.cuda.synchronize()
@@ -206,3 +217,27 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             bottom_right = (int(bbox[5]), int(bbox[3]))
             cv2.rectangle(right_event_sharp, top_left, bottom_right, (255,), thickness=3)
         return torch.from_numpy(left_event_sharp), torch.from_numpy(right_event_sharp)
+
+    def RenderImageWithBboxes(
+        self,
+        left_event_sharp: numpy.ndarray,
+        obj_preds: Dict
+    ) -> Tensor:
+        """
+        Args:
+            left_event_sharp: ...
+        """
+        bboxes, classes, confidences = obj_preds['bboxes'], obj_preds['classes'], obj_preds['confidences']
+        left_event_sharp = left_event_sharp - left_event_sharp.min()
+        left_event_sharp = (left_event_sharp * 255 / left_event_sharp.max()).astype('uint8')
+        left_event_sharp = cv2.cvtColor(left_event_sharp, cv2.COLOR_GRAY2RGB)
+        for bbox, classindex, confidence in zip(bboxes, classes, confidences):
+            top_left = (int(bbox[0]), int(bbox[1]))
+            top_right = (int(bbox[2]), int(bbox[1]))
+            bottom_right = (int(bbox[2]), int(bbox[3]))
+            cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
+            text = 'cls: {}\nconfi: {}'.format(format(classindex.item(), '.2f'), format(confidence.item(), '.2f'))
+            textposition = (int(top_right[0] + bottom_right[1]) // 2, int(top_right[1] + bottom_right[1]) // 2)
+            cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
+            w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
+        return [torch.from_numpy(left_event_sharp),]

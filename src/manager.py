@@ -44,14 +44,15 @@ class DLManager:
                 self.logger.write(
                     "loading checkpoint {} ...".format(self.args.resume_cpt)
                 )
-            self.args.start_epoch = checkpoint["epoch"] + 1
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = {}
             for key, value in checkpoint["model"].items():
                 model_statedict["module." + key] = value
             self.model.load_state_dict(model_statedict)
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
+            if not self.args.only_resume_weight:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+                self.scheduler.load_state_dict(checkpoint["scheduler"])
+                self.args.start_epoch = checkpoint["epoch"] + 1
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME

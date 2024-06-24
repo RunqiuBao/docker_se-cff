@@ -12,7 +12,9 @@ from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
 from mmdet.models.task_modules.samplers import PseudoSampler
 from mmdet.models.roi_heads.roi_extractors.single_level_roi_extractor import SingleRoIExtractor
 from mmengine.structures import InstanceData
+from mmdet.structures.bbox import cat_boxes
 from mmdet.registry import TASK_UTILS, MODELS
+from mmdet.utils import reduce_mean
 
 from .utils.misc import multi_apply, SelectByIndices, ComputeSoftArgMax1d, freeze_module_grads
 from . import losses
@@ -285,15 +287,29 @@ class Cylinder5DDetectionHead(nn.Module):
         )
         # print("forward_objdet_single executed in {:.4f} seconds".format(time.time() - starttime))
 
-        # if self._config['is_train_leftobjdet_first']:
-        #     cls_scores, bboxes, objectnesses = preds_items_multilevels
-        #     self.loss_by_bboxdet(
-        #         cls_scores,
-        #         bboxes,
-        #         objectnesses,
-        #         gt_labels,
-        #         batch_img_metas
-        #     )
+        if self._config['is_train_leftobjdet_first']:
+            cls_scores, bboxes, objectnesses = preds_items_multilevels
+            (
+                loss_dict,
+                batch_selected_boxes,
+                batch_selected_classes,
+                batch_selected_confidences
+            ) = self.loss_by_bboxdet(
+                cls_scores,
+                bboxes,
+                objectnesses,
+                gt_labels,
+                batch_img_metas
+            )
+            num_imgs = disparity_prior.shape[0]
+            batch_positive_detections = []
+            for indexImg in range(num_imgs):
+                batch_positive_detections.append({
+                    'bboxes': batch_selected_boxes[indexImg],
+                    'classes': batch_selected_classes[indexImg],
+                    'confidences': batch_selected_confidences[indexImg]
+                })
+            return batch_positive_detections, loss_dict
 
         # select top candidates for stereo bbox regression.
         (
@@ -301,7 +317,7 @@ class Cylinder5DDetectionHead(nn.Module):
             bboxes,  # Note: shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
             objectnesses,  # Note: shape is [B, 100],
             priors
-        ) = self.SelectTopkCandidates(*preds_items_multilevels)
+        ) = self.SelectTopkCandidates(*preds_items_multilevels, img_metas=batch_img_metas)
 
         # return shape [B, 100, 6]
         starttime = time.time()
@@ -359,11 +375,13 @@ class Cylinder5DDetectionHead(nn.Module):
 
         return batch_positive_detections, loss_dict
 
+    @torch.no_grad()
     def SelectTopkCandidates(
         self,
         cls_scores: Tuple[Tensor],
         bbox_preds: Tuple[Tensor],
-        objectnesses: Tuple[Tensor]
+        objectnesses: Tuple[Tensor],
+        img_metas: Dict
     ):
         """
         select topk candidates based on class scores.
@@ -384,25 +402,62 @@ class Cylinder5DDetectionHead(nn.Module):
             device=cls_scores[0].device,
             with_stride=True
         )
-        # flatten cls_scores, bbox_preds, and objectness
-        flatten_cls_scores = [
-            cls_score.permute(0, 2, 3, 1).reshape(num_imgs, -1, self._config['num_classes'])
-            for cls_score in cls_scores
-        ]
-        flatten_bbox_preds = [
-            bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
-            for bbox_pred in bbox_preds
-        ]
-        flatten_objectness = [
-            objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
-            for objectness in objectnesses
-        ]
 
-        flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()  # Note: cat multi-level preds into one tensor. First dim becomes batch.
-        flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
-        flatten_objectness = torch.cat(flatten_objectness, dim=1).sigmoid()
-        flatten_priors = torch.cat(mlvl_priors)
-        flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
+        img_shape = (img_metas['h'], img_metas['w'])
+        nms_pre = self._config.get('nms_pre', -1)
+        mlvl_bbox_preds = []
+        mlvl_valid_priors = []
+        mlvl_scores = []
+        level_ids = []
+        for level_idx, (cls_score, bbox_pred, objectness, priors) in enumerate(zip(cls_scores, bbox_preds, objectnesses, mlvl_priors)):
+            bbox_pred = bbox_pred.permute(1, 2, 0).reshape(-1, 4)
+            cls_score = cls_score.permute(1, 2, 0).reshape(-1, self._config['num_classes']).sigmoid()
+            objectness = objectness.permute(1, 2, 0).reshape(-1, 1)
+            max_scores, labels = torch.max(cls_score, -1)
+            confidences = max_scores * objectness
+            confidences = torch.squeeze(confidences)
+            if 0 < nms_pre < confidences.shape[0]:
+                ranked_confidences, rank_inds = confidences.sort(descending=True)
+                topk_inds = rank_inds[:nms_pre]
+                confidences = ranked_confidences[:nms_pre]
+                bbox_pred = bbox_pred[topk_inds, :]
+                priors = priors[topk_inds]
+            mlvl_bbox_preds.append(bbox_pred)
+            mlvl_valid_priors.append(priors)
+            mlvl_confidences.append(confidences)
+            # use level id to implement the separate level nms
+            level_ids.append(
+                scores.new_full((confidences.size(0), ),
+                                level_idx,
+                                dtype=torch.long))
+        bbox_pred = torch.cat(mlvl_bbox_preds)
+        priors = cat_boxes(mlvl_valid_priors)
+        bboxes = self._bbox_decode(priors, bbox_pred)
+        results = InstanceData()
+        results.bboxes = bboxes
+        results.scores = torch.cat(mlvl_confidences)
+        results.level_ids = torch.cat(level_ids)
+            
+
+        # # flatten cls_scores, bbox_preds, and objectness
+        # flatten_cls_scores = [
+        #     cls_score.permute(0, 2, 3, 1).reshape(num_imgs, -1, self._config['num_classes'])
+        #     for cls_score in cls_scores
+        # ]
+        # flatten_bbox_preds = [
+        #     bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
+        #     for bbox_pred in bbox_preds
+        # ]
+        # flatten_objectness = [
+        #     objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
+        #     for objectness in objectnesses
+        # ]
+
+        # flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()  # Note: cat multi-level preds into one tensor. First dim becomes batch.
+        # flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
+        # flatten_objectness = torch.cat(flatten_objectness, dim=1).sigmoid()
+        # flatten_priors = torch.cat(mlvl_priors)
+        # flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
 
         max_scores, labels = torch.max(flatten_cls_scores, -1)
         confidences = flatten_objectness * max_scores
@@ -598,7 +653,7 @@ class Cylinder5DDetectionHead(nn.Module):
             dtype=torch.float,
             device=cls_scores.device
         )
-        num_total_samples = max(num_pos, 1.0)
+        num_total_samples = max(reduce_mean(num_pos), 1.0)
 
         pos_masks = torch.cat(pos_masks, 0)
         cls_targets = torch.cat(cls_targets, 0)
@@ -787,72 +842,160 @@ class Cylinder5DDetectionHead(nn.Module):
         pos_mask[pos_inds] = True
         return (pos_mask, cls_target, obj_target, bbox_target, keypts1_target, keypts2_target, num_pos_per_img)
 
-    # def loss_by_bboxdet(
-    #     self,
-    #     cls_scores: Tuple[Tensor],
-    #     bbox_preds: Tuple[Tensor],
-    #     objectnesses: Tuple[Tensor],
-    #     gt_labels: Dict,
-    #     batch_img_metas: Dict
-    # ) -> Tuple:
-    #     """
-    #     Train left side object detection only.
-    #     """
-    #     num_imgs = len(gt_labels)
-    #     featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
-    #     mlvl_priors = self.prior_generator.grid_priors(
-    #         featmap_sizes,
-    #         dtype=cls_scores[0].dtype,
-    #         device=cls_scores[0].device,
-    #         with_stride=True)
+    def loss_by_bboxdet(
+        self,
+        cls_scores: Tuple[Tensor],
+        bbox_preds: Tuple[Tensor],
+        objectnesses: Tuple[Tensor],
+        gt_labels: Dict,
+        batch_img_metas: Dict
+    ) -> Tuple:
+        """
+        Train left side object detection only.
+        """
+        num_imgs = len(gt_labels)
+        featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
+        mlvl_priors = self.prior_generator.grid_priors(
+            featmap_sizes,
+            dtype=cls_scores[0].dtype,
+            device=cls_scores[0].device,
+            with_stride=True)
 
-    #     flatten_cls_preds = [
-    #         cls_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1,
-    #                                              self._config['num_classes'])
-    #         for cls_pred in cls_scores
-    #     ]
-    #     flatten_bbox_preds = [
-    #         bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
-    #         for bbox_pred in bbox_preds
-    #     ]
-    #     flatten_objectness = [
-    #         objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
-    #         for objectness in objectnesses
-    #     ]
+        flatten_cls_preds = [
+            cls_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1,
+                                                 self._config['num_classes'])
+            for cls_pred in cls_scores
+        ]
+        flatten_bbox_preds = [
+            bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
+            for bbox_pred in bbox_preds
+        ]
+        flatten_objectness = [
+            objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
+            for objectness in objectnesses
+        ]
 
-    #     flatten_cls_preds = torch.cat(flatten_cls_preds, dim=1)
-    #     flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
-    #     flatten_objectness = torch.cat(flatten_objectness, dim=1)
-    #     flatten_priors = torch.cat(mlvl_priors)
-    #     flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
+        flatten_cls_preds = torch.cat(flatten_cls_preds, dim=1)
+        flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
+        flatten_objectness = torch.cat(flatten_objectness, dim=1)
+        flatten_priors = torch.cat(mlvl_priors)
+        flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
 
-    #     (pos_masks, cls_targets, obj_targets, bbox_targets, l1_targets,
-    #      num_fg_imgs) = multi_apply(
-    #          self._get_targets_single,
-    #          flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1),
-    #          flatten_cls_preds.detach(),
-    #          flatten_bboxes.detach(),
-    #          flatten_objectness.detach(),
-    #          gt_labels,
-    #          batch_img_metas)
+        (
+            pos_masks,
+            cls_targets,
+            obj_targets,
+            bbox_targets,
+            num_pos_imgs
+        ) = multi_apply(
+            self._get_targets_single,
+            flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1),
+            flatten_cls_preds.detach(),
+            flatten_bboxes.detach(),
+            flatten_objectness.detach(),
+            gt_labels,
+            batch_img_metas)
 
-    # def _get_targets_single(
-    #     self,
-    #     priors: Tensor,
-    #     cls_preds: Tensor,
-    #     decoded_bboxes: Tensor,
-    #     objectness: Tensor,
-    #     gt_labels: InstanceData,
-    #     img_meta: dict,
-    # ):
-    #     num_priors = priors.shape[0]
-    #     num_gts = gt_labels['bboxes'].shape[0]
-    #     # No target
-    #     if num_gts == 0:
-    #         cls_target = cls_preds.new_zeros((0, self.num_classes))
-    #         bbox_target = cls_preds.new_zeros((0, 4))
-    #         l1_target = cls_preds.new_zeros((0, 4))
-    #         obj_target = cls_preds.new_zeros((num_priors, 1))
-    #         foreground_mask = cls_preds.new_zeros(num_priors).bool()
-    #         return (foreground_mask, cls_target, obj_target, bbox_target,
-    #                 l1_target, 0)
+        num_pos = torch.tensor(
+            sum(num_pos_imgs),
+            dtype=torch.float,
+            device=flatten_cls_preds.device)
+        num_total_samples = max(reduce_mean(num_pos), 1.0)
+
+        pos_masks = torch.cat(pos_masks, 0)
+        cls_targets = torch.cat(cls_targets, 0)
+        obj_targets = torch.cat(obj_targets, 0)
+        bbox_targets = torch.cat(bbox_targets, 0)
+
+        loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
+        if num_pos > 0:
+            loss_cls = self.loss_cls(
+                flatten_cls_preds.view(-1, self._config['num_classes'])[pos_masks],
+                cls_targets) / num_total_samples
+            loss_bbox = self.loss_bbox(
+                flatten_bboxes.view(-1, 4)[pos_masks],
+                bbox_targets) / num_total_samples
+        else:
+            # Avoid cls and reg branch not participating in the gradient
+            # propagation when there is no ground-truth in the images.
+            # For more details, please refer to
+            # https://github.com/open-mmlab/mmdetection/issues/7298
+            loss_cls = flatten_cls_preds.sum() * 0
+            loss_bbox = flatten_bboxes.sum() * 0
+        loss_dict = {
+            'loss_cls': loss_cls,
+            'loss_bbox': loss_bbox,
+            'loss_obj': loss_obj
+        }
+
+        batch_selected_boxes = []
+        batch_selected_classes = []
+        batch_selected_confidences = []
+        pos_masks = pos_masks.reshape(num_imgs, -1)
+        for index_img in range(num_imgs):
+            batch_selected_boxes.append(
+                flatten_bboxes[index_img][pos_masks[index_img]].detach()
+            )
+            batch_selected_classes.append(
+                flatten_cls_preds[index_img][pos_masks[index_img]].detach()
+            )
+            batch_selected_confidences.append(
+                torch.max(flatten_cls_preds[index_img][pos_masks[index_img]], dim=-1)[0].detach() * flatten_objectness[index_img][pos_masks[index_img]].detach()
+            )
+        return  loss_dict, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
+
+    def _get_targets_single(
+        self,
+        priors: Tensor,
+        cls_preds: Tensor,
+        decoded_bboxes: Tensor,
+        objectness: Tensor,
+        gt_labels: InstanceData,
+        img_meta: dict,
+    ):
+        num_priors = priors.shape[0]
+        num_gts = gt_labels['bboxes'].shape[0]
+        # No target
+        if num_gts == 0:
+            cls_target = cls_preds.new_zeros((0, self.num_classes))
+            bbox_target = cls_preds.new_zeros((0, 4))
+            obj_target = cls_preds.new_zeros((num_priors, 1))
+            pos_mask = cls_preds.new_zeros(num_priors).bool()
+            return (pos_mask, cls_target, obj_target, bbox_target, 0)
+
+        # YOLOX uses center priors with 0.5 offset to assign targets,
+        # but use center priors without offset to regress bboxes.
+        offset_priors = torch.cat(
+            [priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
+
+        scores = cls_preds.sigmoid() * objectness.unsqueeze(1).sigmoid()
+        pred_instances = InstanceData(
+            bboxes=decoded_bboxes,
+            scores=scores.sqrt_(),
+            priors=offset_priors
+        )
+        gt_instances = InstanceData(
+            bboxes=gt_labels['bboxes'][:, :4],
+            labels=gt_labels['labels']
+        )
+        assign_result = self.assigner.assign(
+            pred_instances=pred_instances,
+            gt_instances=gt_instances
+        )
+        sampling_result = self.sampler.sample(assign_result, pred_instances, gt_instances)
+
+        pos_inds = sampling_result.pos_inds
+        num_pos_per_img = pos_inds.size(0)
+
+        pos_ious = assign_result.max_overlaps[pos_inds]
+        # IOU aware classification score
+        cls_target = F.one_hot(sampling_result.pos_gt_labels,
+                               self._config['num_classes']) * pos_ious.unsqueeze(-1)
+        obj_target = torch.zeros_like(objectness).unsqueeze(-1)
+        obj_target[pos_inds] = 1
+        bbox_target = sampling_result.pos_gt_bboxes
+        pos_mask = torch.zeros_like(objectness).to(torch.bool)
+        pos_mask[pos_inds] = 1
+        return (pos_mask, cls_target, obj_target, bbox_target, num_pos_per_img)
+
+
