@@ -173,8 +173,8 @@ class SequenceDataset(torch.utils.data.Dataset):
                 )
 
         output["image_metadata"] = {
-            "h": self.event_dataset.event_h,
-            "w": self.event_dataset.event_w,
+            "h": self.crop_height,
+            "w": self.crop_width,
         }
         output["event"]["left"] = (
             output["event"]["left"]
@@ -190,6 +190,10 @@ class SequenceDataset(torch.utils.data.Dataset):
             .unsqueeze(4)
             .to(torch.float32)
         )
+        output["gt_labels"] = {
+            "disparity": output['disparity'],
+            "objdet": output["objdet"]
+        }
         return output
 
     def load_data(self, idx):

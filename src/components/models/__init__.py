@@ -1,1 +1,2 @@
 from .event_stereo_matching import EventStereoMatchingNetwork
+from .event_stereo_object_detection import EventStereoObjectDetectionNetwork

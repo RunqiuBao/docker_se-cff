@@ -110,7 +110,7 @@ def get_multi_epochs_dataloader(
         return torch.utils.data.DataLoader(dataset)
 
     if is_distributed:
-        batch_size = dataloader_cfg.PARAMS.batch_size // world_size
+        batch_size = dataloader_cfg.PARAMS.batch_size // world_size  # Note: keep the effective batch_size the same, so that to keep the same learning rate.
         shuffle = dataloader_cfg.PARAMS.get("shuffle", False)
         drop_last = dataloader_cfg.PARAMS.get("drop_last", False)
         sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=drop_last)

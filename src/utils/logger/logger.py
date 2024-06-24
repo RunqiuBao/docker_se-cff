@@ -87,9 +87,14 @@ class ExpLogger:
             self._tensor_log = SummaryWriter(self._save_root)
         img_grid = torchvision.utils.make_grid(img)
         npimg = img_grid.numpy()
-        npimg = np.transpose(npimg, (1, 2, 0))
+        if npimg.ndim == 3 and npimg.shape[-1] != 3:
+            npimg = np.transpose(npimg, (1, 2, 0))
+            img_grid = img_grid.permute(1, 2, 0)
         plt.imshow(npimg)
-        self._tensor_log.add_image(imgTitle, img_grid)
+        if npimg.ndim == 3:
+            self._tensor_log.add_image(imgTitle, img_grid, dataformats='HWC')
+        else:
+            self._tensor_log.add_image(imgTitle, img_grid)
 
     def save_args(self, args):
         args_log = ""

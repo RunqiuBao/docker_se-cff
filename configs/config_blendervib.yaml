@@ -7,12 +7,12 @@ DATASET:
       split: train
       sampling_ratio: 1
       crop_height: 768
-      crop_width: 1320
-      randomhorizontalflip: True
+      crop_width: 1344
+      randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 1000000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -22,12 +22,12 @@ DATASET:
       split: valid
       sampling_ratio: 1
       crop_height: 768
-      crop_width: 1320
-      randomhorizontalflip: True
+      crop_width: 1344
+      randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 1000000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -35,34 +35,90 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   TEST:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 2
       shuffle: False
       drop_last: False
 MODEL:
-  NAME: EventStereoMatchingNetwork
+  NAME: EventStereoObjectDetectionNetwork
   PARAMS:
-    concentration_net:
+    concentration_net_cfg:
       PARAMS:
         in_channels: 10
         attention_method: soft
         base_channels: 32
-    disparity_estimator:
+    feature_extraction_net_cfg:
+      PARAMS:
+        backbone:
+          type: CSPDarknet
+          deepen_factor: 0.33
+          widen_factor: 0.5
+          out_indices: [2, 3, 4]
+          use_depthwise: False
+          spp_kernal_sizes: [5, 9, 13]
+          norm_cfg:
+            type: 'BN'
+            momentum: 0.03
+            eps: 0.001
+          act_cfg:
+            type: 'Swish'
+        neck:
+          type: YOLOXPAFPN
+          in_channels: [128, 256, 512]
+          out_channels: 128
+          num_csp_blocks: 1
+          use_depthwise: False
+          upsample_cfg: 
+            scale_factor: 2
+            mode: nearest
+          norm_cfg:
+            type: 'BN'
+            momentum: 0.03
+            eps: 0.001
+          act_cfg:
+            type: 'Swish'
+    disp_head_cfg:
+      is_freeze: True
       PARAMS:
         in_channels: 1
-        max_disp: 192
+        max_disp: 288
         refine_channels: 1
+    object_detection_head_cfg:
+      PARAMS:
+        is_train_leftobjdet_first: False
+        # detection
+        num_classes: 1
+        in_channels: 128
+        feat_channels: 256
+        num_stacked_convs: 2
+        num_topk_candidates: 100
+        bbox_expand_factor: 1.3
+        strides: [8, 16, 32]
+        norm_cfg: 
+          type: BN
+          momentum: 0.03
+          eps: 0.001
+        act_cfg: 
+          type: ReLU
+    losses_cfg:
+      objdet_loss_cfg:
+        NAME: ObjdetLoss
+      disp_loss_cfg:
+        NAME: DisparityLoss
+        ls_loss_weight: 1.0
+        warp_loss_weight: 100.0
+        use_warp_loss: False
 OPTIMIZER:
   NAME: Adam
   PARAMS:

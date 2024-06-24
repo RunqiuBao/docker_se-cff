@@ -1,4 +1,5 @@
 import copy
+import numpy
 import torch
 import torch.distributed as dist
 
@@ -49,7 +50,7 @@ class AverageMeter(SummationMeter):
     def update(self, val, n=1):
         super().update(val=val, n=n)
         self.count += n
-        self.avg = self.sum / self.count
+        self.avg = self.sum / self.count if self.count > 0 else numpy.nan
 
     @property
     def value(self):

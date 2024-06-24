@@ -3,6 +3,8 @@ import torch.nn.functional as F
 
 from .deform import DeformBottleneck
 
+from mmdet.models import CSPDarknet
+from mmdet.models import YOLOXPAFPN
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -309,3 +311,19 @@ class FeatureExtractor(nn.Module):
         feature = self.feature_pyramid_network(resnet_feature)
 
         return feature
+
+
+class FeatureExtractor2(nn.Module):
+    def __init__(self, net_cfg: dict):
+        super().__init__()
+        if 'type' in net_cfg['backbone']:
+            net_cfg['backbone'].pop('type')
+        self._backbone = CSPDarknet(**net_cfg['backbone'])
+        if 'type' in net_cfg['neck']:
+            net_cfg['neck'].pop('type')
+        self._neck = YOLOXPAFPN(**net_cfg['neck'])
+
+    def forward(self, x):
+        feature = self._backbone(x)
+        refined_feature = self._neck(feature)
+        return refined_feature

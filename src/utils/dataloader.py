@@ -12,7 +12,6 @@ class MultiEpochsDataLoader(torch.utils.data.DataLoader):
         self.batch_sampler = _RepeatSampler(self.batch_sampler)
         self._DataLoader__initialized = True
         # self.iterator = super().__iter__()
-        # from IPython import embed; print('here!'); embed()
 
     def __len__(self):
         return len(self.batch_sampler.sampler)

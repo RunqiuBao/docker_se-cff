@@ -52,6 +52,16 @@ class CostVolume(nn.Module):
                     ).mean(dim=1)
                 else:
                     cost_volume[:, i, :, :] = (left_feature * right_feature).mean(dim=1)
+        elif self.feature_similarity == "correlation2":
+            cost_volume = left_feature.new_zeros(b, self.max_disp + 1, h, w)
+            cost_volume[:, 0, :, :] = (left_feature * 1).mean(dim=1)
+            for i in range(self.max_disp):
+                if i > 0:
+                    cost_volume[:, i + 1, :, i:] = (
+                        left_feature[:, :, :, i:] * right_feature[:, :, :, :-i]
+                    ).mean(dim=1)
+                else:
+                    cost_volume[:, i + 1, :, :] = (left_feature * right_feature).mean(dim=1)
 
         else:
             raise NotImplementedError

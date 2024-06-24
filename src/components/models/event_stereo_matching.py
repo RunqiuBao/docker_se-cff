@@ -24,17 +24,28 @@ class EventStereoMatchingNetwork(nn.Module):
     onnx_program = False
     logger = None
 
-    def __init__(self, concentration_net=None, disparity_estimator=None, logger=None, is_distributed=False):
+    def __init__(
+        self,
+        concentration_net_cfg: dict,
+        disp_head_cfg: dict,
+        losses_cfg: dict,
+        logger=None,
+        is_distributed=False,
+        **kwargs
+    ):
         super(EventStereoMatchingNetwork, self).__init__()
 
-        self.concentration_net = ConcentrationNet(**concentration_net.PARAMS)
-        self.stereo_matching_net = StereoMatchingNetwork(**disparity_estimator.PARAMS)
+        self.concentration_net = ConcentrationNet(**concentration_net_cfg.PARAMS)
+        self.stereo_matching_net = StereoMatchingNetwork(**disp_head_cfg.PARAMS)
 
-        self.criterion = DisparityLoss(is_distributed=is_distributed)
+        self.criterion = DisparityLoss(is_distributed=is_distributed, disp_loss_cfg=losses_cfg['disp_loss_cfg'], logger=logger)
         if logger is not None:
             self.logger = logger
 
-    def forward(self, left_event, right_event, gt_disparity=None):
+    def forward(self, left_event, right_event, gt_labels=None, **kwargs):
+        if gt_labels is not None:
+            gt_labels = gt_labels['disparity']
+
         event_stack = {
             "l": left_event.clone(),
             "r": right_event.clone(),
@@ -74,21 +85,15 @@ class EventStereoMatchingNetwork(nn.Module):
         #         cv2.imwrite("/media/runqiu/HDD1/opensource-dataset/dsec/concentrated/" + str(self.count).zfill(6) + ".png", oneImg.astype(numpy.uint8))
         #         self.count += 1
 
-        if self.logger is not None:
-            concenResult = concentrated_event_stack["l"][0, 0].detach().cpu()
-            concenResult = concenResult - concenResult.min()
-            concenResult /= concenResult.max()
-            self.logger.add_image("concentration result", concenResult)
-
         pred_disparity_pyramid = self.stereo_matching_net(
             concentrated_event_stack["l"], concentrated_event_stack["r"]
         )
 
         loss_disp = None
-        if gt_disparity is not None:
-            loss_disp = self.criterion((pred_disparity_pyramid, gt_disparity, concentrated_event_stack["l"], concentrated_event_stack["r"]))
+        if gt_labels is not None:
+            loss_disp = self.criterion((pred_disparity_pyramid, gt_labels, concentrated_event_stack["l"], concentrated_event_stack["r"]))
 
-        if self.logger is not None and gt_disparity is not None:
+        if self.logger is not None and gt_labels is not None:
             event_view = left_event[0, 0, :, :, 0, 0].detach().cpu()
             event_view -= event_view.min()
             event_view /= event_view.max()
@@ -96,7 +101,12 @@ class EventStereoMatchingNetwork(nn.Module):
                 "left event input",
                 event_view
             )
-            gt_one = gt_disparity.detach().cpu()[0].numpy()
+            concenResult = concentrated_event_stack["l"][0, 0].detach().cpu()
+            concenResult = concenResult - concenResult.min()
+            concenResult /= concenResult.max()
+            self.logger.add_image("concentration result", concenResult)
+
+            gt_one = gt_labels.detach().cpu()[0].numpy()
             pred_one = pred_disparity_pyramid[-1].detach().cpu()[0].numpy()
             if gt_one.shape == pred_one.shape:
                 blended = cv2.addWeighted(pred_one, 0.5, gt_one, 0.5, 0.0)
@@ -104,7 +114,8 @@ class EventStereoMatchingNetwork(nn.Module):
                     "disparity gt with prediction", torch.from_numpy(blended / 255)
                 )
 
-        return pred_disparity_pyramid[-1], loss_disp
+
+        return {'disparity': pred_disparity_pyramid[-1]}, loss_disp
 
     def get_params_group(self, learning_rate):
         def filter_specific_params(kv):

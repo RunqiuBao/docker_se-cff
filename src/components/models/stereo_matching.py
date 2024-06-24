@@ -26,7 +26,8 @@ class StereoMatchingNetwork(nn.Module):
         num_stage_blocks=1,
         num_deform_blocks=3,
         refine_channels=None,
-        isInputFeature=False
+        isInputFeature=False,
+        **kwargs
     ):
         super(StereoMatchingNetwork, self).__init__()
 

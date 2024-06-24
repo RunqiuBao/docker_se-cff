@@ -87,7 +87,7 @@ class DownBlock(nn.Module):
 
 
 class ConcentrationNet(nn.Module):
-    def __init__(self, in_channels, base_channels=32, attention_method="hard"):
+    def __init__(self, in_channels, base_channels=32, attention_method="hard", **kwargs):
         super(ConcentrationNet, self).__init__()
         self.attention_method = attention_method
         self.conv1 = ConvBlock(
