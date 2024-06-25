@@ -7,6 +7,7 @@ from typing import Sequence, Tuple, List, Dict, Union
 import math
 import numpy
 import time
+import copy
 
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
 from mmdet.models.task_modules.samplers import PseudoSampler
@@ -15,8 +16,9 @@ from mmengine.structures import InstanceData
 from mmdet.structures.bbox import cat_boxes
 from mmdet.registry import TASK_UTILS, MODELS
 from mmdet.utils import reduce_mean
+from mmcv.ops import batched_nms
 
-from .utils.misc import multi_apply, SelectByIndices, ComputeSoftArgMax1d, freeze_module_grads
+from .utils.misc import multi_apply, SelectByIndices, ComputeSoftArgMax1d, freeze_module_grads, DetachCopyNested
 from . import losses
 
 
@@ -55,21 +57,20 @@ class Cylinder5DDetectionHead(nn.Module):
                                         'eps': 1e-16,
                                         'reduction': 'sum',
                                         'loss_weight': 5.0})
-        if not self._config['is_train_leftobjdet_first']:
-            self.loss_rbbox = MODELS.build({'type': 'IoULoss',  # Right side bbox
-                                            'mode': 'square',
-                                            'eps': 1e-16,
-                                            'reduction': 'sum',
-                                            'loss_weight': 1.0})
-            # Need to consider keypts in loss_bbox as well.
-            self.loss_keypt1 = MODELS.build({'type': 'CrossEntropyLoss',
-                                        'use_sigmoid': True,
+        self.loss_rbbox = MODELS.build({'type': 'IoULoss',  # Right side bbox
+                                        'mode': 'square',
+                                        'eps': 1e-16,
                                         'reduction': 'sum',
                                         'loss_weight': 1.0})
-            self.loss_keypt2 = MODELS.build({'type': 'CrossEntropyLoss',
-                                        'use_sigmoid': True,
-                                        'reduction': 'sum',
-                                        'loss_weight': 1.0})
+        # Need to consider keypts in loss_bbox as well.
+        self.loss_keypt1 = MODELS.build({'type': 'CrossEntropyLoss',
+                                    'use_sigmoid': True,
+                                    'reduction': 'sum',
+                                    'loss_weight': 1.0})
+        self.loss_keypt2 = MODELS.build({'type': 'CrossEntropyLoss',
+                                    'use_sigmoid': True,
+                                    'reduction': 'sum',
+                                    'loss_weight': 1.0})
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
 
@@ -95,10 +96,6 @@ class Cylinder5DDetectionHead(nn.Module):
             feat_channels=self._config["feat_channels"],
             num_classes=self._config["num_classes"],
         )
-        if self._config['is_train_leftobjdet_first']:
-            freeze_module_grads(self.right_bbox_refiner)
-            freeze_module_grads(self.keypt1_predictor)
-            freeze_module_grads(self.keypt2_predictor)
         # ========== multi level convs init ==========
         self._multi_level_cls_convs = nn.ModuleList()
         self._multi_level_reg_convs = nn.ModuleList()
@@ -287,44 +284,44 @@ class Cylinder5DDetectionHead(nn.Module):
         )
         # print("forward_objdet_single executed in {:.4f} seconds".format(time.time() - starttime))
 
-        if self._config['is_train_leftobjdet_first']:
-            cls_scores, bboxes, objectnesses = preds_items_multilevels
-            (
-                loss_dict,
-                batch_selected_boxes,
-                batch_selected_classes,
-                batch_selected_confidences
-            ) = self.loss_by_bboxdet(
-                cls_scores,
-                bboxes,
-                objectnesses,
-                gt_labels,
-                batch_img_metas
-            )
-            num_imgs = disparity_prior.shape[0]
-            batch_positive_detections = []
-            for indexImg in range(num_imgs):
-                batch_positive_detections.append({
-                    'bboxes': batch_selected_boxes[indexImg],
-                    'classes': batch_selected_classes[indexImg],
-                    'confidences': batch_selected_confidences[indexImg]
-                })
-            return batch_positive_detections, loss_dict
+        cls_scores, bboxes, objectnesses = preds_items_multilevels
+        (
+            loss_dict_bboxdet,
+            batch_selected_boxes,
+            batch_selected_classes,
+            batch_selected_confidences
+        ) = self.loss_by_bboxdet(
+            cls_scores,
+            bboxes,
+            objectnesses,
+            gt_labels,
+            batch_img_metas
+        )
+        # # ======== For debug left side ========
+        # num_imgs = disparity_prior.shape[0]
+        # batch_positive_detections = []
+        # for indexImg in range(num_imgs):
+        #     batch_positive_detections.append({
+        #         'bboxes': batch_selected_boxes[indexImg],
+        #         'classes': batch_selected_classes[indexImg],
+        #         'confidences': batch_selected_confidences[indexImg]
+        #     })
 
         # select top candidates for stereo bbox regression.
+        preds_items_multilevels_detachcopy = DetachCopyNested(preds_items_multilevels)
         (
-            cls_scores,  # shape is [B, 100, num_class]
-            bboxes,  # Note: shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
-            objectnesses,  # Note: shape is [B, 100],
-            priors
-        ) = self.SelectTopkCandidates(*preds_items_multilevels, img_metas=batch_img_metas)
+            cls_scores_selected,  # shape [B, 100, num_class]
+            bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
+            objectness_selected,  # Note: shape is [B, 100,].
+            priors_selected  # shape [B, 100, 4]
+        ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)
 
         # return shape [B, 100, 6]
         starttime = time.time()
         sbboxes = self.forward_stereo_det(
             left_feature,
             right_feature,
-            bboxes,
+            bboxes_selected,
             disparity_prior,
             batch_img_metas,
             self._config['bbox_expand_factor']
@@ -334,49 +331,82 @@ class Cylinder5DDetectionHead(nn.Module):
         starttime = time.time()
         keypt1_pred = self.forward_keypt_det(
             left_feature,
-            sbboxes[..., :4],
+            copy.deepcopy(bboxes_selected),
             self.keypt1_predictor
         )
         keypt2_pred = self.forward_keypt_det(
             left_feature,
-            sbboxes[..., :4],
+            copy.deepcopy(bboxes_selected),
             self.keypt2_predictor
         )
-        
-        loss_dict = None
+
+        loss_dict_final = None
         batch_positive_detections = []
         if gt_labels is not None:
             # get loss path
             starttime = time.time()
-            loss_dict, pos_masks = self.loss_by_stereobboxdet(
-                priors,
-                cls_scores,
+            loss_dict_final, pos_masks = self.loss_by_stereobboxdet(
+                priors_selected,
+                cls_scores_selected,
                 sbboxes,
-                objectnesses,
+                objectness_selected,
                 keypt1_pred,
                 keypt2_pred,
                 gt_labels,
                 batch_img_metas
             )
+            if loss_dict_bboxdet is not None:
+                loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
+                loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
+                loss_dict_final['loss_obj'] = loss_dict_bboxdet['loss_obj']
 
             num_imgs = disparity_prior.shape[0]
             pos_masks = pos_masks.reshape(num_imgs, -1)
             for indexImg in range(num_imgs):
-                classes = torch.argmax(cls_scores[indexImg][pos_masks[indexImg]], dim=-1)
-                keypt1s = torch.gather(keypt1_pred[indexImg][pos_masks[indexImg]], 1, classes.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze().detach()
-                keypt2s = torch.gather(keypt2_pred[indexImg][pos_masks[indexImg]], 1, classes.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze().detach()
+                classes = torch.argmax(cls_scores_selected[indexImg][pos_masks[indexImg]].detach(), dim=-1)
+                keypt1s = torch.gather(keypt1_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze()
+                keypt2s = torch.gather(keypt2_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze()
                 batch_positive_detections.append({
                     'sbboxes': sbboxes[indexImg][pos_masks[indexImg]],
                     'classes': classes,
-                    'confidences': torch.max(cls_scores[indexImg][pos_masks[indexImg]], dim=-1)[0].detach() * objectnesses[indexImg][pos_masks[indexImg]].detach(),
+                    'confidences': torch.max(cls_scores_selected[indexImg][pos_masks[indexImg]].detach() , dim=-1)[0] * objectness_selected[indexImg][pos_masks[indexImg]].detach(),
                     'keypt1s': keypt1s,
                     'keypt2s': keypt2s
                 })
 
-        return batch_positive_detections, loss_dict
-
+        return batch_positive_detections, loss_dict_final
+    
     @torch.no_grad()
     def SelectTopkCandidates(
+        self,
+        cls_scores: Tuple[Tensor],
+        bbox_preds: Tuple[Tensor],
+        objectnesses: Tuple[Tensor],
+        img_metas: Dict
+    ):
+        """
+        select topk candidates for a batch data.
+        """
+        batch_size = cls_scores[0].shape[0]
+        bboxes_selected, cls_scores_selected, objectness_selected, priors_selected = [], [], [], []
+        for indexD in range(batch_size):
+            cls_scores_one = [cls_score[indexD] for cls_score in cls_scores]
+            bbox_preds_one = [bbox_pred[indexD] for bbox_pred in bbox_preds]
+            objectness_one = [objectness[indexD] for objectness in objectnesses]
+            cls_scores_one, bboxes_one, objectness_one, priors_one = self.SelectTopkCandidates_single(
+                cls_scores_one,
+                bbox_preds_one,
+                objectness_one,
+                img_metas=img_metas
+            )
+            bboxes_selected.append(bboxes_one.unsqueeze(0))
+            cls_scores_selected.append(cls_scores_one.unsqueeze(0))
+            objectness_selected.append(objectness_one.squeeze(-1).unsqueeze(0))
+            priors_selected.append(priors_one.unsqueeze(0))
+        return torch.cat(cls_scores_selected, dim=0), torch.cat(bboxes_selected, dim=0), torch.cat(objectness_selected, dim=0), torch.cat(priors_selected, dim=0)
+
+    @torch.no_grad()
+    def SelectTopkCandidates_single(
         self,
         cls_scores: Tuple[Tensor],
         bbox_preds: Tuple[Tensor],
@@ -387,12 +417,12 @@ class Cylinder5DDetectionHead(nn.Module):
         select topk candidates based on class scores.
 
         Args:
-            cls_scores: list contains multi-level preds result.
+            cls_scores: list contains multi-level preds result. it does not contain batch dimension.
             bbox_preds: list contains multi-level preds result.
             objectnesses: list contains multi-level preds result.
         """
         num_imgs = cls_scores[0].shape[0]
-        featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
+        featmap_sizes = [cls_score.shape[-2:] for cls_score in cls_scores]
         # Follow YOLOX design:
         # uses center priors with 0.5 offset to assign targets,
         # but use center priors without offset to regress bboxes.
@@ -407,67 +437,76 @@ class Cylinder5DDetectionHead(nn.Module):
         nms_pre = self._config.get('nms_pre', -1)
         mlvl_bbox_preds = []
         mlvl_valid_priors = []
-        mlvl_scores = []
+        mlvl_confidences = []
+        mlvl_cls_scores = []
+        mlvl_objectness = []
         level_ids = []
         for level_idx, (cls_score, bbox_pred, objectness, priors) in enumerate(zip(cls_scores, bbox_preds, objectnesses, mlvl_priors)):
             bbox_pred = bbox_pred.permute(1, 2, 0).reshape(-1, 4)
             cls_score = cls_score.permute(1, 2, 0).reshape(-1, self._config['num_classes']).sigmoid()
-            objectness = objectness.permute(1, 2, 0).reshape(-1, 1)
+            objectness = objectness.permute(1, 2, 0).reshape(-1, 1).sigmoid()
             max_scores, labels = torch.max(cls_score, -1)
-            confidences = max_scores * objectness
-            confidences = torch.squeeze(confidences)
+            confidences = max_scores * objectness.squeeze(-1)
             if 0 < nms_pre < confidences.shape[0]:
                 ranked_confidences, rank_inds = confidences.sort(descending=True)
                 topk_inds = rank_inds[:nms_pre]
                 confidences = ranked_confidences[:nms_pre]
                 bbox_pred = bbox_pred[topk_inds, :]
                 priors = priors[topk_inds]
+                cls_score = cls_score[topk_inds]
+                objectness = objectness[topk_inds]
             mlvl_bbox_preds.append(bbox_pred)
             mlvl_valid_priors.append(priors)
             mlvl_confidences.append(confidences)
+            mlvl_cls_scores.append(cls_score)
+            mlvl_objectness.append(objectness)
             # use level id to implement the separate level nms
             level_ids.append(
-                scores.new_full((confidences.size(0), ),
+                confidences.new_full((confidences.size(0), ),
                                 level_idx,
                                 dtype=torch.long))
         bbox_pred = torch.cat(mlvl_bbox_preds)
         priors = cat_boxes(mlvl_valid_priors)
         bboxes = self._bbox_decode(priors, bbox_pred)
+
         results = InstanceData()
         results.bboxes = bboxes
         results.scores = torch.cat(mlvl_confidences)
+        results.cls_scores = torch.cat(mlvl_cls_scores)
+        results.priors = priors
+        results.objectness = torch.cat(mlvl_objectness)
         results.level_ids = torch.cat(level_ids)
-            
+        # filter small size bboxes
+        if self._config.get('min_bbox_size', -1) >= 0:
+            w = results.bboxes[:, 2] - results.bboxes[:, 0]
+            h = results.bboxes[:, 3] - results.bboxes[:, 1]
+            valid_mask = (w > self._config['min_bbox_size']) & (h > self._config['min_bbox_size'])
+            if not valid_mask.all():
+                results = results[valid_mask]
 
-        # # flatten cls_scores, bbox_preds, and objectness
-        # flatten_cls_scores = [
-        #     cls_score.permute(0, 2, 3, 1).reshape(num_imgs, -1, self._config['num_classes'])
-        #     for cls_score in cls_scores
-        # ]
-        # flatten_bbox_preds = [
-        #     bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
-        #     for bbox_pred in bbox_preds
-        # ]
-        # flatten_objectness = [
-        #     objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
-        #     for objectness in objectnesses
-        # ]
-
-        # flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()  # Note: cat multi-level preds into one tensor. First dim becomes batch.
-        # flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
-        # flatten_objectness = torch.cat(flatten_objectness, dim=1).sigmoid()
-        # flatten_priors = torch.cat(mlvl_priors)
-        # flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
-
-        max_scores, labels = torch.max(flatten_cls_scores, -1)
-        confidences = flatten_objectness * max_scores
-        top_confidences, indices = torch.topk(confidences, self._config['num_topk_candidates'])
-        return (
-            SelectByIndices(flatten_cls_scores, indices),
-            SelectByIndices(flatten_bboxes, indices),
-            SelectByIndices(flatten_objectness, indices),
-            SelectByIndices(flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1), indices)
+        det_bboxes, keep_idxs = batched_nms(
+            results.bboxes,
+            results.scores,
+            results.level_ids,
+            {'type': 'nms', 'iou_threshold': 0.7}
         )
+        results = results[keep_idxs]
+        if results.bboxes.shape[0] < self._config['num_topk_candidates']:
+            # patching missing length with zeros
+            len_missing = self._config['num_topk_candidates'] - results.bboxes.shape[0]
+            bboxes_toadd = results.bboxes.new_zeros((len_missing, 4))
+            scores_toadd = results.scores.new_zeros((len_missing,))
+            priors_toadd = results.priors.new_zeros((len_missing, results.priors.shape[-1]))
+            cls_scores_toadd = results.cls_scores.new_zeros((len_missing, results.cls_scores.shape[-1]))
+            objectness_toadd = results.objectness.new_zeros((len_missing, 1))
+            results.bboxes = torch.cat((results.bboxes, bboxes_toadd))
+            results.scores = torch.cat((results.scores, scores_toadd))
+            results.priors = torch.cat((results.priors, priors_toadd))
+            results.cls_scores = torch.cat((results.cls_scores, cls_scores_toadd))
+            results.objectness = torch.cat((results.objectness, objectness_toadd))
+        else:
+            results = results[:self._config['num_topk_candidates']]
+        return results.cls_scores, results.bboxes, results.objectness, results.priors
 
     def forward_objdet_single(
         self,
@@ -535,7 +574,7 @@ class Cylinder5DDetectionHead(nn.Module):
             sbboxes_pred: shape [B, 100, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] stereo bbox
         """
         # enlarge bboxes
-        _bboxes_pred = bboxes_pred.clone()
+        _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
         dwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * (bbox_expand_factor - 1.)
         # dhboxes = (_bboxes_pred[..., 3] - _bboxes_pred[..., 1]) * (bbox_expand_factor - 1.)
         _bboxes_pred[..., 0] -= dwboxes / 2  # Note: only need to enlarge x direction, because we assume for stereo y is aligned.
@@ -549,12 +588,13 @@ class Cylinder5DDetectionHead(nn.Module):
         xindi = ((_bboxes_pred[..., 0] + _bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1)
         yindi = ((_bboxes_pred[..., 1] + _bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1)
         bbox_disps = disp_prior[:, yindi, xindi].squeeze(0)  # Note: dimension will increase one due to xindi, yindi shape
-        _bboxes_pred[..., 0] += bbox_disps
-        _bboxes_pred[..., 2] += bbox_disps
+        _bboxes_pred[..., 0] -= bbox_disps  # warp to more left side.
+        _bboxes_pred[..., 2] -= bbox_disps
         rois_right = _bboxes_pred.reshape(-1, 4)
         rois_right = torch.cat((batch_number, rois_right), dim=1)
         right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)
         right_bboxes_pred = self.right_bbox_refiner(right_roi_feats)
+        # TODO: visualize warp result.
 
         xc_r = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * right_bboxes_pred[:, 0] + _bboxes_pred[..., 0]
         w_r = right_bboxes_pred[:, 1] * (_bboxes_pred[..., 2] - _bboxes_pred[..., 0])
@@ -662,15 +702,7 @@ class Cylinder5DDetectionHead(nn.Module):
         keypt1_targets = torch.cat(keypt1_targets, 0)
         keypt2_targets = torch.cat(keypt2_targets, 0)
 
-        loss_obj = self.loss_obj(objectness.view(-1, 1)[pos_masks], obj_targets[pos_masks]) / num_total_samples
-
         if num_pos > 0:
-            loss_cls = self.loss_cls(
-                cls_scores.view(-1, self._config['num_classes'])[pos_masks],
-                cls_targets) / num_total_samples
-            loss_bbox = self.loss_bbox(
-                bboxes.view(-1, 6)[pos_masks][:, :4],
-                bbox_targets[:, :4]) / num_total_samples
             rbboxes = torch.cat([
                 bboxes.view(-1, 6)[pos_masks][:, 4].unsqueeze(-1),
                 bboxes.view(-1, 6)[pos_masks][:, 1].unsqueeze(-1).detach(),
@@ -694,18 +726,13 @@ class Cylinder5DDetectionHead(nn.Module):
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298
-            loss_cls = cls_scores.sum() * 0
-            loss_bbox = bboxes[..., :4].sum() * 0
             loss_keypts = [
                 keypt1_pred.sum() * 0,
                 keypt2_pred.sum() * 0
             ]
             loss_rbbox = bboxes[..., 4:].sum() * 0
         loss_dict = {
-            'loss_cls': loss_cls,
-            'loss_bbox': loss_bbox,
             'loss_rbbox': loss_rbbox,
-            'loss_obj': loss_obj,
             'loss_keypt1': loss_keypts[0],
             'loss_keypt2': loss_keypts[1]
         }

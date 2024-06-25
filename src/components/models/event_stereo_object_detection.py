@@ -107,8 +107,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
             preds_final['objdet'] = object_preds
             if self.logger is not None:
-                starttime = time.time()
-                if 'sbboxes' in object_preds:
+                if 'sbboxes' in object_preds[0]:
                     leftimage_views, rightimage_views = multi_apply(
                         self.RenderImageWithBboxesAndKeypts,
                         left_event_sharp.detach().squeeze(1).cpu().numpy(),
@@ -211,11 +210,11 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             keypt1_int = (int(keypt1[0] * w + top_left[0]), int(keypt1[1] * h + top_left[1]))
             keypt2_int = (int(keypt2[0] * w + top_left[0]), int(keypt2[1] * h + top_left[1]))
             cv2.circle(left_event_sharp, keypt1_int, radius=3, color=(0, 255, 0), thickness=-1)
-            cv2.circle(right_event_sharp, keypt2_int, radius=3, color=(0, 255, 0), thickness=-1)
+            cv2.circle(left_event_sharp, keypt2_int, radius=3, color=(0, 0, 255), thickness=-1)
 
             top_left = (int(bbox[4]), int(bbox[1]))
             bottom_right = (int(bbox[5]), int(bbox[3]))
-            cv2.rectangle(right_event_sharp, top_left, bottom_right, (255,), thickness=3)
+            cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
         return torch.from_numpy(left_event_sharp), torch.from_numpy(right_event_sharp)
 
     def RenderImageWithBboxes(
