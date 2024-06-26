@@ -45,9 +45,12 @@ class DLManager:
                     "loading checkpoint {} ...".format(self.args.resume_cpt)
                 )
             # FIXME: adding 'module.' to each key in model state dict
-            model_statedict = {}
+            model_statedict = self.model.state_dict()
             for key, value in checkpoint["model"].items():
-                model_statedict["module." + key] = value
+                if model_statedict["module." + key].size() == value.size():
+                    model_statedict["module." + key] = value
+                else:
+                    print("Skipping parameter {} due to size mismatch: {} vs {}".format(key, model_statedict["module." + key].size(), value.size()))
             self.model.load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 self.optimizer.load_state_dict(checkpoint["optimizer"])
