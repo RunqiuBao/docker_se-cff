@@ -35,13 +35,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   TEST:
@@ -89,7 +89,7 @@ MODEL:
           act_cfg:
             type: 'Swish'
     disp_head_cfg:
-      is_freeze: False
+      is_freeze: True
       PARAMS:
         in_channels: 1
         max_disp: 288
@@ -103,7 +103,7 @@ MODEL:
         feat_channels: 256
         num_stacked_convs: 2
         num_topk_candidates: 1000
-        bbox_expand_factor: 1.3
+        bbox_expand_factor: 2.0
         strides: [8, 16, 32]
         norm_cfg: 
           type: BN
@@ -113,6 +113,8 @@ MODEL:
           type: ReLU
         # region proposal
         nms_pre: 3000
+        # right bbox regression
+        right_roi_feat_size: 32
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

@@ -38,7 +38,7 @@ class Cylinder5DDetectionHead(nn.Module):
         self.bbox_roi_extractor = MODELS.build(
             {
                 'type': 'SingleRoIExtractor',
-                'roi_layer': {'type': 'RoIAlign', 'output_size': 14, 'sampling_ratio': 0},
+                'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['right_roi_feat_size'], 'sampling_ratio': 0},
                 'out_channels': 128,
                 'featmap_strides': self.strides
             }
@@ -82,7 +82,8 @@ class Cylinder5DDetectionHead(nn.Module):
         self.right_bbox_refiner = self._build_bbox_refiner_convs(
             self._config['in_channels'],
             self._config['feat_channels'],
-            output_logits=2
+            output_logits=2,
+            final_featmap_size=self._config['right_roi_feat_size'] // 2
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
@@ -235,6 +236,7 @@ class Cylinder5DDetectionHead(nn.Module):
         kernel_size: int = 3,
         stride: int = 1,
         padding: int = 1,
+        final_featmap_size: int = 7
     ) -> nn.Sequential:
         """
         For left, output logits are [delta_x, delta_y, w, h], w and h are relative values to bbox size;
@@ -245,7 +247,7 @@ class Cylinder5DDetectionHead(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Flatten(),
-            nn.Linear(feat_channels * 7 * 7, 4096),
+            nn.Linear(feat_channels * final_featmap_size * final_featmap_size, 4096),
             nn.ReLU(),
             # nn.Dropout(0.5),
             nn.Linear(4096, 4096),
@@ -595,6 +597,11 @@ class Cylinder5DDetectionHead(nn.Module):
         right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)
         right_bboxes_pred = self.right_bbox_refiner(right_roi_feats)
         # TODO: visualize warp result.
+        if self.logger is not None:
+            roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
+            roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
+            roi_feat_sample /= roi_feat_sample.max()
+            self.logger.add_image("roi_feat_sample", roi_feat_sample)
 
         xc_r = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * right_bboxes_pred[:, 0] + _bboxes_pred[..., 0]
         w_r = right_bboxes_pred[:, 1] * (_bboxes_pred[..., 2] - _bboxes_pred[..., 0])
