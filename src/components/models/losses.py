@@ -48,29 +48,29 @@ class DisparityLoss(nn.Module):
                 valid_mask = valid_mask.to(torch.bool)
                 warp_loss = self._warpLoss(left_img[valid_mask], left_img_warped[valid_mask])
 
-            if self.logger is not None:
-                leftimage_view = left_img[0].detach().squeeze().cpu()
-                leftimage_view -= leftimage_view.min()
-                leftimage_view /= leftimage_view.max()
-                rightimage_view = right_img[0].detach().cpu()
-                rightimage_view -= rightimage_view.min()
-                rightimage_view /= rightimage_view.max()
-                if self.disp_loss_cfg["use_warp_loss"]:
-                    leftimage_warped_view = left_img_warped[0].squeeze().detach().cpu()
-                    leftimage_warped_view -= leftimage_warped_view.min()
-                    leftimage_warped_view /= leftimage_warped_view.max()
-                    self.logger.add_image(
-                        "left sharp warped",
-                        leftimage_warped_view
-                    )
-                self.logger.add_image(
-                    "left sharp image",
-                    leftimage_view
-                )
-                self.logger.add_image(
-                    "right sharp image",
-                    rightimage_view
-                )
+            # if self.logger is not None:
+            #     leftimage_view = left_img[0].detach().squeeze().cpu()
+            #     leftimage_view -= leftimage_view.min()
+            #     leftimage_view /= leftimage_view.max()
+            #     rightimage_view = right_img[0].detach().cpu()
+            #     rightimage_view -= rightimage_view.min()
+            #     rightimage_view /= rightimage_view.max()
+            #     if self.disp_loss_cfg["use_warp_loss"]:
+            #         leftimage_warped_view = left_img_warped[0].squeeze().detach().cpu()
+            #         leftimage_warped_view -= leftimage_warped_view.min()
+            #         leftimage_warped_view /= leftimage_warped_view.max()
+            #         self.logger.add_image(
+            #             "left sharp warped",
+            #             leftimage_warped_view
+            #         )
+            #     self.logger.add_image(
+            #         "left sharp image",
+            #         leftimage_view
+            #     )
+            #     self.logger.add_image(
+            #         "right sharp image",
+            #         rightimage_view
+            #     )
 
             if self.is_distributed:
                 loss_list = [l1_loss, warp_loss] if self.disp_loss_cfg["use_warp_loss"] else [l1_loss]

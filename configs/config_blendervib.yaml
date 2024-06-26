@@ -114,7 +114,7 @@ MODEL:
         # region proposal
         nms_pre: 3000
         # right bbox regression
-        right_roi_feat_size: 32
+        right_roi_feat_size: 24
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

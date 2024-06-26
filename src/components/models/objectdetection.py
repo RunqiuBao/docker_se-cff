@@ -575,6 +575,13 @@ class Cylinder5DDetectionHead(nn.Module):
         Returns:
             sbboxes_pred: shape [B, 100, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] stereo bbox
         """
+        if self.logger is not None:
+            right_feat_sample = right_feat[0][0, 0, :, :].detach().cpu()
+            right_feat_sample = right_feat_sample - right_feat_sample.min()
+            right_feat_sample /= right_feat_sample.max()
+            right_feat_sample = F.interpolate(right_feat_sample.unsqueeze(0).unsqueeze(0), size=(720, 1280), mode='bilinear', align_corners=False)
+            self.logger.add_image("right_feat_sample", right_feat_sample.squeeze())
+
         # enlarge bboxes
         _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
         dwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * (bbox_expand_factor - 1.)
@@ -594,9 +601,8 @@ class Cylinder5DDetectionHead(nn.Module):
         _bboxes_pred[..., 2] -= bbox_disps
         rois_right = _bboxes_pred.reshape(-1, 4)
         rois_right = torch.cat((batch_number, rois_right), dim=1)
-        right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)
+        right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
         right_bboxes_pred = self.right_bbox_refiner(right_roi_feats)
-        # TODO: visualize warp result.
         if self.logger is not None:
             roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
             roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
