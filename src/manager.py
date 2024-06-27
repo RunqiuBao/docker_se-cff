@@ -47,10 +47,10 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = self.model.state_dict()
             for key, value in checkpoint["model"].items():
-                if model_statedict["module." + key].size() == value.size():
+                if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
                     model_statedict["module." + key] = value
                 else:
-                    print("Skipping parameter {} due to size mismatch: {} vs {}".format(key, model_statedict["module." + key].size(), value.size()))
+                    print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
             self.model.load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 self.optimizer.load_state_dict(checkpoint["optimizer"])

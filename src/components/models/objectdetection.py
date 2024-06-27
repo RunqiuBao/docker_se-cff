@@ -43,6 +43,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 'featmap_strides': self.strides
             }
         )
+        self.iou_calculator = TASK_UTILS.build({'type': 'BboxOverlaps2D'})
         # loss preparation
         self.loss_obj = MODELS.build({'type': 'CrossEntropyLoss',
                                       'use_sigmoid': True,
@@ -61,7 +62,11 @@ class Cylinder5DDetectionHead(nn.Module):
                                         'mode': 'square',
                                         'eps': 1e-16,
                                         'reduction': 'sum',
-                                        'loss_weight': 1.0})
+                                        'loss_weight': 5.0})
+        self.loss_rscore = MODELS.build({'type': 'CrossEntropyLoss',
+                                      'use_sigmoid': True,
+                                      'reduction': 'sum',
+                                      'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
         self.loss_keypt1 = MODELS.build({'type': 'CrossEntropyLoss',
                                     'use_sigmoid': True,
@@ -82,8 +87,20 @@ class Cylinder5DDetectionHead(nn.Module):
         self.right_bbox_refiner = self._build_bbox_refiner_convs(
             self._config['in_channels'],
             self._config['feat_channels'],
-            output_logits=2,
-            final_featmap_size=self._config['right_roi_feat_size'] // 2
+            output_logits=4,
+            norm_eps=self._config["norm_cfg"]["eps"],
+            norm_momentum=self._config["norm_cfg"]["momentum"],
+            act_type=self._config["act_cfg"]["type"]
+        )
+        self.right_bbox_refiner_scorer = self._build_bbox_rightscorer_convs(
+            self._config['in_channels'],
+            self._config['feat_channels'],
+            norm_eps=self._config["norm_cfg"]["eps"],
+            norm_momentum=self._config["norm_cfg"]["momentum"],
+            act_type=self._config["act_cfg"]["type"]
+        )
+        self.right_bbox_refiner_scorer_output = nn.Conv2d(
+            self._config["feat_channels"], 1, 1
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
@@ -168,6 +185,8 @@ class Cylinder5DDetectionHead(nn.Module):
         for module_list in [self._multi_level_conv_cls, self._multi_level_conv_obj]:
             for module in module_list:
                 module.bias.data.fill_(bias_init)
+        
+        self.right_bbox_refiner_scorer_output.bias.data.fill_(bias_init)
 
     @staticmethod
     def _build_keypts_convs(in_channels: int, feat_channels: int, num_classes: int):
@@ -236,7 +255,9 @@ class Cylinder5DDetectionHead(nn.Module):
         kernel_size: int = 3,
         stride: int = 1,
         padding: int = 1,
-        final_featmap_size: int = 7
+        norm_eps: float = 1e-5,
+        norm_momentum: float = 0.1,
+        act_type: str = "ReLU"
     ) -> nn.Sequential:
         """
         For left, output logits are [delta_x, delta_y, w, h], w and h are relative values to bbox size;
@@ -244,16 +265,33 @@ class Cylinder5DDetectionHead(nn.Module):
         """
         bbox_refiner = nn.Sequential(
             nn.Conv2d(in_channels, feat_channels, kernel_size, stride=stride, padding=padding),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Flatten(),
-            nn.Linear(feat_channels * final_featmap_size * final_featmap_size, 4096),
-            nn.ReLU(),
-            # nn.Dropout(0.5),
-            nn.Linear(4096, 4096),
-            nn.ReLU(),
-            # nn.Dropout(0.5),
-            nn.Linear(4096, output_logits)
+            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+            getattr(nn, act_type)(),
+            nn.Conv2d(feat_channels, feat_channels, kernel_size, stride=stride, padding=padding),
+            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+            getattr(nn, act_type)(),
+            nn.Conv2d(feat_channels, output_logits, 1)
+        )
+        return bbox_refiner
+    
+    @staticmethod
+    def _build_bbox_rightscorer_convs(
+        in_channels: int,
+        feat_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        norm_eps: float = 1e-5,
+        norm_momentum: float = 0.1,
+        act_type: str = "ReLU"
+    ) -> nn.Sequential:
+        bbox_refiner = nn.Sequential(
+            nn.Conv2d(in_channels, feat_channels, kernel_size, stride=stride, padding=padding),
+            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+            getattr(nn, act_type)(),
+            nn.Conv2d(feat_channels, feat_channels, kernel_size, stride=stride, padding=padding),
+            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+            getattr(nn, act_type)()
         )
         return bbox_refiner
 
@@ -320,7 +358,7 @@ class Cylinder5DDetectionHead(nn.Module):
 
         # return shape [B, 100, 6]
         starttime = time.time()
-        sbboxes = self.forward_stereo_det(
+        sbboxes, refined_right_bboxes, refined_right_scores = self.forward_stereo_det(
             left_feature,
             right_feature,
             bboxes_selected,
@@ -328,6 +366,7 @@ class Cylinder5DDetectionHead(nn.Module):
             batch_img_metas,
             self._config['bbox_expand_factor']
         )
+        # print("forward_stereo_det executed in {:.4f} seconds".format(time.time() - starttime))
 
         # return shape [B, 100, num_classes, 2]
         starttime = time.time()
@@ -341,22 +380,27 @@ class Cylinder5DDetectionHead(nn.Module):
             copy.deepcopy(bboxes_selected),
             self.keypt2_predictor
         )
+        # print("forward_keypt_det executed in {:.4f} seconds".format(time.time() - starttime))
 
         loss_dict_final = None
         batch_positive_detections = []
         if gt_labels is not None:
             # get loss path
             starttime = time.time()
-            loss_dict_final, pos_masks = self.loss_by_stereobboxdet(
+            loss_dict_final, pos_masks, sbboxes = self.loss_by_stereobboxdet(
                 priors_selected,
                 cls_scores_selected,
                 sbboxes,
+                refined_right_bboxes,
+                refined_right_scores,
                 objectness_selected,
                 keypt1_pred,
                 keypt2_pred,
                 gt_labels,
                 batch_img_metas
             )
+            # print("loss_by_stereobboxdet executed in {:.4f} seconds".format(time.time() - starttime))
+
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
                 loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
@@ -573,7 +617,9 @@ class Cylinder5DDetectionHead(nn.Module):
             bbox_expand_factor: ratio to enlarge bbox due to inaccurate disp prior.
 
         Returns:
-            sbboxes_pred: shape [B, 100, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] stereo bbox
+            sbboxes_pred: shape [B, 100, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
+            refined_right_bboxes: shape [B, 100, ker_h * ker_w, 4]. Corresponding refined right bboxes.
+            right_scores_refine: shape [B, 100, ker_h * ker_w, 1]. Corresponding scores.
         """
         if self.logger is not None:
             right_feat_sample = right_feat[0][0, 0, :, :].detach().cpu()
@@ -601,20 +647,25 @@ class Cylinder5DDetectionHead(nn.Module):
         _bboxes_pred[..., 2] -= bbox_disps
         rois_right = _bboxes_pred.reshape(-1, 4)
         rois_right = torch.cat((batch_number, rois_right), dim=1)
-        right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
-        right_bboxes_pred = self.right_bbox_refiner(right_roi_feats)
+        right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.        
+        right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
+        right_scores_refine = self.right_bbox_refiner_scorer_output(self.right_bbox_refiner_scorer(right_roi_feats))  # Note: shape [B*100, 1, 7, 7]
+        logits, ker_h, ker_w = right_boxes_refine.shape[-3:]
         if self.logger is not None:
             roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
             roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
             roi_feat_sample /= roi_feat_sample.max()
             self.logger.add_image("roi_feat_sample", roi_feat_sample)
 
-        xc_r = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * right_bboxes_pred[:, 0] + _bboxes_pred[..., 0]
-        w_r = right_bboxes_pred[:, 1] * (_bboxes_pred[..., 2] - _bboxes_pred[..., 0])
-        x_tl_r = (xc_r - w_r / 2).view(bboxes_pred.shape[0], -1).unsqueeze(-1)
-        x_br_r = (xc_r + w_r / 2).view(bboxes_pred.shape[0], -1).unsqueeze(-1)
+        batch_size = bboxes_pred.shape[0]
+        x_tl_r = _bboxes_pred[..., 0].view(batch_size, -1).unsqueeze(-1)
+        x_br_r = _bboxes_pred[..., 2].view(batch_size, -1).unsqueeze(-1)
         sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1)
-        return sbboxes_pred
+        right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
+        refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
+        torch.cuda.synchronize()  # FIXME: need this to avoid stuck.
+
+        return sbboxes_pred, refined_right_bboxes, right_scores_refine.view(batch_size, -1, 1, ker_h, ker_w).permute(0, 1, 3, 4, 2)
 
     def forward_keypt_det(
         self,
@@ -656,6 +707,8 @@ class Cylinder5DDetectionHead(nn.Module):
         priors: Tensor,
         cls_scores: Tensor,
         bboxes: Tensor,
+        right_bboxes: Tensor,
+        right_scores: Tensor,
         objectness: Tensor,
         keypt1_pred: Tensor,
         keypt2_pred: Tensor,
@@ -668,7 +721,9 @@ class Cylinder5DDetectionHead(nn.Module):
         Args:
             priors: shape [B, 100, 4],
             cls_scores: shape [B, 100, num_class]
-            bboxes: shape [B, 100, 6]. [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] format bbox, all in global scale.
+            bboxes: shape [B, 100, 6]. (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format bbox, all in global scale.
+            right_bboxes: shape [B, 100, ker_h*ker_w, 4]. (tl_x_r, tl_y_r, br_x_r, br_y_r) format, refined right bboxes. all in global scale.
+            right_scores: shape [B, 100, ker_h*ker_w, 1]. Scores for above right_bboxes.
             objectness: shape [B, 100].
             keypt1_pred: [B, 100, num_class, 2]
             keypt2_pred: [B, 100, num_class, 2]
@@ -695,8 +750,6 @@ class Cylinder5DDetectionHead(nn.Module):
             cls_scores.detach(),
             bboxes.detach(),
             objectness.detach(),
-            keypt1_pred.detach(),
-            keypt2_pred.detach(),
             batch_gt_labels,
             batch_img_metas
         )
@@ -716,19 +769,33 @@ class Cylinder5DDetectionHead(nn.Module):
         keypt2_targets = torch.cat(keypt2_targets, 0)
 
         if num_pos > 0:
-            rbboxes = torch.cat([
-                bboxes.view(-1, 6)[pos_masks][:, 4].unsqueeze(-1),
-                bboxes.view(-1, 6)[pos_masks][:, 1].unsqueeze(-1).detach(),
-                bboxes.view(-1, 6)[pos_masks][:, 5].unsqueeze(-1),
-                bboxes.view(-1, 6)[pos_masks][:, 3].unsqueeze(-1).detach()
-            ], dim=1)
             rbboxes_targets = torch.cat([
                 bbox_targets[:, 4].unsqueeze(-1),
                 bbox_targets[:, 1].unsqueeze(-1),
                 bbox_targets[:, 5].unsqueeze(-1),
                 bbox_targets[:, 3].unsqueeze(-1)
             ], dim=1)
-            loss_rbbox = self.loss_rbbox(rbboxes, rbboxes_targets) / num_total_samples
+            
+            batch_size, num_priors, num_grids = right_bboxes.shape[:3]
+            rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks]
+            num_positive = rbboxes_refined.shape[0]
+            ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
+            indicies_best_right_forbbox = indicies_best_right.clone().view(num_positive, 1, 1).expand(-1, -1, 4)
+            rbboxes_refined_best = torch.gather(rbboxes_refined, 1, indicies_best_right_forbbox).squeeze(1)
+            loss_rbbox = self.loss_rbbox(rbboxes_refined_best, rbboxes_targets) / num_total_samples
+
+            # right scores
+            rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks]
+            rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
+            rbboxes_scores_targets[torch.arange(0, num_positive, device=rbboxes_scores_targets.device), indicies_best_right, 0] = 1            
+            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets)
+            # substitute right bboxes in sbboxes for visualization.
+            bboxes = bboxes.view(-1, 6)
+            selected_sbboxes = bboxes[pos_masks]
+            selected_sbboxes[:, 4] = rbboxes_refined_best[:, 0]
+            selected_sbboxes[:, 5] = rbboxes_refined_best[:, 2]
+            bboxes[pos_masks] = selected_sbboxes
+            bboxes = bboxes.view(batch_size, num_priors, 6)
             # keypoints
             classSelection = torch.argmax(cls_scores, dim=2).reshape(-1)
             loss_keypts = []        
@@ -743,35 +810,56 @@ class Cylinder5DDetectionHead(nn.Module):
                 keypt1_pred.sum() * 0,
                 keypt2_pred.sum() * 0
             ]
-            loss_rbbox = bboxes[..., 4:].sum() * 0
+            loss_rbbox = right_bboxes.sum() * 0
+            loss_rscore = right_scores.sum() * 0
+
         loss_dict = {
             'loss_rbbox': loss_rbbox,
+            'loss_rscore': loss_rscore,
             'loss_keypt1': loss_keypts[0],
             'loss_keypt2': loss_keypts[1]
         }
-        return  loss_dict, pos_masks.reshape(num_imgs, -1)
+        return  loss_dict, pos_masks.reshape(num_imgs, -1), bboxes
 
-    def _sbbox_decode(self, flatten_priors: Tensor, flatten_sbbox_preds: Tensor) -> Tensor:
+    def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
         """
-        Decode stereo bbox regression result (delta_x, delta_y, w, h, delta_x_r, w_r) to
-        sbboxes (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format.
+        Decode right bbox refine result [B, 100, 4, ker_h, ker_w] whose '4' dimension is (delta_x, delta_y, w_factor, h_factor) to
+        same shape whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r).
         Args:
-            ...
-        """
-        xys = (flatten_sbbox_preds[..., :2] * flatten_priors[:, 2:]) + flatten_priors[:, :2]
-        whs = flatten_sbbox_preds[..., 2:4].exp() * flatten_priors[:, 2:]
-        x_r = (flatten_sbbox_preds[..., 4].exp() * flatten_priors[:, 2]) + flatten_priors[:, 0]
-        w_r = flatten_sbbox_preds[..., 5].exp() * flatten_priors[:, 2]
-
-        tl_x = (xys[..., 0] - whs[..., 0] / 2)
-        tl_y = (xys[..., 1] - whs[..., 1] / 2)
-        br_x = (xys[..., 0] + whs[..., 0] / 2)
-        br_y = (xys[..., 1] + whs[..., 1] / 2)
-        tl_x_r = x_r - (w_r / 2)
-        br_x_r = x_r + (w_r / 2)
+            sbboxes_pred:  [B, 100, 6]
+            right_boxes_refine: [B, 100, 4, ker_h, ker_w]
         
-        decoded_sbboxes = torch.stack([tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r], dim=-1)
-        return decoded_sbboxes
+        Return:
+            decoded_right_bboxes: [B, 100, ker_h, ker_w, 4] whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r)
+        """
+        batch_size, num_samples = sbboxes_pred.shape[:2]
+        ker_h, ker_w = right_boxes_refine.shape[-2:]
+        sbboxes_pred = sbboxes_pred.view(-1, 6)
+        right_boxes_refine = right_boxes_refine.view(-1, 4, ker_h, ker_w)
+        
+        strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
+        strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
+        strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(num_samples, ker_h, -1) * strides_x.squeeze(1)
+        grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_x = grid_x.unsqueeze(1)
+        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(num_samples, -1, ker_w) * strides_y.squeeze(1)
+        grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_y = grid_y.unsqueeze(1)
+
+        strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        xys = right_boxes_refine[:, :2, :, :] * strides + grids
+        whs = right_boxes_refine[:, 2:, :, :].exp() * strides
+
+        tl_x = (xys[:, 0, :, :] - whs[:, 0, :, :] / 2).unsqueeze(-1)
+        tl_y = (xys[:, 1, :, :] - whs[:, 1, :, :] / 2).unsqueeze(-1)
+        br_x = (xys[:, 0, :, :] + whs[:, 0, :, :] / 2).unsqueeze(-1)
+        br_y = (xys[:, 1, :, :] + whs[:, 1, :, :] / 2).unsqueeze(-1)
+
+        decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
+        return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
 
     def _bbox_decode(self, priors: Tensor, bbox_preds: Tensor) -> Tensor:
         """
@@ -806,8 +894,6 @@ class Cylinder5DDetectionHead(nn.Module):
         cls_scores: Tensor,
         bboxes: Tensor,
         objectness: Tensor,
-        keypt1_pred: Tensor,
-        keypt2_pred: Tensor,
         gt_labels: Dict,
         img_metas: Dict
     ) -> tuple:
@@ -1037,5 +1123,32 @@ class Cylinder5DDetectionHead(nn.Module):
         pos_mask = torch.zeros_like(objectness).to(torch.bool)
         pos_mask[pos_inds] = 1
         return (pos_mask, cls_target, obj_target, bbox_target, num_pos_per_img)
+    
+    @torch.no_grad()
+    def batch_iou_calculator_simple(self, bboxes_preds: Tensor, bboxes_ref: Tensor):
+        """
+        compute IoU between each pred at each batch and the only ref bbox at each batch.
+        Args:
+            bboxes_preds: [B, num_grids, 4]. box format (tl_x, tl_y, br_x, br_y).
+            bboxes_ref: [B, 1, 4].
+
+        Returns: 
+            ious: [B,  num_grids]
+            indicies_best_right: [B]
+        """
+        assert bboxes_ref.shape[1] == 1, "bboxes_ref should have only one at each batch."
+        num_grids = bboxes_preds.shape[1]
+        bboxes_ref = bboxes_ref.expand(-1, num_grids, -1)
+        intersectionBox_tl_x = torch.max(torch.stack((bboxes_preds[..., 0], bboxes_ref[..., 0]), dim=-1), dim=-1)[0]
+        intersectionBox_br_x = torch.min(torch.stack((bboxes_preds[..., 2], bboxes_ref[..., 2]), dim=-1), dim=-1)[0]
+        
+        ws = torch.clamp(intersectionBox_br_x - intersectionBox_tl_x, min=0, max=None)
+        intersectionBox_tl_y = torch.max(torch.stack((bboxes_preds[..., 1], bboxes_ref[..., 1]), dim=-1), dim=-1)[0]
+        intersectionBox_br_y = torch.min(torch.stack((bboxes_preds[..., 3], bboxes_ref[..., 3]), dim=-1), dim=-1)[0]
+        hs = torch.clamp(intersectionBox_br_y - intersectionBox_tl_y, min=0, max=None)
+        intersectionAreas = ws * hs  # [B, num_grids]
+        unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
+        ious = intersectionAreas / unionAreas
+        return ious, torch.max(ious, dim=-1)[1]
 
 

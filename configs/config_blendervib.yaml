@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 400
+TOTAL_EPOCH: 300
 METHOD: base
 DATASET:
   TRAIN:
@@ -103,7 +103,7 @@ MODEL:
         feat_channels: 256
         num_stacked_convs: 2
         num_topk_candidates: 1000
-        bbox_expand_factor: 2.0
+        bbox_expand_factor: 1.6
         strides: [8, 16, 32]
         norm_cfg: 
           type: BN
@@ -114,7 +114,7 @@ MODEL:
         # region proposal
         nms_pre: 3000
         # right bbox regression
-        right_roi_feat_size: 24
+        right_roi_feat_size: 7
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

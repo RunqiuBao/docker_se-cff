@@ -30,6 +30,7 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
             ("loss_cls", AverageMeter(string_format="%6.3lf")),
             ("loss_bbox", AverageMeter(string_format="%6.3lf")),
             ("loss_rbbox", AverageMeter(string_format="%6.3lf")),
+            ("loss_rscore", AverageMeter(string_format="%6.3lf")),
             ("loss_obj", AverageMeter(string_format="%6.3lf")),
             ("loss_keypt1", AverageMeter(string_format="%6.3lf")),
             ("loss_keypt2", AverageMeter(string_format="%6.3lf"))
@@ -99,6 +100,7 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
             ("loss_cls", AverageMeter(string_format="%6.3lf")),
             ("loss_bbox", AverageMeter(string_format="%6.3lf")),
             ("loss_rbbox", AverageMeter(string_format="%6.3lf")),
+            ("loss_rscore", AverageMeter(string_format="%6.3lf")),
             ("loss_obj", AverageMeter(string_format="%6.3lf")),
             ("loss_keypt1", AverageMeter(string_format="%6.3lf")),
             ("loss_keypt2", AverageMeter(string_format="%6.3lf"))
