@@ -18,7 +18,7 @@ from mmdet.registry import TASK_UTILS, MODELS
 from mmdet.utils import reduce_mean
 from mmcv.ops import batched_nms
 
-from .utils.misc import multi_apply, SelectByIndices, ComputeSoftArgMax1d, freeze_module_grads, DetachCopyNested
+from .utils.misc import multi_apply, ComputeSoftArgMax1d, DetachCopyNested, generate_gaussian, freeze_module_grads
 from . import losses
 
 
@@ -32,6 +32,7 @@ class Cylinder5DDetectionHead(nn.Module):
 
         self._init_layers()
         self.__init_weights()
+        self.is_freeze_keypts = self._config['is_freeze_keypts']
         # objdet tools
         self.assigner = TASK_UTILS.build({'type': 'SimOTAAssigner', 'center_radius': 2.5})
         self.sampler = PseudoSampler()
@@ -92,15 +93,13 @@ class Cylinder5DDetectionHead(nn.Module):
             norm_momentum=self._config["norm_cfg"]["momentum"],
             act_type=self._config["act_cfg"]["type"]
         )
-        self.right_bbox_refiner_scorer = self._build_bbox_rightscorer_convs(
+        self.right_bbox_refiner_scorer = self._build_bbox_refiner_convs(
             self._config['in_channels'],
             self._config['feat_channels'],
+            output_logits=1,
             norm_eps=self._config["norm_cfg"]["eps"],
             norm_momentum=self._config["norm_cfg"]["momentum"],
             act_type=self._config["act_cfg"]["type"]
-        )
-        self.right_bbox_refiner_scorer_output = nn.Conv2d(
-            self._config["feat_channels"], 1, 1
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
@@ -186,7 +185,7 @@ class Cylinder5DDetectionHead(nn.Module):
             for module in module_list:
                 module.bias.data.fill_(bias_init)
         
-        self.right_bbox_refiner_scorer_output.bias.data.fill_(bias_init)
+        # self.right_bbox_refiner_scorer_output.bias.data.fill_(bias_init)
 
     @staticmethod
     def _build_keypts_convs(in_channels: int, feat_channels: int, num_classes: int):
@@ -271,27 +270,6 @@ class Cylinder5DDetectionHead(nn.Module):
             nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
             getattr(nn, act_type)(),
             nn.Conv2d(feat_channels, output_logits, 1)
-        )
-        return bbox_refiner
-    
-    @staticmethod
-    def _build_bbox_rightscorer_convs(
-        in_channels: int,
-        feat_channels: int,
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-        norm_eps: float = 1e-5,
-        norm_momentum: float = 0.1,
-        act_type: str = "ReLU"
-    ) -> nn.Sequential:
-        bbox_refiner = nn.Sequential(
-            nn.Conv2d(in_channels, feat_channels, kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
-            getattr(nn, act_type)(),
-            nn.Conv2d(feat_channels, feat_channels, kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
-            getattr(nn, act_type)()
         )
         return bbox_refiner
 
@@ -400,7 +378,6 @@ class Cylinder5DDetectionHead(nn.Module):
                 batch_img_metas
             )
             # print("loss_by_stereobboxdet executed in {:.4f} seconds".format(time.time() - starttime))
-
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
                 loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
@@ -419,6 +396,16 @@ class Cylinder5DDetectionHead(nn.Module):
                     'keypt1s': keypt1s,
                     'keypt2s': keypt2s
                 })
+
+        if self.is_freeze_keypts:
+            loss_dict_final['loss_keypt1'] *= 0
+            loss_dict_final['loss_keypt2'] *= 0
+        else:
+            loss_dict_final['loss_rbbox'] *= 0
+            loss_dict_final['loss_rscore'] *= 0
+            loss_dict_final['loss_cls'] *= 0
+            loss_dict_final['loss_bbox'] *= 0
+            loss_dict_final['loss_obj'] *= 0            
 
         return batch_positive_detections, loss_dict_final
     
@@ -597,6 +584,7 @@ class Cylinder5DDetectionHead(nn.Module):
         objectness = conv_obj(
             reg_feat
         )
+        
         return cls_score, bbox_pred, objectness
 
     def forward_stereo_det(
@@ -649,7 +637,7 @@ class Cylinder5DDetectionHead(nn.Module):
         rois_right = torch.cat((batch_number, rois_right), dim=1)
         right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.        
         right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
-        right_scores_refine = self.right_bbox_refiner_scorer_output(self.right_bbox_refiner_scorer(right_roi_feats))  # Note: shape [B*100, 1, 7, 7]
+        right_scores_refine = self.right_bbox_refiner_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
         logits, ker_h, ker_w = right_boxes_refine.shape[-3:]
         if self.logger is not None:
             roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
@@ -699,7 +687,7 @@ class Cylinder5DDetectionHead(nn.Module):
             (keypts_prob_x, keypts_prob_y), dim=-1
         ) / map_size  # Note: shape is (b*100, num_classes, 2)
         batch_size, num_bboxes = bbox_pred.shape[:2]
-        num_classes, num_pts_dimension = keypts_pred.shape[-2:]
+        num_classes, num_pts_dimension = keypts_pred.shape[-2:]        
         return keypts_pred.view(batch_size, num_bboxes, num_classes, num_pts_dimension)
 
     def loss_by_stereobboxdet(
@@ -777,18 +765,22 @@ class Cylinder5DDetectionHead(nn.Module):
             ], dim=1)
             
             batch_size, num_priors, num_grids = right_bboxes.shape[:3]
+            kernel_size = self._config['right_roi_feat_size']
             rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks]
             num_positive = rbboxes_refined.shape[0]
             ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
             indicies_best_right_forbbox = indicies_best_right.clone().view(num_positive, 1, 1).expand(-1, -1, 4)
             rbboxes_refined_best = torch.gather(rbboxes_refined, 1, indicies_best_right_forbbox).squeeze(1)
-            loss_rbbox = self.loss_rbbox(rbboxes_refined_best, rbboxes_targets) / num_total_samples
+            loss_rbbox = self.loss_rbbox(rbboxes_refined_best, rbboxes_targets) / num_total_samples            
 
             # right scores
             rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks]
+            ## one hot target
             rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
-            rbboxes_scores_targets[torch.arange(0, num_positive, device=rbboxes_scores_targets.device), indicies_best_right, 0] = 1            
-            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets)
+            rbboxes_scores_targets[torch.arange(0, num_positive, device=rbboxes_scores_targets.device), indicies_best_right, 0] = 1
+            ## gaussian target            
+            # rbboxes_scores_targets = generate_gaussian(kernel_size, torch.stack([indicies_best_right % kernel_size, indicies_best_right // kernel_size], dim=-1), std=0.8)            
+            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples
             # substitute right bboxes in sbboxes for visualization.
             bboxes = bboxes.view(-1, 6)
             selected_sbboxes = bboxes[pos_masks]
@@ -798,11 +790,11 @@ class Cylinder5DDetectionHead(nn.Module):
             bboxes = bboxes.view(batch_size, num_priors, 6)
             # keypoints
             classSelection = torch.argmax(cls_scores, dim=2).reshape(-1)
-            loss_keypts = []        
-            for keypt_pred, losser_keypt, keypt_targets in zip([keypt1_pred, keypt2_pred], [self.loss_keypt1, self.loss_keypt2], [keypt1_targets, keypt2_targets]):
+            loss_keypts = []            
+            for keypt_pred, lossfunc_keypt, keypt_targets in zip([keypt1_pred, keypt2_pred], [self.loss_keypt1, self.loss_keypt2], [keypt1_targets, keypt2_targets]):
                 num_batch, num_priors = keypt_pred.shape[:2]
-                class_selected_keypt_pred = torch.gather(keypt_pred.reshape(-1, self._config['num_classes'], 2), 1, classSelection.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze()
-                loss_keypts.append(losser_keypt(class_selected_keypt_pred[pos_masks], keypt_targets) / num_total_samples)
+                class_selected_keypt_pred = torch.gather(keypt_pred.reshape(-1, self._config['num_classes'], 2), 1, classSelection.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze()                
+                loss_keypts.append(lossfunc_keypt(class_selected_keypt_pred[pos_masks], keypt_targets) / num_total_samples)
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298
@@ -819,6 +811,7 @@ class Cylinder5DDetectionHead(nn.Module):
             'loss_keypt1': loss_keypts[0],
             'loss_keypt2': loss_keypts[1]
         }
+
         return  loss_dict, pos_masks.reshape(num_imgs, -1), bboxes
 
     def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
@@ -1032,7 +1025,7 @@ class Cylinder5DDetectionHead(nn.Module):
         cls_targets = torch.cat(cls_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
         bbox_targets = torch.cat(bbox_targets, 0)
-
+        
         loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
         if num_pos > 0:
             loss_cls = self.loss_cls(

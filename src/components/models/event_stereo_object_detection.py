@@ -14,7 +14,7 @@ from .feature_extractor import FeatureExtractor2
 from .utils.misc import multi_apply, timeit
 
 from . import losses
-from .utils.misc import freeze_module_grads
+from .utils.misc import freeze_module_grads, unfreeze_module_grads
 
 
 class EventStereoObjectDetectionNetwork(nn.Module):
@@ -32,6 +32,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         super(EventStereoObjectDetectionNetwork, self).__init__()
         self.logger = logger
         self.is_freeze_disp = disp_head_cfg['is_freeze']  # Note: when training disparity, skip object detection.
+        self.is_freeze_keypts = object_detection_head_cfg.PARAMS
         # ==========  concentration net ===========
         self._concentration_net = ConcentrationNet(**concentration_net_cfg.PARAMS)
         if self.is_freeze_disp:
@@ -41,6 +42,8 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             net_cfg=feature_extraction_net_cfg.PARAMS
         )
         if not self.is_freeze_disp:
+            freeze_module_grads(self._feature_extraction_net)
+        if not self.is_freeze_keypts:
             freeze_module_grads(self._feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
@@ -57,6 +60,10 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         )
         if not self.is_freeze_disp:
             freeze_module_grads(self._object_detection_head)
+        if not self.is_freeze_keypts:
+            freeze_module_grads(self._object_detection_head)
+            unfreeze_module_grads(self._object_detection_head.keypt1_predictor)
+            unfreeze_module_grads(self._object_detection_head.keypt2_predictor)
         # ============= losses ============
         if not self.is_freeze_disp:
             self._disp_loss = getattr(losses, losses_cfg['disp_loss_cfg']['NAME'])(

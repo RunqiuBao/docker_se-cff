@@ -35,13 +35,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   TEST:
@@ -115,6 +115,8 @@ MODEL:
         nms_pre: 3000
         # right bbox regression
         right_roi_feat_size: 7
+        # keypt prediction
+        is_freeze_keypts: True
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss
