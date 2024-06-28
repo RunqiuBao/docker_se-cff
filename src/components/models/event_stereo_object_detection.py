@@ -32,7 +32,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         super(EventStereoObjectDetectionNetwork, self).__init__()
         self.logger = logger
         self.is_freeze_disp = disp_head_cfg['is_freeze']  # Note: when training disparity, skip object detection.
-        self.is_freeze_keypts = object_detection_head_cfg.PARAMS
+        self.is_freeze_keypts = object_detection_head_cfg.PARAMS['is_freeze_keypts']
         # ==========  concentration net ===========
         self._concentration_net = ConcentrationNet(**concentration_net_cfg.PARAMS)
         if self.is_freeze_disp:

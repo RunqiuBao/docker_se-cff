@@ -29,6 +29,10 @@ class Cylinder5DDetectionHead(nn.Module):
         self._config = net_cfg
         self.logger = logger
         self.strides = [8, 16, 32]
+        self.keypts_visz = {
+            '1': None,
+            '2': None
+        }
 
         self._init_layers()
         self.__init_weights()
@@ -40,6 +44,14 @@ class Cylinder5DDetectionHead(nn.Module):
             {
                 'type': 'SingleRoIExtractor',
                 'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['right_roi_feat_size'], 'sampling_ratio': 0},
+                'out_channels': 128,
+                'featmap_strides': self.strides
+            }
+        )
+        self.keypts_bbox_roi_extractor = MODELS.build(
+            {
+                'type': 'SingleRoIExtractor',
+                'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['keypts_feat_size'], 'sampling_ratio': 0},
                 'out_channels': 128,
                 'featmap_strides': self.strides
             }
@@ -72,11 +84,11 @@ class Cylinder5DDetectionHead(nn.Module):
         self.loss_keypt1 = MODELS.build({'type': 'CrossEntropyLoss',
                                     'use_sigmoid': True,
                                     'reduction': 'sum',
-                                    'loss_weight': 1.0})
+                                    'loss_weight': 6.0})
         self.loss_keypt2 = MODELS.build({'type': 'CrossEntropyLoss',
                                     'use_sigmoid': True,
                                     'reduction': 'sum',
-                                    'loss_weight': 1.0})
+                                    'loss_weight': 6.0})
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
 
@@ -325,7 +337,7 @@ class Cylinder5DDetectionHead(nn.Module):
         #         'confidences': batch_selected_confidences[indexImg]
         #     })
 
-        # select top candidates for stereo bbox regression.
+        # select top candidates for stereo bbox regression.        
         preds_items_multilevels_detachcopy = DetachCopyNested(preds_items_multilevels)
         (
             cls_scores_selected,  # shape [B, 100, num_class]
@@ -351,12 +363,14 @@ class Cylinder5DDetectionHead(nn.Module):
         keypt1_pred = self.forward_keypt_det(
             left_feature,
             copy.deepcopy(bboxes_selected),
-            self.keypt1_predictor
+            self.keypt1_predictor,
+            keypt_id='1'
         )
         keypt2_pred = self.forward_keypt_det(
             left_feature,
             copy.deepcopy(bboxes_selected),
-            self.keypt2_predictor
+            self.keypt2_predictor,
+            keypt_id='2',
         )
         # print("forward_keypt_det executed in {:.4f} seconds".format(time.time() - starttime))
 
@@ -651,7 +665,6 @@ class Cylinder5DDetectionHead(nn.Module):
         sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1)
         right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
         refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
-        torch.cuda.synchronize()  # FIXME: need this to avoid stuck.
 
         return sbboxes_pred, refined_right_bboxes, right_scores_refine.view(batch_size, -1, 1, ker_h, ker_w).permute(0, 1, 3, 4, 2)
 
@@ -659,7 +672,8 @@ class Cylinder5DDetectionHead(nn.Module):
         self,
         left_feat: List[Tensor],
         bbox_pred: Tensor,
-        keypt_predictor: nn.Sequential
+        keypt_predictor: nn.Sequential,
+        keypt_id: str
     ) -> Tensor:
         """
         bbox_pred is top 100 bbox predictions from forward_objdet_single. Same as mask-rcnn.
@@ -675,8 +689,10 @@ class Cylinder5DDetectionHead(nn.Module):
         batch_number = torch.arange(bbox_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(bbox_pred.device)
         rois = bbox_pred.reshape(-1, 4)
         bnum_rois = torch.cat([batch_number, rois], dim=1)
-        roi_feats = self.bbox_roi_extractor(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
+        roi_feats = self.keypts_bbox_roi_extractor(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
         keypts_feat = keypt_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
+        if self.logger is not None:
+            self.keypts_visz[keypt_id] = roi_feats.clone().detach()
         # FIXME: not using torch.argmax, instead multiply prob distribution to a torch.arange to get the coordinates in a differentiable way. 
         map_size = keypts_feat.shape[-1]
         keypts_prob_x = ComputeSoftArgMax1d(keypts_feat.sum(dim=-2))  # Note: shape is (b*100, num_classes, 1)
@@ -687,7 +703,7 @@ class Cylinder5DDetectionHead(nn.Module):
             (keypts_prob_x, keypts_prob_y), dim=-1
         ) / map_size  # Note: shape is (b*100, num_classes, 2)
         batch_size, num_bboxes = bbox_pred.shape[:2]
-        num_classes, num_pts_dimension = keypts_pred.shape[-2:]        
+        num_classes, num_pts_dimension = keypts_pred.shape[-2:]
         return keypts_pred.view(batch_size, num_bboxes, num_classes, num_pts_dimension)
 
     def loss_by_stereobboxdet(
@@ -769,23 +785,32 @@ class Cylinder5DDetectionHead(nn.Module):
             rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks]
             num_positive = rbboxes_refined.shape[0]
             ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
-            indicies_best_right_forbbox = indicies_best_right.clone().view(num_positive, 1, 1).expand(-1, -1, 4)
-            rbboxes_refined_best = torch.gather(rbboxes_refined, 1, indicies_best_right_forbbox).squeeze(1)
-            loss_rbbox = self.loss_rbbox(rbboxes_refined_best, rbboxes_targets) / num_total_samples            
+
+            rselect_mask, rbboxes_refined_selected, rbboxes_targets_selected = self.batch_assigner(
+                rbboxes_refined,
+                ious,
+                rbboxes_targets,
+                self._config['iou_threshold'],
+                self._config['candidates_k']
+            )
+            num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
+            num_total_samples_timesk = max(reduce_mean(num_pos_timesk), 1.0)
+            loss_rbbox = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected) / num_total_samples_timesk            
 
             # right scores
-            rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks]
-            ## one hot target
+            rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks].sigmoid()            
+            ## dynamic targets
             rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
-            rbboxes_scores_targets[torch.arange(0, num_positive, device=rbboxes_scores_targets.device), indicies_best_right, 0] = 1
-            ## gaussian target            
-            # rbboxes_scores_targets = generate_gaussian(kernel_size, torch.stack([indicies_best_right % kernel_size, indicies_best_right // kernel_size], dim=-1), std=0.8)            
-            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples
+            rbboxes_scores_targets[rselect_mask] = 1
+            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples_timesk
+            
             # substitute right bboxes in sbboxes for visualization.
             bboxes = bboxes.view(-1, 6)
             selected_sbboxes = bboxes[pos_masks]
-            selected_sbboxes[:, 4] = rbboxes_refined_best[:, 0]
-            selected_sbboxes[:, 5] = rbboxes_refined_best[:, 2]
+            indices_highest_score = torch.argmax(rbboxes_scores.squeeze(-1), dim=1)
+            rbboxes_highest_score = torch.gather(rbboxes_refined, 1, indices_highest_score.view(num_positive, 1, 1).expand(-1, -1, 4)).squeeze(1)            
+            selected_sbboxes[:, 4] = rbboxes_highest_score[:, 0]
+            selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
             bboxes[pos_masks] = selected_sbboxes
             bboxes = bboxes.view(batch_size, num_priors, 6)
             # keypoints
@@ -795,6 +820,12 @@ class Cylinder5DDetectionHead(nn.Module):
                 num_batch, num_priors = keypt_pred.shape[:2]
                 class_selected_keypt_pred = torch.gather(keypt_pred.reshape(-1, self._config['num_classes'], 2), 1, classSelection.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2)).squeeze()                
                 loss_keypts.append(lossfunc_keypt(class_selected_keypt_pred[pos_masks], keypt_targets) / num_total_samples)
+            if self.logger is not None:
+                keypt_map = torch.mean(self.keypts_visz['1'][pos_masks][0], dim=0).cpu()  # from keypt
+                keypt_map = keypt_map - keypt_map.min()
+                keypt_map /= keypt_map.max()
+                keypt_map = F.interpolate(keypt_map.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+                self.logger.add_image("keypt_map_1_sample", keypt_map.squeeze())
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298
@@ -1020,11 +1051,11 @@ class Cylinder5DDetectionHead(nn.Module):
             dtype=torch.float,
             device=flatten_cls_preds.device)
         num_total_samples = max(reduce_mean(num_pos), 1.0)
-
+        
         pos_masks = torch.cat(pos_masks, 0)
         cls_targets = torch.cat(cls_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
-        bbox_targets = torch.cat(bbox_targets, 0)
+        bbox_targets = torch.cat(bbox_targets, 0)        
         
         loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
         if num_pos > 0:
@@ -1143,5 +1174,41 @@ class Cylinder5DDetectionHead(nn.Module):
         unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
         ious = intersectionAreas / unionAreas
         return ious, torch.max(ious, dim=-1)[1]
+    
+    def batch_assigner(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
+        """
+        for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
+        If candidates within IoU_thres are less than candidates_k, 0 pad them.
 
+        Args:
+            bboxes_preds: shape (B, N, 4)
+            iou_scores: shape (B, N, 1)
+            batch_gt_bboxes: shape (B, 4)
 
+        Returns:
+            rselect_mask: shape (B, N), boolean mask.
+            bboxes_preds_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
+            bboxes_targets_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
+        """
+        bboxes_targets_selected = batch_gt_bboxes.view(-1, 1, 4).expand(-1, candidates_k, -1)
+        batch_size, num_grids = bboxes_preds.shape[:2]
+
+        with torch.no_grad():
+            candidates_mask = iou_scores.squeeze(-1) > iou_thres;
+            iou_scores_masked = iou_scores.squeeze(-1).clone().masked_fill(~candidates_mask, float('-inf'))
+            topk_scores, topk_indices = torch.topk(iou_scores_masked, candidates_k, dim=1)
+
+            valid_mask = topk_scores > float('-inf')
+            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
+            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (B, k)
+        
+        pseudo_bboxes = torch.zeros(batch_size, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
+        bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=1)
+        bboxes_preds_selected = torch.gather(bboxes_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 4))
+        bboxes_targets_selected = bboxes_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
+
+        # make sure at least one candidate for each gt
+        indices_best_ious = torch.argmax(iou_scores, dim=1)
+        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
+
+        return candidates_mask, bboxes_preds_selected, bboxes_targets_selected        

@@ -35,13 +35,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   TEST:
@@ -105,18 +105,21 @@ MODEL:
         num_topk_candidates: 1000
         bbox_expand_factor: 1.6
         strides: [8, 16, 32]
-        norm_cfg: 
+        norm_cfg:
           type: BN
           momentum: 0.03
           eps: 0.001
-        act_cfg: 
+        act_cfg:
           type: ReLU
         # region proposal
         nms_pre: 3000
         # right bbox regression
         right_roi_feat_size: 7
+        iou_threshold: 0.4
+        candidates_k: 8
         # keypt prediction
-        is_freeze_keypts: True
+        keypts_feat_size: 14
+        is_freeze_keypts: False
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss
