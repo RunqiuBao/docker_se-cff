@@ -118,8 +118,7 @@ MODEL:
         iou_threshold: 0.4
         candidates_k: 8
         # keypt prediction
-        keypts_feat_size: 14
-        is_freeze_keypts: False
+        keypts_feat_size: 7
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss
