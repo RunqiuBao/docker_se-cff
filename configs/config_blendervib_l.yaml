@@ -61,33 +61,25 @@ MODEL:
     feature_extraction_net_cfg:
       PARAMS:
         backbone:
-          type: CSPDarknet
-          deepen_factor: 0.33
-          widen_factor: 0.5
-          out_indices: [2, 3, 4]
-          use_depthwise: False
-          spp_kernal_sizes: [5, 9, 13]
+          type: ResNeXt
+          depth: 101
+          groups: 64
+          base_width: 4
+          num_stages: 4
+          out_indices: [0, 1, 2, 3]
+          frozen_stages: 1
           norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
+            type: BN
+            requires_grad: True
+          style: pytorch
+          init_cfg:
+              type: Pretrained
+              checkpoint: 'open-mmlab://resnext101_64x4d'
         neck:
-          type: YOLOXPAFPN
-          in_channels: [128, 256, 512]
-          out_channels: 128
-          num_csp_blocks: 1
-          use_depthwise: False
-          upsample_cfg: 
-            scale_factor: 2
-            mode: nearest
-          norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
+          type: FPN
+          in_channels: [256, 512, 1024, 2048]
+          out_channels: 256
+          num_outs: 5
     disp_head_cfg:
       is_freeze: True
       PARAMS:
@@ -96,10 +88,11 @@ MODEL:
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
+        num_channels_input_feature: 256
         min_bbox_size: 5
         # detection
         num_classes: 1
-        in_channels: 128
+        in_channels: 256
         feat_channels: 256
         num_stacked_convs: 2
         num_topk_candidates: 1000

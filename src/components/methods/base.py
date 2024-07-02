@@ -42,7 +42,7 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
 
     for indexBatch in range(len(data_loader)):
         batch_data = batch_to_cuda(next(data_iter))
-        # print("max disp: {}".format(batch_data["gt_labels"]["disparity"].max()))
+        # print("max disp: {}".format(batch_data["gt_labels"]["disparity"].max()))        
 
         mask = batch_data["gt_labels"]["disparity"] > 0
         if not mask.any():
@@ -209,5 +209,7 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
         for i in range(len(batch_data["gt_labels"]['objdet'])):
             batch_data["gt_labels"]["objdet"][i]["bboxes"] = batch_data["gt_labels"]["objdet"][i]["bboxes"].to(dtype).cuda()
             batch_data["gt_labels"]["objdet"][i]["labels"] = batch_data["gt_labels"]["objdet"][i]["labels"].to(dtype).cuda()
+            batch_data["gt_labels"]["objdet"][i]["keypt1_masks"] = batch_data["gt_labels"]["objdet"][i]["keypt1_masks"].to(dtype).cuda()
+            batch_data["gt_labels"]["objdet"][i]["keypt2_masks"] = batch_data["gt_labels"]["objdet"][i]["keypt2_masks"].to(dtype).cuda()
 
     return batch_data

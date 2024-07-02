@@ -71,7 +71,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         # Stereo objdet dataset
         objdet_module = getattr(objdet, "base")
         self.objdet_dataset = objdet_module.StereoObjDetDataset(
-            root=os.path.join(root, self._PATH_DICT["objdet"])
+            root=os.path.join(root, self._PATH_DICT["objdet"]),
+            img_height=crop_height,
+            img_width=crop_width
         )
 
         # Disparity Dataset

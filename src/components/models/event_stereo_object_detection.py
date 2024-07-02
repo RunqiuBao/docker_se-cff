@@ -74,7 +74,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             batch_img_metas: dict. It contains info about image height and width.
         """
         if self.logger is not None:
-            event_view = left_event[0, 0, :, :, 0, 0].detach().cpu()
+            event_view = left_event[0, 0, :, :, 0, -3].detach().cpu()
             event_view -= event_view.min()
             event_view /= event_view.max()
             self.logger.add_image(
@@ -86,6 +86,15 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
         left_event_sharp = self._concentration_net(left_event)
         right_event_sharp = self._concentration_net(right_event)
+
+        if self.logger is not None:
+            lsharp_view = left_event_sharp[0, 0, :, :,].detach().cpu()
+            lsharp_view -= lsharp_view.min()
+            lsharp_view /= lsharp_view.max()
+            self.logger.add_image(
+                "left sharp",
+                lsharp_view
+            )
 
         # FIXME: test using same feature extractor for both head
         pred_disparity_pyramid = self._disp_head(left_event_sharp, right_event_sharp)
@@ -106,7 +115,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             )
 
             preds_final['objdet'] = object_preds
-            if self.logger is not None:
+            if self.logger is not None and len(object_preds) > 0:
                 if 'sbboxes' in object_preds[0]:
                     leftimage_views, rightimage_views = multi_apply(
                         self.RenderImageWithBboxesAndKeypts,
@@ -133,6 +142,8 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                         "left sharp with bboxes, keypoints",
                         leftimage_views[0]
                     )
+            else:
+                print("Zero detection occured.")
 
         preds_final['disparity'] = pred_disparity_pyramid[-1]
         torch.cuda.synchronize()

@@ -4,7 +4,7 @@ set -x
 
 cuda_idx='0, 1, 2, 3'
 
-config_path=/root/code/docker_se-cff/configs/config_blendervib.yaml
+config_path=/root/code/docker_se-cff/configs/config_blendervib_l.yaml
 data_root=/root/data/blender-vibration
 save_root=/root/code/docker_se-cff/experiments/blender-vibration/ 
 num_workers=1

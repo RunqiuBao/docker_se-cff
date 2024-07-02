@@ -56,6 +56,8 @@ class DLManager:
                 self.optimizer.load_state_dict(checkpoint["optimizer"])
                 self.scheduler.load_state_dict(checkpoint["scheduler"])
                 self.args.start_epoch = checkpoint["epoch"] + 1
+                self.current_epoch = self.args.start_epoch
+                print("resumed old training states.")
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME

@@ -6,7 +6,8 @@ class ToTensor:
     def __call__(self, sample):
         sample["bboxes"] = torch.from_numpy(sample["bboxes"])
         sample["labels"] = torch.from_numpy(sample["labels"])
-
+        sample["keypt1_masks"] = torch.from_numpy(sample["keypt1_masks"])
+        sample["keypt2_masks"] = torch.from_numpy(sample["keypt2_masks"])
         return sample
 
 
