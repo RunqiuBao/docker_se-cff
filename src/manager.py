@@ -309,7 +309,7 @@ def _prepare_optimizer(optimizer_cfg, model):
     parameters = optimizer_cfg.PARAMS
     learning_rate = parameters.lr
 
-    params_group = model.module.get_params_group(learning_rate)
+    params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
 
     optimizer = getattr(optim, name)(params_group, **parameters)
 

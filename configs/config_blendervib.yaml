@@ -113,6 +113,7 @@ MODEL:
           type: ReLU
         # region proposal
         nms_pre: 3000
+        nms_iou_threshold: 0.7
         # right bbox regression
         right_roi_feat_size: 7
         iou_threshold: 0.4

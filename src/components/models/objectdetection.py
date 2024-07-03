@@ -30,7 +30,7 @@ class Cylinder5DDetectionHead(nn.Module):
         super().__init__()
         self._config = net_cfg
         self.logger = logger
-        self.strides = [4, 8, 16, 32, 64]
+        self.strides = [8, 16, 32]
         self.keypts_roi_visz = {
             '1': None,
             '2': None
@@ -57,8 +57,8 @@ class Cylinder5DDetectionHead(nn.Module):
             {
                 'type': 'SingleRoIExtractor',
                 'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['keypts_feat_size'], 'sampling_ratio': 0},
-                'out_channels': self._config['num_channels_input_feature'],
-                'featmap_strides': self.strides
+                'out_channels': self._config['num_channels_input_keypt_feat'],
+                'featmap_strides': [4, 8, 16, 32, 64]
             }
         )
         self.iou_calculator = TASK_UTILS.build({'type': 'BboxOverlaps2D'})
@@ -115,13 +115,13 @@ class Cylinder5DDetectionHead(nn.Module):
 
         # Note: two keypoints needed. One at object center, one at object top center.
         self.keypt1_predictor = self._build_keypts_convs(
-            in_channels=self._config["in_channels"],
-            feat_channels=self._config["feat_channels"],
+            in_channels=self._config["keypt_in_channels"],
+            feat_channels=self._config["keypt_feat_channels"],
             num_classes=self._config["num_classes"],
         )
         self.keypt2_predictor = self._build_keypts_convs(
-            in_channels=self._config["in_channels"],
-            feat_channels=self._config["feat_channels"],
+            in_channels=self._config["keypt_in_channels"],
+            feat_channels=self._config["keypt_feat_channels"],
             num_classes=self._config["num_classes"],
         )
         # ========== multi level convs init ==========
@@ -189,6 +189,14 @@ class Cylinder5DDetectionHead(nn.Module):
                         mode="fan_in",
                         nonlinearity="leaky_relu"
                     )
+        for subnet in [self.keypt1_predictor, self.keypt2_predictor]:
+            for m in subnet.modules():
+                if m is None:
+                    continue
+                elif hasattr(m, 'weight') and hasattr(m, 'bias'):
+                    nn.init.kaiming_normal_(
+                        m.weight, mode='fan_out', nonlinearity='relu')
+                    nn.init.constant_(m.bias, 0)
 
         prior_prob = 0.01
         bias_init = float(-numpy.log((1 - prior_prob) / prior_prob))
@@ -205,10 +213,10 @@ class Cylinder5DDetectionHead(nn.Module):
         """
         stacked_convs = []
         in_channels_temp = in_channels
-        for indexConvLayer in range(4):
+        for indexConvLayer in range(8):
             stacked_convs.append(
                 nn.Conv2d(
-                    in_channels_temp,feat_channels, kernel_size=3, stride=1, padding=1
+                    in_channels_temp, feat_channels, kernel_size=3, stride=1, padding=1
                 )
             )
             in_channels_temp = feat_channels
@@ -288,6 +296,7 @@ class Cylinder5DDetectionHead(nn.Module):
         self,
         left_feature: List[Tensor],
         right_feature: List[Tensor],
+        keypt_left_feat: List[Tensor],
         disparity_prior: Tensor,
         batch_img_metas: Dict,
         gt_labels: Tensor = None,
@@ -360,13 +369,13 @@ class Cylinder5DDetectionHead(nn.Module):
         # return shape [B, 100, num_classes, 2]
         starttime = time.time()
         keypt1_pred = self.forward_keypt_det(
-            left_feature,
+            keypt_left_feat,
             copy.deepcopy(bboxes_selected),
             self.keypt1_predictor,
             keypt_id='1'
         )
         keypt2_pred = self.forward_keypt_det(
-            left_feature,
+            keypt_left_feat,
             copy.deepcopy(bboxes_selected),
             self.keypt2_predictor,
             keypt_id='2',
@@ -535,7 +544,7 @@ class Cylinder5DDetectionHead(nn.Module):
             results.bboxes,
             results.scores,
             results.level_ids,
-            {'type': 'nms', 'iou_threshold': 0.7}
+            {'type': 'nms', 'iou_threshold': self._config['nms_iou_threshold']}
         )
         results = results[keep_idxs]
         if results.bboxes.shape[0] < self._config['num_topk_candidates']:
@@ -691,11 +700,13 @@ class Cylinder5DDetectionHead(nn.Module):
         bnum_rois = torch.cat([batch_number, rois], dim=1)
         roi_feats = self.keypts_bbox_roi_extractor(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
         keypts_feat = keypt_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
+        featmap_size = keypts_feat.shape[-1]
+        upscaled_keypts_feat = F.interpolate(keypts_feat, size=(2 * featmap_size, 2 * featmap_size), mode='bilinear', align_corners=False)
         if self.logger is not None:
             self.keypts_roi_visz[keypt_id] = roi_feats.detach()
             self.keypts_featmap_visz[keypt_id] = keypts_feat.detach()
 
-        # TODO: put this part to prediction
+        # TODO: put this part to prediction?
         # map_size = keypts_feat.shape[-1]
         # keypts_prob_x = ComputeSoftArgMax1d(keypts_feat.sum(dim=-2))  # Note: shape is (b*100, num_classes, 1)
         # keypts_prob_x = keypts_prob_x.unsqueeze(-1)
@@ -710,8 +721,8 @@ class Cylinder5DDetectionHead(nn.Module):
 
         batch_size, num_bboxes = bbox_pred.shape[:2]
         num_classes = self._config['num_classes']
-        featmap_size = keypts_feat.shape[-1]          
-        return keypts_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
+        featmap_size = upscaled_keypts_feat.shape[-1]      
+        return upscaled_keypts_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
 
     def loss_by_stereobboxdet(
         self,
@@ -736,8 +747,8 @@ class Cylinder5DDetectionHead(nn.Module):
             right_bboxes: shape [B, 100, ker_h*ker_w, 4]. (tl_x_r, tl_y_r, br_x_r, br_y_r) format, refined right bboxes. all in global scale.
             right_scores: shape [B, 100, ker_h*ker_w, 1]. Scores for above right_bboxes.
             objectness: shape [B, 100].
-            keypt1_pred: [B, 100, num_class, 2]
-            keypt2_pred: [B, 100, num_class, 2]
+            keypt1_pred: [B, 100, num_class, ker_h, ker_w]
+            keypt2_pred: [B, 100, num_class, ker_h, ker_w]
             batch_gt_labels: include 'bboxes', 'labels', 'keypt1_masks', 'keypt2_masks' keys.
             batch_img_metas: include 'h' and 'w' keys.
 
@@ -821,7 +832,7 @@ class Cylinder5DDetectionHead(nn.Module):
             # keypoints
             loss_keypts = []
             classSelection = torch.argmax(cls_scores, dim=2)
-            featmap_size = 2 * self._config['keypts_feat_size']
+            featmap_size = keypt1_pred.shape[-1]
             mask_target_visz = {}
             mask_preds_visz = {}
             for keypt_pred, lossfunc_keypt, indexKeypt in zip([keypt1_pred, keypt2_pred], [self.loss_keypt1, self.loss_keypt2], [1, 2]):
@@ -862,6 +873,11 @@ class Cylinder5DDetectionHead(nn.Module):
                     keypt_target *= 255 / keypt_target.max()
                     keypt_target = F.interpolate(keypt_target.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
                     self.logger.add_image("keypt_target_{}_sample".format(key), keypt_target.to(torch.uint8).squeeze())
+                    keypt_roi = self.keypts_roi_visz[key][pos_masks][0].mean(dim=0).cpu()
+                    keypt_roi = keypt_roi - keypt_roi.min()
+                    keypt_roi *= 255 / keypt_roi.max()
+                    keypt_roi = F.interpolate(keypt_roi.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+                    self.logger.add_image("keypt_roi_{}_sample".format(key), keypt_roi.to(torch.uint8).squeeze())
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298

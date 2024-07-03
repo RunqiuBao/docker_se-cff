@@ -23,6 +23,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         self,
         concentration_net_cfg: dict = None,
         feature_extraction_net_cfg: dict = None,
+        keypt_feature_extraction_net_cfg: dict = None,
         disp_head_cfg: dict = None,
         object_detection_head_cfg: dict = None,
         losses_cfg: dict = None,  # Cylinder5DDetectionLoss, disparityLoss
@@ -40,8 +41,12 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         self._feature_extraction_net = FeatureExtractor2(
             net_cfg=feature_extraction_net_cfg.PARAMS
         )
+        self._keypt_feature_extraction_net = FeatureExtractor2(
+            net_cfg=keypt_feature_extraction_net_cfg.PARAMS
+        )
         if not self.is_freeze_disp:
             freeze_module_grads(self._feature_extraction_net)
+            freeze_module_grads(self._keypt_feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
             **disp_head_cfg.PARAMS, isInputFeature=False  # Note: an efficient feature extractor for object detection might not be good for stereo matching?
@@ -106,9 +111,11 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         if self.is_freeze_disp:
             left_feature = self._feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             right_feature = self._feature_extraction_net(right_event_sharp.repeat(1, 3, 1, 1))
+            keypt_left_feat = self._keypt_feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             object_preds, loss_final = self._object_detection_head(
                 left_feature,
                 right_feature,
+                keypt_left_feat,
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
                 gt_labels["objdet"]
@@ -149,17 +156,30 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         torch.cuda.synchronize()
         return preds_final, loss_final
 
-    def get_params_group(self, learning_rate):
+    def get_params_group(self, learning_rate, keypt_lr=None):
+        if keypt_lr is not None:
+            specific_layer_name = ['keypt2_predictor', 'keypt1_predictor', "offset_conv.weight", "offset_conv.bias"]
+        else:
+            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]# Note: exist in deform conv.
         def filter_specific_params(kv):
-            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]  # Note: exist in deform conv.
+            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]  
             for name in specific_layer_name:
                 if name in kv[0]:
                     return True
             return False
 
+        keypt_layer_name = ["keypt1_predictor", "keypt2_predictor"]
+        def filter_keypt_params(kv):
+            for name in keypt_layer_name:
+                if name in kv[0]:
+                    return True
+            return False
+
+        all_specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]
+        if keypt_lr is not None:
+            all_specific_layer_name.extend(keypt_layer_name)
         def filter_base_params(kv):
-            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]
-            for name in specific_layer_name:
+            for name in all_specific_layer_name:
                 if name in kv[0]:
                     return False
             return True
@@ -173,11 +193,19 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         base_params = [kv[1] for kv in base_params]
 
         specific_lr = learning_rate * 0.1
-        params_group = [
-            {"params": base_params, "lr": learning_rate},
-            {"params": specific_params, "lr": specific_lr},
-        ]
-
+        if keypt_lr is None:
+            params_group = [
+                {"params": base_params, "lr": learning_rate},
+                {"params": specific_params, "lr": specific_lr},
+            ]
+        else:
+            keypt_params = list(filter(filter_keypt_params, self.named_parameters()))
+            keypt_params = [kv[1] for kv in keypt_params]
+            params_group = [
+                {"params": base_params, "lr": learning_rate},
+                {"params": specific_params, "lr": specific_lr},
+                {"params": keypt_params, "lr": keypt_lr}
+            ]   
         return params_group
 
     @staticmethod

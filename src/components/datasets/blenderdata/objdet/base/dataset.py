@@ -103,8 +103,8 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         gtMasks = []
         for indexBbox, keypt in enumerate(keypts_in_img):
             oneMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
-            radius = min((bboxes[indexBbox, 2] - bboxes[indexBbox, 0]), (bboxes[indexBbox, 3] - bboxes[indexBbox, 1])) / 8  # Note: radius of the keypt is 1/16 of bbox width
-            cv2.circle(oneMask, keypt.astype('int'), int(radius), (1,), thickness=-1)
+            radius = min((bboxes[indexBbox, 2] - bboxes[indexBbox, 0]), (bboxes[indexBbox, 3] - bboxes[indexBbox, 1])) / 16  # Note: radius of the keypt is 1/16 of bbox width
+            cv2.circle(oneMask, keypt.astype('int'), max(int(radius), 1), (1,), thickness=-1)
             gtMasks.append(oneMask)
         return numpy.stack(gtMasks, axis=0)
 
