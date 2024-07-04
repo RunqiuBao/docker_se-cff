@@ -4,6 +4,8 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
 import torch.distributed as dist
 
 from components import models
@@ -53,8 +55,11 @@ class DLManager:
                     print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
             self.model.load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
-                self.optimizer.load_state_dict(checkpoint["optimizer"])
-                self.scheduler.load_state_dict(checkpoint["scheduler"])
+                self.optimizer['optimizer'].load_state_dict(checkpoint["optimizer"])
+                if 'optimizer_keypt' in checkpoint:
+                    self.optimizer['optimizer_keypt'].load_state_dict(checkpoint["optimizer_keypt"])
+                    self.scheduler['scheduler_keypt'].load_state_dict(checkpoint["scheduler_keypt"])
+                self.scheduler['scheduler'].load_state_dict(checkpoint["scheduler"])
                 self.args.start_epoch = checkpoint["epoch"] + 1
                 self.current_epoch = self.args.start_epoch
                 print("resumed old training states.")
@@ -114,7 +119,8 @@ class DLManager:
                 world_size=self.args.world_size,
             )
 
-            self.scheduler.step()
+            for key, scheduler in self.scheduler.items():
+                scheduler.step()
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:
@@ -222,8 +228,10 @@ class DLManager:
             "args": self.args,
             "cfg": self.cfg,
             "model": self.model.module.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            "optimizer": self.optimizer['optimizer'].state_dict(),
+            "optimizer_keypt": self.optimizer['optimizer_keypt'].state_dict(),
+            "scheduler": self.scheduler['scheduler'].state_dict(),
+            "scheduler_keypt": self.scheduler['scheduler_keypt'].state_dict()
         }
 
         return checkpoint
@@ -310,10 +318,16 @@ def _prepare_optimizer(optimizer_cfg, model):
     learning_rate = parameters.lr
 
     params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
+    params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
+    params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
 
-    optimizer = getattr(optim, name)(params_group, **parameters)
+    optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
+    optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
 
-    return optimizer
+    return {
+        'optimizer': optimizer,
+        'optimizer_keypt': optimizer_keypt
+    }
 
 
 def _prepare_scheduler(scheduler_cfg, optimizer):
@@ -323,8 +337,26 @@ def _prepare_scheduler(scheduler_cfg, optimizer):
     if name == "CosineAnnealingWarmupRestarts":
         from utils.scheduler import CosineAnnealingWarmupRestarts
 
-        scheduler = CosineAnnealingWarmupRestarts(optimizer, **parameters)
+        scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
     else:
-        scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)
+        scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
 
-    return scheduler
+    scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
+
+    return {
+        'scheduler': scheduler,
+        'scheduler_keypt': scheduler_keypt
+    }
+
+
+class CustomStepLRScheduler(_LRScheduler):
+    def __init__(self, optimizer: Optimizer, milestones: list, factor: float = 0.1, last_epoch: int = -1):
+        self.milestones = milestones
+        self.factor = factor
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        if self.last_epoch in self.milestones:
+            return [base_lr * self.factor for base_lr in self.base_lrs]
+        else:
+            return [group['lr'] for group in self.optimizer.param_groups]

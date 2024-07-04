@@ -55,14 +55,16 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
             batch_img_metas=batch_data["image_metadata"]
         )
 
-        optimizer.zero_grad()
+        for key, suboptimizer in optimizer.items():
+            suboptimizer.zero_grad()
         loss = 0.
         for key, value in lossDict.items():
             loss += value
             if key in log_dict:
                 log_dict[key].update(lossDict[key].item(), data_loader.batch_size)
         loss.backward()
-        optimizer.step()
+        for key, suboptimizer in optimizer.items():
+            suboptimizer.step()
 
         log_dict["Loss"].update(loss.item(), data_loader.batch_size)
         if not model.module.is_freeze_disp:
@@ -75,6 +77,8 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
                 log_dict[key].update(value, data_loader.batch_size)
 
         pbar.update(1)
+        torch.cuda.synchronize()
+
     pbar.close()
 
     return log_dict
@@ -107,7 +111,8 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
         ]
     )
 
-    pbar = tqdm(total=len(data_loader))
+    if logger is not None:
+        pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader)):
         batch_data = batch_to_cuda(next(data_iter))
@@ -138,9 +143,11 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
         else:
             for key, value in lossDict.items():
                 log_dict[key].update(value, data_loader.batch_size)
-
-        pbar.update(1)
-    pbar.close()
+        if logger is not None:
+            pbar.update(1)
+        torch.cuda.synchronize()
+    if logger is not None:
+        pbar.close()
 
     return log_dict
 

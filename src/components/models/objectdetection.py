@@ -11,16 +11,14 @@ import copy
 
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
 from mmdet.models.task_modules.samplers import PseudoSampler
-from mmdet.models.roi_heads.roi_extractors.single_level_roi_extractor import SingleRoIExtractor
 from mmengine.structures import InstanceData
 from mmdet.structures.bbox import cat_boxes
 from mmdet.registry import TASK_UTILS, MODELS
-from mmdet.utils import reduce_mean
 from mmdet.structures.mask import mask_target, BitmapMasks
 from mmengine.config import Config
 from mmcv.ops import batched_nms
 
-from .utils.misc import multi_apply, ComputeSoftArgMax1d, DetachCopyNested, generate_gaussian, freeze_module_grads
+from .utils.misc import DetachCopyNested
 from . import losses
 
 
@@ -310,19 +308,24 @@ class Cylinder5DDetectionHead(nn.Module):
             Tuple[List]: A tuple of multi-level classification scores, bbox predictions, keypts predcitions, objectnesses.
         """
         starttime = time.time()
-        preds_items_multilevels = multi_apply(
-            self.forward_objdet_single,
-            left_feature,
-            right_feature,
-            self._multi_level_cls_convs,
-            self._multi_level_reg_convs,
-            self._multi_level_conv_cls,
-            self._multi_level_conv_reg,
-            self._multi_level_conv_obj
-        )
+        cls_scores, bboxes, objectnesses = [], [], []
+        for indexLevel in range(len(left_feature)):
+            cls_scores_one, bboxes_one, objectnesses_one = self.forward_objdet_single(
+                left_feature[indexLevel],
+                right_feature[indexLevel],
+                self._multi_level_cls_convs[indexLevel],
+                self._multi_level_reg_convs[indexLevel],
+                self._multi_level_conv_cls[indexLevel],
+                self._multi_level_conv_reg[indexLevel],
+                self._multi_level_conv_obj[indexLevel]
+            )
+            cls_scores.append(cls_scores_one)
+            bboxes.append(bboxes_one)
+            objectnesses.append(objectnesses_one)
+        torch.cuda.synchronize()
+
         # print("forward_objdet_single executed in {:.4f} seconds".format(time.time() - starttime))
 
-        cls_scores, bboxes, objectnesses = preds_items_multilevels
         (
             loss_dict_bboxdet,
             batch_selected_boxes,
@@ -335,6 +338,7 @@ class Cylinder5DDetectionHead(nn.Module):
             gt_labels,
             batch_img_metas
         )
+        torch.cuda.synchronize()
         # # ======== For debug left side ========
         # num_imgs = disparity_prior.shape[0]
         # batch_positive_detections = []
@@ -346,7 +350,7 @@ class Cylinder5DDetectionHead(nn.Module):
         #     })
 
         # select top candidates for stereo bbox regression.        
-        preds_items_multilevels_detachcopy = DetachCopyNested(preds_items_multilevels)
+        preds_items_multilevels_detachcopy = DetachCopyNested([cls_scores, bboxes, objectnesses])
         (
             cls_scores_selected,  # shape [B, 100, num_class]
             bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
@@ -364,6 +368,7 @@ class Cylinder5DDetectionHead(nn.Module):
             batch_img_metas,
             self._config['bbox_expand_factor']
         )
+        torch.cuda.synchronize()
         # print("forward_stereo_det executed in {:.4f} seconds".format(time.time() - starttime))
 
         # return shape [B, 100, num_classes, 2]
@@ -380,6 +385,7 @@ class Cylinder5DDetectionHead(nn.Module):
             self.keypt2_predictor,
             keypt_id='2',
         )
+        torch.cuda.synchronize()
         # print("forward_keypt_det executed in {:.4f} seconds".format(time.time() - starttime))
 
         loss_dict_final = None
@@ -399,6 +405,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 gt_labels,
                 batch_img_metas
             )
+            torch.cuda.synchronize()
             # print("loss_by_stereobboxdet executed in {:.4f} seconds".format(time.time() - starttime))
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
@@ -429,7 +436,7 @@ class Cylinder5DDetectionHead(nn.Module):
                         'keypt1s': indices_keypt1s.to(torch.float) / featmap_size,
                         'keypt2s': indices_keypt2s.to(torch.float) / featmap_size
                     })        
-
+        torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
     
     @torch.no_grad()
@@ -653,7 +660,10 @@ class Cylinder5DDetectionHead(nn.Module):
         # extract right bbox roi feature
         xindi = ((_bboxes_pred[..., 0] + _bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1)
         yindi = ((_bboxes_pred[..., 1] + _bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1)
-        bbox_disps = disp_prior[:, yindi, xindi].squeeze(0)  # Note: dimension will increase one due to xindi, yindi shape
+        bbox_disps = []
+        for indexInBatch, disp_prior_one in enumerate(disp_prior):
+            bbox_disps.append(disp_prior_one[yindi[indexInBatch], xindi[indexInBatch]].unsqueeze(0))  # Note: dimension will increase one due to xindi, yindi shape
+        bbox_disps = torch.cat(bbox_disps, dim=0)
         _bboxes_pred[..., 0] -= bbox_disps  # warp to more left side.
         _bboxes_pred[..., 2] -= bbox_disps
         rois_right = _bboxes_pred.reshape(-1, 4)
@@ -758,29 +768,35 @@ class Cylinder5DDetectionHead(nn.Module):
         """        
         num_imgs = priors.shape[0]
 
-        (
-            pos_masks,
-            cls_targets,
-            obj_targets,  # If it is a thing, no matter what class, objectness_target is 1.0
-            bbox_targets,
-            indices_bbox_targets,
-            num_pos_per_img  # number of positive gt target in each image.
-        ) = multi_apply(
-            self._get_targets_stereo_single,
-            priors.detach(),
-            cls_scores.detach(),
-            bboxes.detach(),
-            objectness.detach(),
-            batch_gt_labels,
-            batch_img_metas
-        )
+        pos_masks, cls_targets, obj_targets, bbox_targets, indices_bbox_targets, num_pos_per_img = [], [], [], [], [], []
+        for indexInBatch in range(len(batch_gt_labels)):
+            (
+                pos_mask,
+                cls_target,
+                obj_target,  # If it is a thing, no matter what class, objectness_target is 1.0
+                bbox_target,
+                indices_bbox_target,
+                num_pos_one  # number of positive gt target in each image.
+            ) = self._get_targets_stereo_single(
+                priors.detach()[indexInBatch],
+                cls_scores.detach()[indexInBatch],
+                bboxes.detach()[indexInBatch],
+                objectness.detach()[indexInBatch],
+                batch_gt_labels[indexInBatch],
+                img_metas=batch_img_metas
+            )
+            pos_masks.append(pos_mask)
+            cls_targets.append(cls_target)
+            obj_targets.append(obj_target)
+            bbox_targets.append(bbox_target)
+            indices_bbox_targets.append(indices_bbox_target)
+            num_pos_per_img.append(num_pos_one)
 
         num_pos = torch.tensor(
             sum(num_pos_per_img),
             dtype=torch.float,
             device=cls_scores.device
         )
-        num_total_samples = max(reduce_mean(num_pos), 1.0)
 
         pos_masks = torch.cat(pos_masks, 0)
         cls_targets = torch.cat(cls_targets, 0)
@@ -810,7 +826,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 self._config['candidates_k']
             )
             num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
-            num_total_samples_timesk = max(reduce_mean(num_pos_timesk), 1.0)
+            num_total_samples_timesk = max(num_pos_timesk, 1.0)
             loss_rbbox = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected) / num_total_samples_timesk            
 
             # right scores
@@ -918,10 +934,10 @@ class Cylinder5DDetectionHead(nn.Module):
         strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
         strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
         strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
-        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(num_samples, ker_h, -1) * strides_x.squeeze(1)
+        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
         grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
         grid_x = grid_x.unsqueeze(1)
-        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(num_samples, -1, ker_w) * strides_y.squeeze(1)
+        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
         grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
         grid_y = grid_y.unsqueeze(1)
 
@@ -1065,6 +1081,7 @@ class Cylinder5DDetectionHead(nn.Module):
                                                  self._config['num_classes'])
             for cls_pred in cls_scores
         ]
+
         flatten_bbox_preds = [
             bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
             for bbox_pred in bbox_preds
@@ -1080,26 +1097,32 @@ class Cylinder5DDetectionHead(nn.Module):
         flatten_priors = torch.cat(mlvl_priors)
         flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
 
-        (
-            pos_masks,
-            cls_targets,
-            obj_targets,
-            bbox_targets,
-            num_pos_imgs
-        ) = multi_apply(
-            self._get_targets_single,
-            flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1),
-            flatten_cls_preds.detach(),
-            flatten_bboxes.detach(),
-            flatten_objectness.detach(),
-            gt_labels,
-            batch_img_metas)
+        pos_masks, cls_targets, obj_targets, bbox_targets, num_pos_imgs = [], [], [], [], []
+        for indexInBatch in range(len(gt_labels)):
+            (
+                pos_mask,
+                cls_target,
+                obj_target,
+                bbox_target,
+                num_pos_img
+            ) = self._get_targets_single(
+                flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1)[indexInBatch],
+                flatten_cls_preds.detach()[indexInBatch],
+                flatten_bboxes.detach()[indexInBatch],
+                flatten_objectness.detach()[indexInBatch],
+                gt_labels[indexInBatch],
+                img_meta=batch_img_metas)
+            pos_masks.append(pos_mask)
+            cls_targets.append(cls_target)
+            obj_targets.append(obj_target)
+            bbox_targets.append(bbox_target)
+            num_pos_imgs.append(num_pos_img)
 
         num_pos = torch.tensor(
             sum(num_pos_imgs),
             dtype=torch.float,
             device=flatten_cls_preds.device)
-        num_total_samples = max(reduce_mean(num_pos), 1.0)
+        num_total_samples = max(num_pos, 1.0)
         
         pos_masks = torch.cat(pos_masks, 0)
         cls_targets = torch.cat(cls_targets, 0)

@@ -149,7 +149,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                         "left sharp with bboxes, keypoints",
                         leftimage_views[0]
                     )
-            else:
+            if len(object_preds) == 0:
                 print("Zero detection occured.")
 
         preds_final['disparity'] = pred_disparity_pyramid[-1]
