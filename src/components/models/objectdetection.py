@@ -84,8 +84,8 @@ class Cylinder5DDetectionHead(nn.Module):
                                       'reduction': 'sum',
                                       'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
-        self.loss_keypt1 = MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
-        self.loss_keypt2 = MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        self.loss_keypt1 = torch.nn.SmoothL1Loss() #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        self.loss_keypt2 = torch.nn.SmoothL1Loss() #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
 
@@ -872,15 +872,15 @@ class Cylinder5DDetectionHead(nn.Module):
                 )
                 pos_class_labels = classSelection.view(-1)[pos_masks]
                 keypt_mask_preds = keypt_pred.view(-1, self._config["num_classes"], featmap_size, featmap_size)[pos_masks]
-                keypt_mask_preds = F.softmax(keypt_mask_preds.view(keypt_mask_preds.shape[0], self._config["num_classes"], -1), dim=-1).view(keypt_mask_preds.shape[0], self._config["num_classes"], featmap_size, featmap_size)
-                loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets, pos_class_labels)[0])
+                keypt_mask_preds = keypt_mask_preds[torch.arange(0, keypt_mask_preds.shape[0]), pos_class_labels.to(torch.int)]
+                loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets))
                 if self.logger is not None:
                     mask_target_visz[str(indexKeypt)] = mask_targets
                     mask_preds_visz[str(indexKeypt)] = keypt_mask_preds
                 
             if self.logger is not None:
                 for key in ['1', '2']:
-                    keypt_feat = mask_preds_visz[key][0][pos_class_labels.to(torch.int)[0]].cpu()
+                    keypt_feat = mask_preds_visz[key][0].cpu()
                     keypt_feat = keypt_feat - keypt_feat.min()
                     keypt_feat *= 255 / keypt_feat.max()
                     keypt_feat = F.interpolate(keypt_feat.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)

@@ -49,6 +49,8 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = self.model.state_dict()
             for key, value in checkpoint["model"].items():
+                if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
+                    continue
                 if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
                     model_statedict["module." + key] = value
                 else:
