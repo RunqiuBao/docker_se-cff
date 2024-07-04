@@ -868,11 +868,12 @@ class Cylinder5DDetectionHead(nn.Module):
                     pos_bboxes_preds_list,
                     pos_assigned_gt_indices_list,
                     keypt_masks_list,
-                    Config({"mask_size": featmap_size})
-                )                
+                    Config({"mask_size": featmap_size, 'soft_mask_target': True})
+                )
                 pos_class_labels = classSelection.view(-1)[pos_masks]
                 keypt_mask_preds = keypt_pred.view(-1, self._config["num_classes"], featmap_size, featmap_size)[pos_masks]
-                loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets, pos_class_labels)[0])                
+                keypt_mask_preds = F.softmax(keypt_mask_preds.view(keypt_mask_preds.shape[0], self._config["num_classes"], -1), dim=-1).view(keypt_mask_preds.shape[0], self._config["num_classes"], featmap_size, featmap_size)
+                loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets, pos_class_labels)[0])
                 if self.logger is not None:
                     mask_target_visz[str(indexKeypt)] = mask_targets
                     mask_preds_visz[str(indexKeypt)] = keypt_mask_preds
