@@ -47,7 +47,7 @@ class Cylinder5DDetectionHead(nn.Module):
             {
                 'type': 'SingleRoIExtractor',
                 'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['right_roi_feat_size'], 'sampling_ratio': 0},
-                'out_channels': self._config['num_channels_input_feature'],
+                'out_channels': self._config['in_channels'],
                 'featmap_strides': self.strides
             }
         )
@@ -55,8 +55,8 @@ class Cylinder5DDetectionHead(nn.Module):
             {
                 'type': 'SingleRoIExtractor',
                 'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['keypts_feat_size'], 'sampling_ratio': 0},
-                'out_channels': self._config['num_channels_input_keypt_feat'],
-                'featmap_strides': [4, 8, 16, 32, 64]
+                'out_channels': self._config['keypt_in_channels'],
+                'featmap_strides': [1]
             }
         )
         self.iou_calculator = TASK_UTILS.build({'type': 'BboxOverlaps2D'})
@@ -84,8 +84,8 @@ class Cylinder5DDetectionHead(nn.Module):
                                       'reduction': 'sum',
                                       'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
-        self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='sum') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
-        self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='sum') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
 
@@ -710,8 +710,6 @@ class Cylinder5DDetectionHead(nn.Module):
         bnum_rois = torch.cat([batch_number, rois], dim=1)
         roi_feats = self.keypts_bbox_roi_extractor(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
         keypts_feat = keypt_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
-        featmap_size = keypts_feat.shape[-1]
-        upscaled_keypts_feat = F.interpolate(keypts_feat, size=(2 * featmap_size, 2 * featmap_size), mode='bilinear', align_corners=False)
         if self.logger is not None:
             self.keypts_roi_visz[keypt_id] = roi_feats.detach()
             self.keypts_featmap_visz[keypt_id] = keypts_feat.detach()
@@ -731,8 +729,8 @@ class Cylinder5DDetectionHead(nn.Module):
 
         batch_size, num_bboxes = bbox_pred.shape[:2]
         num_classes = self._config['num_classes']
-        featmap_size = upscaled_keypts_feat.shape[-1]      
-        return upscaled_keypts_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
+        featmap_size = keypts_feat.shape[-1]
+        return keypts_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
 
     def loss_by_stereobboxdet(
         self,

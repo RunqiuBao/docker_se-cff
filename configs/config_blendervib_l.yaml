@@ -118,8 +118,6 @@ MODEL:
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
-        num_channels_input_feature: 128
-        num_channels_input_keypt_feat: 256
         min_bbox_size: 5
         # detection
         num_classes: 1
@@ -144,7 +142,7 @@ MODEL:
         candidates_k: 8
         # keypt prediction
         keypts_feat_size: 14
-        keypt_in_channels: 256
+        keypt_in_channels: 3
         keypt_feat_channels: 512
     losses_cfg:
       objdet_loss_cfg:

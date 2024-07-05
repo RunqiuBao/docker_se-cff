@@ -41,12 +41,9 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         self._feature_extraction_net = FeatureExtractor2(
             net_cfg=feature_extraction_net_cfg.PARAMS
         )
-        self._keypt_feature_extraction_net = FeatureExtractor2(
-            net_cfg=keypt_feature_extraction_net_cfg.PARAMS
-        )
         if not self.is_freeze_disp:
             freeze_module_grads(self._feature_extraction_net)
-            freeze_module_grads(self._keypt_feature_extraction_net)
+            # freeze_module_grads(self._keypt_feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
             **disp_head_cfg.PARAMS, isInputFeature=False  # Note: an efficient feature extractor for object detection might not be good for stereo matching?
@@ -111,11 +108,10 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         if self.is_freeze_disp:
             left_feature = self._feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             right_feature = self._feature_extraction_net(right_event_sharp.repeat(1, 3, 1, 1))
-            keypt_left_feat = self._keypt_feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             object_preds, loss_final = self._object_detection_head(
                 left_feature,
                 right_feature,
-                keypt_left_feat,
+                [left_event_sharp.repeat(1, 3, 1, 1)],
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
                 gt_labels["objdet"]
