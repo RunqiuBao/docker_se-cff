@@ -160,7 +160,8 @@ OPTIMIZER:
     lr: 0.0005
     weight_decay: 0.0001
   KEYPT_PARAMS:
-    lr: 0.02
+    lr: 0.0005
+    weight_decay: 0.0001
 SCHEDULER:
   NAME: CosineAnnealingWarmupRestarts
   PARAMS:
