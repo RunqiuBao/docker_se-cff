@@ -158,7 +158,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
     def get_params_group(self, learning_rate, keypt_lr=None):
         if keypt_lr is not None:
-            specific_layer_name = ['keypt2_predictor', 'keypt1_predictor', "offset_conv.weight", "offset_conv.bias"]
+            specific_layer_name = ['_keypt_feature_extraction_net', 'keypt2_predictor', 'keypt1_predictor', "offset_conv.weight", "offset_conv.bias"]
         else:
             specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]# Note: exist in deform conv.
         def filter_specific_params(kv):
