@@ -123,6 +123,8 @@ class DLManager:
 
             for key, scheduler in self.scheduler.items():
                 scheduler.step()
+                if self.args.is_master:
+                    print(key + "'s lr: {}".format(scheduler.get_lr()))
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:
@@ -343,7 +345,8 @@ def _prepare_scheduler(scheduler_cfg, optimizer):
     else:
         scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
 
-    scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
+    # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
+    scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
 
     return {
         'scheduler': scheduler,
