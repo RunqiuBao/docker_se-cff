@@ -77,8 +77,8 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             )
         bboxes = numpy.concatenate(bboxes, axis=0)
         labels = numpy.concatenate(labels)
-        keypt1_masks = self.GetGtKeyptMasks(bboxes[:, :4], bboxes[:, 6:8])
-        keypt2_masks = self.GetGtKeyptMasks(bboxes[:, :4], bboxes[:, 8:10])
+        keypt1_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 1)
+        keypt2_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 2)
         return {
             "bboxes": bboxes,
             "labels": labels,
@@ -86,11 +86,13 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             "keypt2_masks": keypt2_masks
         }
     
-    def GetGtKeyptMasks(self, bboxes: Tensor, keypts: Tensor) -> Tensor:
+    def GetGtKeyptDistanceMasks(self, bboxes: Tensor, keypts: Tensor, indexKeypt: int) -> Tensor:
         """
+        within each bounding box, compute each pixel's distance towards keypoint.
+
         Args:
             bboxes: shape (num_bboxes, 4). gt bboxes of each detection.
-            keypts: shape (num_bboxes, 2). key points in each gt bbox.
+            keypts: shape (num_bboxes, 4). key points in each gt bbox.
 
         Returns:
             gtMasks: shape (num_bboxes, h, w)
@@ -98,13 +100,30 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         keypts_in_img = numpy.stack(
             [
                 keypts[:, 0] * (bboxes[:, 2] - bboxes[:, 0]) + bboxes[:, 0],
-                keypts[:, 1] * (bboxes[:, 3] - bboxes[:, 1]) + bboxes[:, 1]
+                keypts[:, 1] * (bboxes[:, 3] - bboxes[:, 1]) + bboxes[:, 1],
+                keypts[:, 2] * (bboxes[:, 2] - bboxes[:, 0]) + bboxes[:, 0],
+                keypts[:, 3] * (bboxes[:, 3] - bboxes[:, 1]) + bboxes[:, 1]
             ], axis=1)
         gtMasks = []
-        for indexBbox, keypt in enumerate(keypts_in_img):
+        for indexBbox, keypt_all in enumerate(keypts_in_img):
+            if indexKeypt == 1:
+                keypt = keypt_all[0:2]
+            else:
+                keypt = keypt_all[2:4]
             oneMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
-            radius = min((bboxes[indexBbox, 2] - bboxes[indexBbox, 0]), (bboxes[indexBbox, 3] - bboxes[indexBbox, 1])) / 16  # Note: radius of the keypt is 1/16 of bbox width
-            cv2.circle(oneMask, keypt.astype('int'), max(int(radius), 1), (1,), thickness=-1)
+            top_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 1]))
+            bottom_right = (int(bboxes[indexBbox, 2]), int(bboxes[indexBbox, 3]))
+            oneMask = cv2.rectangle(oneMask, top_left, bottom_right, (1,), -1)
+            maskedPoints = numpy.where(oneMask > 0)
+            oneMask = oneMask.astype('float')
+            oneMask[maskedPoints] *= numpy.sqrt(numpy.power((maskedPoints[1] - keypt[0]), 2) + numpy.power((maskedPoints[0] - keypt[1]), 2))
+            oneMask[maskedPoints] = 1 - oneMask[maskedPoints] / oneMask.max()  # Note: do this after roi align.
+            # crop by triangle
+            triangleMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
+            bottom_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 3]))
+            trianglePoints = numpy.array([keypt_all[0:2].astype('int'), bottom_left, bottom_right])
+            cv2.fillPoly(triangleMask, [trianglePoints], 255)
+            oneMask[~triangleMask.view('bool')] *= 0
             gtMasks.append(oneMask)
         return numpy.stack(gtMasks, axis=0)
 
