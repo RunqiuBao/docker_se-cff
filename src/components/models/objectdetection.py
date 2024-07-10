@@ -178,7 +178,7 @@ class Cylinder5DDetectionHead(nn.Module):
                         nonlinearity="leaky_relu"
                     )
 
-        for subnet in [self.right_bbox_refiner, self.keypt1_predictor, self.keypt2_predictor]:
+        for subnet in [self.right_bbox_refiner]:
             for module in subnet.modules():
                 if isinstance(module, (nn.Conv2d, nn.Linear)):
                     nn.init.kaiming_uniform_(
@@ -375,13 +375,13 @@ class Cylinder5DDetectionHead(nn.Module):
         starttime = time.time()
         keypt1_pred = self.forward_keypt_det(
             keypt_left_feat,
-            copy.deepcopy(bboxes_selected),
+            bboxes_selected.detach(),
             self.keypt1_predictor,
             keypt_id='1'
         )
         keypt2_pred = self.forward_keypt_det(
             keypt_left_feat,
-            copy.deepcopy(bboxes_selected),
+            bboxes_selected.detach(),
             self.keypt2_predictor,
             keypt_id='2',
         )
