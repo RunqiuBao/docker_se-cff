@@ -20,7 +20,7 @@ parser.add_argument("--only_resume_weight", action='store_true', help="whether o
 parser.add_argument(
     "--local-rank", type=int, default=0
 )  # Note: deprecated. But required by torch.distributed.launch
-
+parser.add_argument("--only_test", action="store_true", help="only run test")
 args = parser.parse_args()
 
 assert int(os.environ["WORLD_SIZE"]) >= 1
@@ -43,4 +43,7 @@ assert os.path.isdir(args.data_root)
 cfg = get_cfg(args.config_path)
 
 exp_manager = DLManager(args, cfg)
-exp_manager.trainAndValid()
+if args.only_test:
+    exp_manager.test()
+else:
+    exp_manager.trainAndValid()

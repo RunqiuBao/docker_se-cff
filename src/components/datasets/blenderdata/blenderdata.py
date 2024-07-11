@@ -104,7 +104,11 @@ def event_collate_fn(batch):
 
 
 def get_multi_epochs_dataloader(
-    dataset, dataloader_cfg, num_workers, is_distributed, world_size
+    dataset,
+    dataloader_cfg,
+    num_workers,
+    is_distributed,
+    world_size
 ):
     if len(dataset) == 0:
         return torch.utils.data.DataLoader(dataset)
@@ -136,7 +140,11 @@ def get_multi_epochs_dataloader(
 
 
 def get_sequence_dataloader(
-    dataset, dataloader_cfg, num_workers, is_distributed, world_size
+    dataset,
+    dataloader_cfg,
+    num_workers,
+    is_distributed,
+    world_size
 ):
     if len(dataset) == 0:
         return torch.utils.data.DataLoader(dataset)
@@ -173,7 +181,10 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None
+    args, dataset_cfg,
+    dataloader_cfg,
+    is_distributed=False,
+    defineSeqIdx=None
 ):
     """
     Args:

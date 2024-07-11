@@ -67,12 +67,12 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 logger=logger
             )
 
-    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: list[dict] = None, batch_img_metas: dict = None):
+    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: dict = None, batch_img_metas: dict = None):
         """
         Args:
             left/right_event: (b c s t h w) tensor
-            gt_labels: a list of dict, each dict contains 'disparity' and 'objdet'.
-                       'disparity' contains Tensor; 'objdet' is another dict contains 'bboxes' and 'labels'.
+            gt_labels: a dict, each dict contains 'disparity' and 'objdet'.
+                       'disparity' is a Tensor; 'objdet' is list of dict, each dict contains 'bboxes' and 'labels' and 'keypt_masks'.
             batch_img_metas: dict. It contains info about image height and width.
         """
         if self.logger is not None:
@@ -103,9 +103,15 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
         loss_final = None
         preds_final = {}
-        if not self.is_freeze_disp and gt_labels is not None:
-            loss_final = self._disp_loss((pred_disparity_pyramid, gt_labels['disparity'], left_event_sharp, right_event_sharp))
-        if self.is_freeze_disp:
+        if not self.is_freeze_disp and len(gt_labels) > 0:
+            loss_final = self._disp_loss((
+                pred_disparity_pyramid,
+                gt_labels['disparity'],
+                left_event_sharp,
+                right_event_sharp
+            ))
+
+        if self.is_freeze_disp or len(gt_labels) == 0:            
             left_feature = self._feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             right_feature = self._feature_extraction_net(right_event_sharp.repeat(1, 3, 1, 1))
             object_preds, loss_final = self._object_detection_head(
@@ -114,7 +120,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 [left_event_sharp.repeat(1, 3, 1, 1)],
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
-                gt_labels["objdet"]
+                gt_labels["objdet"] if len(gt_labels) != 0 else None
             )
 
             preds_final['objdet'] = object_preds
@@ -150,6 +156,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
         preds_final['disparity'] = pred_disparity_pyramid[-1]
         torch.cuda.synchronize()
+        
         return preds_final, loss_final
 
     def get_params_group(self, learning_rate, keypt_lr=None):

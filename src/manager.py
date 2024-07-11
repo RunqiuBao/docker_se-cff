@@ -72,7 +72,7 @@ class DLManager:
         self.get_valid_loader = getattr(
             datasets, self.cfg.DATASET.VALID.NAME
         ).get_dataloader
-        # self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
+        self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
 
         self.method = getattr(methods, self.cfg.METHOD)
 
@@ -159,62 +159,24 @@ class DLManager:
 
             self.current_epoch += 1
 
-    def train(self):
-        if self.args.is_master:
-            self._log_before_train()
-        train_loader = self.get_train_loader(
+    def test(self):
+        test_loader = self.get_test_loader(
             args=self.args,
-            dataset_cfg=self.cfg.DATASET.TRAIN,
-            dataloader_cfg=self.cfg.DATALOADER.TRAIN,
-            is_distributed=self.args.is_distributed,
+            dataset_cfg=self.cfg.DATASET.TEST,
+            dataloader_cfg=self.cfg.DATALOADER.TEST,
         )
 
-        time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
-        time_checker.start()
-        for epoch in range(self.current_epoch, self.cfg.TOTAL_EPOCH):
-            if self.args.is_distributed:
-                dist.barrier()
-                train_loader.sampler.set_epoch(epoch)
-            train_log_dict = self.method.train(
+        self.logger.test()
+
+        for sequence_dataloader in test_loader:
+            sequence_name = sequence_dataloader.dataset.sequence_name
+            self.method.test(
                 model=self.model,
-                data_loader=train_loader,
-                optimizer=self.optimizer,
-                is_distributed=self.args.is_distributed,
-                world_size=self.args.world_size,
+                data_loader=sequence_dataloader,
+                sequence_name=sequence_name
             )
 
-            self.scheduler.step()
-            self.current_epoch += 1
-            if self.args.is_distributed:
-                train_log_dict = self._gather_log(train_log_dict)
-            if self.args.is_master:
-                self._log_after_epoch(epoch + 1, time_checker, train_log_dict, "train")
-
-    def test(self):
-        if self.args.is_master:
-            test_loader = self.get_test_loader(
-                args=self.args,
-                dataset_cfg=self.cfg.DATASET.TEST,
-                dataloader_cfg=self.cfg.DATALOADER.TEST,
-            )
-
-            self.logger.test()
-
-            for sequence_dataloader in test_loader:
-                sequence_name = sequence_dataloader.dataset.sequence_name
-                sequence_pred_list = self.method.test(
-                    model=self.model, data_loader=sequence_dataloader
-                )
-
-                for cur_pred_dict in sequence_pred_list:
-                    file_name = cur_pred_dict.pop("file_name")
-                    for key in cur_pred_dict:
-                        self.logger.save_visualize(
-                            image=cur_pred_dict[key],
-                            visual_type=key,
-                            sequence_name=os.path.join("test", sequence_name),
-                            image_name=file_name,
-                        )
+            from IPython import embed; print('here!'); embed()
 
     def save(self, name):
         checkpoint = self._make_checkpoint()

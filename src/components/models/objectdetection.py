@@ -297,17 +297,16 @@ class Cylinder5DDetectionHead(nn.Module):
         keypt_left_feat: List[Tensor],
         disparity_prior: Tensor,
         batch_img_metas: Dict,
-        gt_labels: Tensor = None,
+        gt_labels: List[Dict] = None,
     ):
         """
         Args:
             left_feature: multi-level features from left image input.
             right_feature: multi-level features from right image input.
-            gt_labels: dict. it contains 'bboxes' and 'labels' keys.
+            gt_labels: list of dict for one batch. each dict contains 'bboxes' and 'labels' keys.
         Returns:
             Tuple[List]: A tuple of multi-level classification scores, bbox predictions, keypts predcitions, objectnesses.
         """
-        starttime = time.time()
         cls_scores, bboxes, objectnesses = [], [], []
         for indexLevel in range(len(left_feature)):
             cls_scores_one, bboxes_one, objectnesses_one = self.forward_objdet_single(
@@ -323,8 +322,6 @@ class Cylinder5DDetectionHead(nn.Module):
             bboxes.append(bboxes_one)
             objectnesses.append(objectnesses_one)
         torch.cuda.synchronize()
-
-        # print("forward_objdet_single executed in {:.4f} seconds".format(time.time() - starttime))
 
         (
             loss_dict_bboxdet,
@@ -359,7 +356,6 @@ class Cylinder5DDetectionHead(nn.Module):
         ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)
 
         # return shape [B, 100, 6]
-        starttime = time.time()
         sbboxes, refined_right_bboxes, refined_right_scores = self.forward_stereo_det(
             left_feature,
             right_feature,
@@ -369,10 +365,7 @@ class Cylinder5DDetectionHead(nn.Module):
             self._config['bbox_expand_factor']
         )
         torch.cuda.synchronize()
-        # print("forward_stereo_det executed in {:.4f} seconds".format(time.time() - starttime))
 
-        # return shape [B, 100, num_classes, 2]
-        starttime = time.time()
         keypt1_pred = self.forward_keypt_det(
             keypt_left_feat,
             bboxes_selected.detach(),
@@ -386,13 +379,11 @@ class Cylinder5DDetectionHead(nn.Module):
             keypt_id='2',
         )
         torch.cuda.synchronize()
-        # print("forward_keypt_det executed in {:.4f} seconds".format(time.time() - starttime))
 
         loss_dict_final = None
         batch_positive_detections = []
         if gt_labels is not None:
             # get loss path
-            starttime = time.time()
             loss_dict_final, pos_masks, sbboxes = self.loss_by_stereobboxdet(
                 priors_selected,
                 cls_scores_selected,
@@ -406,7 +397,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 batch_img_metas
             )
             torch.cuda.synchronize()
-            # print("loss_by_stereobboxdet executed in {:.4f} seconds".format(time.time() - starttime))
+
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
                 loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
@@ -421,21 +412,21 @@ class Cylinder5DDetectionHead(nn.Module):
                     keypt1s = torch.gather(keypt1_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
                     keypt2s = torch.gather(keypt2_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
                     num_pos = keypt1s.shape[0]
-                    try:
-                        indices_keypt1s = torch.argmax(keypt1s.view(num_pos, -1), dim=-1)
-                        indices_keypt1s = torch.stack([indices_keypt1s % featmap_size, indices_keypt1s // featmap_size], dim=-1)
-                        indices_keypt2s = torch.argmax(keypt2s.view(num_pos, -1), dim=-1)
-                        indices_keypt2s = torch.stack([indices_keypt2s % featmap_size, indices_keypt2s // featmap_size], dim=-1)
-                    except:
-                        from IPython import embed; print('keypt num_pos is zero!'); embed()
-                        
+                    indices_keypt1s = torch.argmax(keypt1s.view(num_pos, -1), dim=-1)
+                    indices_keypt1s = torch.stack([indices_keypt1s % featmap_size, indices_keypt1s // featmap_size], dim=-1)
+                    indices_keypt2s = torch.argmax(keypt2s.view(num_pos, -1), dim=-1)
+                    indices_keypt2s = torch.stack([indices_keypt2s % featmap_size, indices_keypt2s // featmap_size], dim=-1)
+
                     batch_positive_detections.append({
                         'sbboxes': sbboxes[indexImg][pos_masks[indexImg]],
                         'classes': classes,
                         'confidences': torch.max(cls_scores_selected[indexImg][pos_masks[indexImg]].detach() , dim=-1)[0] * objectness_selected[indexImg][pos_masks[indexImg]].detach(),
                         'keypt1s': indices_keypt1s.to(torch.float) / featmap_size,
                         'keypt2s': indices_keypt2s.to(torch.float) / featmap_size
-                    })        
+                    })
+        else:
+            from IPython import embed; print('here!'); embed()
+
         torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
     
@@ -1062,7 +1053,7 @@ class Cylinder5DDetectionHead(nn.Module):
         cls_scores: Tuple[Tensor],
         bbox_preds: Tuple[Tensor],
         objectnesses: Tuple[Tensor],
-        gt_labels: Dict,
+        gt_labels: List[Dict],
         batch_img_metas: Dict
     ) -> Tuple:
         """

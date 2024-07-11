@@ -31,6 +31,21 @@ DATASET:
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
+  TEST:
+    NAME: blenderdata
+    PARAMS:
+      split: test
+      sampling_ratio: 1
+      crop_height: 768
+      crop_width: 1344
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 1000000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
 DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
@@ -47,7 +62,7 @@ DATALOADER:
   TEST:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 2
+      batch_size: 1
       shuffle: False
       drop_last: False
 MODEL:

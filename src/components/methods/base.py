@@ -153,38 +153,29 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
 
 
 @torch.no_grad()
-def test(model, data_loader):
+def test(
+    model,
+    data_loader,
+    sequence_name
+):
     model.eval()
-    pred_list = []
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-    for indexBatch in range(len(data_loader.dataset)):
+    for indexFrame in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
 
         pred, _ = model(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
-            gt_disparity=None,
+            gt_labels={},
+            batch_img_metas=batch_data["image_metadata"]
         )
 
-        for idx in range(pred.size(0)):
-            width = data_loader.dataset.WIDTH
-            height = data_loader.dataset.HEIGHT
-            cur_pred = pred[idx, :height, :width].cpu()
-            cur_pred_dict = {
-                "file_name": str(batch_data["file_index"][idx].item()).zfill(6)
-                + ".png",
-                "pred": visualizer.tensor_to_disparity_image(cur_pred),
-                "pred_magma": visualizer.tensor_to_disparity_magma_image(
-                    cur_pred, vmax=100
-                ),
-            }
-            pred_list.append(cur_pred_dict)
+        SaveTestResultsAndVisualize(pred, indexFrame, batch_data["end_timestamp"], sequence_name)
         pbar.update(1)
     pbar.close()
-
-    return pred_list
+    return
 
 
 def batch_to_cuda(batch_data, dtype=torch.float32):
@@ -220,3 +211,7 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
             batch_data["gt_labels"]["objdet"][i]["keypt2_masks"] = batch_data["gt_labels"]["objdet"][i]["keypt2_masks"].to(dtype).cuda()
 
     return batch_data
+
+
+def SaveTestResultsAndVisualize(pred:  dict, indexFrame: int, timestamp: int, sequence_name: str):
+    pass
