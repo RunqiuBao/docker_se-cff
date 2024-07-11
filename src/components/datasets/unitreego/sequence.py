@@ -59,7 +59,7 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         # Event Dataset
         event_module = getattr(event, event_cfg.NAME)
-        event_root = os.path.join(root, self._PATH_DICT["event"])
+        event_root = os.path.join(root, self._PATH_DICT["event"])        
         self.event_dataset = event_module.EventDataset(
             root=event_root,
             sequence_name=self.sequence_name,

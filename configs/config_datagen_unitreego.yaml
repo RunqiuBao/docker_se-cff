@@ -2,47 +2,32 @@ TOTAL_EPOCH: 400
 METHOD: base
 DATASET:
   TRAIN:
-    NAME: blenderdata
+    NAME: unitreego
     PARAMS:
       split: train
       sampling_ratio: 1
-      crop_height: 720
-      crop_width: 1280
+      crop_height: 480
+      crop_width: 640
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
   VALID:
-    NAME: blenderdata
+    NAME: unitreego
     PARAMS:
       split: valid
       sampling_ratio: 1
-      crop_height: 720
-      crop_width: 1280
+      crop_height: 480
+      crop_width: 640
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
-          stack_method: MixedDensityEventStacking
-          stack_size: 10
-          use_preprocessed_image: False
-  TEST:
-    NAME: blenderdata
-    PARAMS:
-      split: test
-      sampling_ratio: 1
-      crop_height: 720
-      crop_width: 1280
-      randomhorizontalflip: False
-      event_cfg:
-        NAME: sbn
-        PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -62,7 +47,7 @@ DATALOADER:
   TEST:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: False
 MODEL:
@@ -78,16 +63,3 @@ MODEL:
         in_channels: 1
         max_disp: 192
         refine_channels: 1
-OPTIMIZER:
-  NAME: Adam
-  PARAMS:
-    lr: 0.0005
-    weight_decay: 0.0001
-SCHEDULER:
-  NAME: CosineAnnealingWarmupRestarts
-  PARAMS:
-    cycle_mult: 1.0
-    first_cycle_steps: 100
-    gamma: 1.0
-    lr_ratio: 0.0001
-    warmup_steps: 3

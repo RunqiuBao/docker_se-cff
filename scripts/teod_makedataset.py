@@ -8,6 +8,7 @@ import shutil
 import cv2
 from tqdm import tqdm
 import sys, os
+import json
 
 
 def ConfigureLogger():
@@ -84,6 +85,7 @@ def ConfigureArguments():
         required=True,
         help="index of this sequence in the dataset.",
     )
+    parser.add_argument("--calib_path", type=str, default=None)
 
     args = parser.parse_args()
     args.world_size = 1
@@ -101,32 +103,108 @@ def ConvertEventsToImage(events):
     return events.astype(numpy.uint8)
 
 
+def UndistortAndRectifyStereoEvents(leftEvents, rightEvents, calib_dict):
+    """
+    Args:
+        leftEvents: (h, w, 10) shape.
+        ...
+    """
+    left_min = int(leftEvents.min())  # Note: should always be -1 in se-cff datasets.
+    leftEvents = (leftEvents  - leftEvents.min()).astype('uint8')
+    right_min = int(rightEvents.min())
+    rightEvents = (rightEvents - rightEvents.min()).astype('uint8')
+
+    left_groups = [leftEvents[..., :3], leftEvents[..., 3:6], leftEvents[..., 6:9], leftEvents[..., 9]]
+    right_groups = [rightEvents[..., :3], rightEvents[..., 3:6], rightEvents[..., 6:9], rightEvents[..., 9]]
+    # left_groups = [leftone for leftone in leftEvents.transpose(2, 0, 1)]
+    # right_groups = [rightone for rightone in rightEvents.transpose(2, 0, 1)]
+    left_groups_results, right_groups_results = [], []
+    for leftone, rightone in zip(left_groups, right_groups):
+        leftone_undist = cv2.undistort(leftone, calib_dict['undistort']['cam0']['kk'], calib_dict['undistort']['cam0']['distCoeff'], None, calib_dict['undistort']['cam0']['kk'])
+        rightone_undist = cv2.undistort(rightone, calib_dict['undistort']['cam1']['kk'], calib_dict['undistort']['cam1']['distCoeff'], None, calib_dict['undistort']['cam1']['kk'])
+        leftone_rect = cv2.remap(
+            leftone_undist,
+            calib_dict['stereo_rectify']['left_stereo_map'][0],
+            calib_dict['stereo_rectify']['left_stereo_map'][1],
+            cv2.INTER_LANCZOS4,
+            cv2.BORDER_CONSTANT,
+            0
+        )    
+        rightone_rect = cv2.remap(
+            rightone_undist,
+            calib_dict['stereo_rectify']['right_stereo_map'][0],
+            calib_dict['stereo_rectify']['right_stereo_map'][1],
+            cv2.INTER_LANCZOS4,
+            cv2.BORDER_CONSTANT,
+            0
+        )
+        
+        imgHeight, imgWidth = leftone_rect.shape[:2]
+        margin = calib_dict['stereo_rectify']['margin']        
+        leftone_rect = leftone_rect[margin:imgHeight - margin, margin:imgWidth - margin]
+        rightone_rect = rightone_rect[margin:imgHeight - margin, margin:imgWidth - margin]
+        if leftone_rect.ndim == 2:
+            leftone_rect = leftone_rect[..., numpy.newaxis]
+            rightone_rect = rightone_rect[..., numpy.newaxis]
+        
+        left_groups_results.append(leftone_rect)
+        right_groups_results.append(rightone_rect)
+    leftEvents_rect = numpy.concatenate(left_groups_results, axis=-1).astype('int8')
+    rightEvents_rect = numpy.concatenate(right_groups_results, axis=-1).astype('int8')
+    leftEvents_rect += left_min
+    rightEvents_rect += right_min
+    leftEvents_rect = numpy.clip(leftEvents_rect, -1, 1)
+    rightEvents_rect = numpy.clip(rightEvents_rect, -1, 1)
+
+    return leftEvents_rect, rightEvents_rect
+
+
 def main(args):
     # get dataset config
     cfg = get_cfg(args.config_path)
     log.info("loaded dataset_config: %r", cfg)
 
     # create dataloader
-    dataset_type = "train" if args.dataset_type == "train" else "valid"
+    dataset_type = args.dataset_type
     get_data_loader = getattr(
         datasets,
-        cfg.DATASET.TRAIN.NAME if dataset_type == "train" else cfg.DATASET.VALID.NAME,
+        cfg.DATASET.TRAIN.NAME,  # train, valid, test should share the same dataset class
     ).get_dataloader
     batch_size = (
         cfg.DATALOADER.TRAIN.PARAMS.batch_size
-        if dataset_type == "train"
-        else cfg.DATALOADER.VALID.PARAMS.batch_size
     )
+
+    if dataset_type == "train":
+        dataset_cfg = cfg.DATASET.TRAIN
+        dataloader_cfg = cfg.DATALOADER.TRAIN
+    elif dataset_type == "valid":
+        dataset_cfg = cfg.DATASET.VALID
+        dataloader_cfg = cfg.DATALOADER.VALID
+    elif dataset_type == "test":
+        dataset_cfg = cfg.DATASET.TEST
+        dataloader_cfg = cfg.DATALOADER.VALID
+
     data_loader = get_data_loader(
         args=args,
-        dataset_cfg=cfg.DATASET.TRAIN if dataset_type == "train" else cfg.DATASET.VALID,
-        dataloader_cfg=cfg.DATALOADER.TRAIN
-        if dataset_type == "train"
-        else cfg.DATALOADER.VALID,
+        dataset_cfg=dataset_cfg,
+        dataloader_cfg=dataloader_cfg,
         is_distributed=False,
         defineSeqIdx=args.seq_idx,
     )
     data_iter = iter(data_loader)
+
+    stereo_calib_dict = None
+    if args.calib_path is not None:
+        with open(args.calib_path, "r") as calibFile:
+            stereo_calib_dict = json.load(calibFile)
+            stereo_calib_dict['stereo_rectify']['left_stereo_map'][0] = numpy.array(stereo_calib_dict['stereo_rectify']['left_stereo_map'][0], dtype='int16')
+            stereo_calib_dict['stereo_rectify']['left_stereo_map'][1] = numpy.array(stereo_calib_dict['stereo_rectify']['left_stereo_map'][1], dtype='int16')
+            stereo_calib_dict['stereo_rectify']['right_stereo_map'][0] = numpy.array(stereo_calib_dict['stereo_rectify']['right_stereo_map'][0], dtype='int16')
+            stereo_calib_dict['stereo_rectify']['right_stereo_map'][1] = numpy.array(stereo_calib_dict['stereo_rectify']['right_stereo_map'][1], dtype='int16')
+            stereo_calib_dict['undistort']['cam0']['kk'] = numpy.array(stereo_calib_dict['undistort']['cam0']['kk'])
+            stereo_calib_dict['undistort']['cam0']['distCoeff'] = numpy.array(stereo_calib_dict['undistort']['cam0']['distCoeff'])
+            stereo_calib_dict['undistort']['cam1']['kk'] = numpy.array(stereo_calib_dict['undistort']['cam1']['kk'])
+            stereo_calib_dict['undistort']['cam1']['distCoeff'] = numpy.array(stereo_calib_dict['undistort']['cam1']['distCoeff'])
 
     # iterate over the dataset
     pbar = tqdm(total=len(data_loader.dataset) // batch_size)
@@ -143,44 +221,51 @@ def main(args):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
 
-                code = "%03d_%06d_l" % (
+                code_l = "%03d_%06d_l" % (
                     args.seq_idx,
                     indexBatch * batch_size + indexInBatch,
                 )
-                code = code.encode()
+                code_l = code_l.encode()
                 leftEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["left"][indexInBatch].numpy())
-                ).astype("int8")
-                lmdb_writer.write(code, leftEvents)
+                )
 
-                code = "%03d_%06d_r" % (
+                code_r = "%03d_%06d_r" % (
                     args.seq_idx,
                     indexBatch * batch_size + indexInBatch,
                 )
-                code = code.encode()
+                code_r = code_r.encode()
                 rightEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["right"][indexInBatch].numpy())
                 ).astype("int8")
-                lmdb_writer.write(code, rightEvents)
 
-                code = "%03d_%06d_ts" % (
+                if stereo_calib_dict is None:
+                    leftEvents = leftEvents.astype("int8")
+                    rightEvents = rightEvents.astype("int8")
+                else:
+                    leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
+
+                lmdb_writer.write(code_l, leftEvents)
+                lmdb_writer.write(code_r, rightEvents)
+
+                code_ts = "%03d_%06d_ts" % (
                     args.seq_idx,
                     indexBatch * batch_size + indexInBatch,
                 )
-                code = code.encode()
-                lmdb_writer.write(code, numpy.array([ts], dtype="int"))
+                code_ts = code_ts.encode()
+                lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
 
-                leftView = ConvertEventsToImage(leftEvents[..., -1])
-                rightView = ConvertEventsToImage(rightEvents[..., -1])
+                leftView = ConvertEventsToImage(leftEvents[..., 5])
+                rightView = ConvertEventsToImage(rightEvents[..., 5])
                 leftViewPath = os.path.join(
                     args.view4label_dir,
                     "{}_left".format(args.seq_idx),
-                    "{}.png".format(str(ts).zfill(8)),
+                    "{}.png".format(str(ts).zfill(12)),
                 )
                 rightViewPath = os.path.join(
                     args.view4label_dir,
                     "{}_right".format(args.seq_idx),
-                    "{}.png".format(str(ts).zfill(8)),
+                    "{}.png".format(str(ts).zfill(12)),
                 )
                 cv2.imwrite(leftViewPath, leftView)
                 cv2.imwrite(rightViewPath, rightView)

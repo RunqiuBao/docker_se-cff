@@ -10,7 +10,7 @@ from .sequence import SequenceDataset
 from .constant import DATA_SPLIT
 
 
-class BlenderDataset(torch.utils.data.Dataset):
+class UnitreegoDataset(torch.utils.data.Dataset):
     lmdb_txn = None
     lmdb_env = None
 
@@ -104,11 +104,7 @@ def event_collate_fn(batch):
 
 
 def get_multi_epochs_dataloader(
-    dataset,
-    dataloader_cfg,
-    num_workers,
-    is_distributed,
-    world_size
+    dataset, dataloader_cfg, num_workers, is_distributed, world_size
 ):
     if len(dataset) == 0:
         return torch.utils.data.DataLoader(dataset)
@@ -140,11 +136,7 @@ def get_multi_epochs_dataloader(
 
 
 def get_sequence_dataloader(
-    dataset,
-    dataloader_cfg,
-    num_workers,
-    is_distributed,
-    world_size
+    dataset, dataloader_cfg, num_workers, is_distributed, world_size
 ):
     if len(dataset) == 0:
         return torch.utils.data.DataLoader(dataset)
@@ -181,17 +173,14 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg,
-    dataloader_cfg,
-    is_distributed=False,
-    defineSeqIdx=None
+    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None
 ):
     """
     Args:
         ...
         defineSeqIdx: int, only use this sequence if defined.
     """
-    dataset = BlenderDataset(
+    dataset = UnitreegoDataset(
         root=args.data_root,
         num_workers=args.num_workers,
         defineSeqIdx=defineSeqIdx,
