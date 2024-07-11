@@ -10,7 +10,7 @@ from .sequence import SequenceDataset
 from .constant import DATA_SPLIT
 
 
-class BlenderDataset(torch.utils.data.Dataset):
+class UnitreegoDataset(torch.utils.data.Dataset):
     lmdb_txn = None
     lmdb_env = None
 
@@ -180,7 +180,7 @@ def get_dataloader(
         ...
         defineSeqIdx: int, only use this sequence if defined.
     """
-    dataset = BlenderDataset(
+    dataset = UnitreegoDataset(
         root=args.data_root,
         num_workers=args.num_workers,
         defineSeqIdx=defineSeqIdx,

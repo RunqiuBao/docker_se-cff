@@ -23,9 +23,14 @@ class EventSlicer(torch.utils.data.Dataset):
 
         with h5py.File(event_root, "r") as h5f:
             self.ms_to_idx = np.asarray(h5f["ms_to_idx"], dtype="int64").squeeze()
-            self.t_offset = (
-                int(h5f["t_offset"][()]) if h5f["t_offset"][()].size > 0 else 0
-            )
+            if "t_offset" not in h5f:
+                self.t_offset = (0)
+            elif h5f["t_offset"][()].size == 0:
+                self.t_offset = (0)
+            else:
+                self.t_offset = (
+                    int(h5f["t_offset"][()])
+                )
             self.t_final = int(h5f["events/t"][-1]) + self.t_offset
             try:
                 self.min_time = int(h5f["events/t"][num_of_event]) + self.t_offset
@@ -76,7 +81,6 @@ class EventSlicer(torch.utils.data.Dataset):
         t_start_ms, t_end_ms = self.get_conservative_window_ms(t_start_us, t_end_us)
         t_start_ms_idx = self.ms2idx(t_start_ms)
         t_end_ms_idx = self.ms2idx(t_end_ms)
-        print("baodebug: t_start_ms {}, t_start_ms_idx {}, t_end_ms {}, t_end_ms_idx {}".format(t_start_ms, t_start_ms_idx, t_end_ms, t_end_ms_idx))
 
         assert t_start_ms_idx is not None or t_end_ms_idx is not None
 
@@ -201,7 +205,11 @@ class EventSlicer(torch.utils.data.Dataset):
         return idx_start, idx_end
 
     def ms2idx(self, time_ms):
-        assert time_ms >= 0
+        try:
+            assert time_ms >= 0
+        except:
+            print("debug: time_ms: {}".format(time_ms))
+            
         if time_ms >= self.ms_to_idx.size:
             return None
         return self.ms_to_idx[time_ms]
