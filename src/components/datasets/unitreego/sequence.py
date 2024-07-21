@@ -47,7 +47,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.sequence_name = root.split("/")[-1]
 
         # Timestamps
-        if split in ["train", "valid", "test"]:
+        if split in ["train", "valid", "test"]:            
             self.timestamps = np.loadtxt(
                 os.path.join(root, self._PATH_DICT["timestamps"]), dtype="int64"
             )
