@@ -24,6 +24,7 @@ class UnitreegoDataset(torch.utils.data.Dataset):
         crop_width,
         num_workers=0,
         defineSeqIdx=None,
+        isDisableLmdbRead=False,
         **kwargs,
     ):
         self.root = root
@@ -36,7 +37,7 @@ class UnitreegoDataset(torch.utils.data.Dataset):
         assert split in DATA_SPLIT.keys()
 
         # moving events into lmdb
-        if os.path.isdir(os.path.join(root, split, "lmdb")) and os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb")) > 1024**2:  # Note: the dataset need to be larger than 1MB
+        if not isDisableLmdbRead and os.path.isdir(os.path.join(root, split, "lmdb")) and os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb")) > 1024**2:  # Note: the dataset need to be larger than 1MB
             self.lmdb_env = lmdb.open(
                 os.path.join(root, split, "lmdb"), map_size=1099511627776
             )
@@ -45,9 +46,10 @@ class UnitreegoDataset(torch.utils.data.Dataset):
         sequence_list = DATA_SPLIT[split]
         if defineSeqIdx is not None:
             sequence_list = [sequence_list[defineSeqIdx]]
+            
         self.sequence_data_list = []
         for sequence in sequence_list:
-            sequence_root = os.path.join(root, sequence)
+            sequence_root = os.path.join(root, sequence)            
             self.sequence_data_list.append(
                 SequenceDataset(
                     root=sequence_root,
@@ -65,7 +67,7 @@ class UnitreegoDataset(torch.utils.data.Dataset):
         if len(self.sequence_data_list) == 0:
             self.dataset = []
         else:
-            self.dataset = torch.utils.data.ConcatDataset(self.sequence_data_list)
+            self.dataset = torch.utils.data.ConcatDataset(self.sequence_data_list)            
 
     def __len__(self):
         return len(self.dataset)
@@ -173,7 +175,7 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None
+    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False
 ):
     """
     Args:
@@ -184,6 +186,7 @@ def get_dataloader(
         root=args.data_root,
         num_workers=args.num_workers,
         defineSeqIdx=defineSeqIdx,
+        isDisableLmdbRead=isDisableLmdbRead,
         **dataset_cfg.PARAMS,
     )
 

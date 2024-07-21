@@ -83,7 +83,7 @@ def ConfigureArguments():
         "--seq_idx",
         type=int,
         required=True,
-        help="index of this sequence in the dataset.",
+        help="index of the sequence in the dataset."
     )
     parser.add_argument("--calib_path", type=str, default=None)
 
@@ -190,6 +190,7 @@ def main(args):
         dataloader_cfg=dataloader_cfg,
         is_distributed=False,
         defineSeqIdx=args.seq_idx,
+        isDisableLmdbRead=True
     )
     data_iter = iter(data_loader)
 
@@ -209,18 +210,20 @@ def main(args):
     # iterate over the dataset
     pbar = tqdm(total=len(data_loader.dataset) // batch_size)
     CreatePath(args.lmdb_dir, isOverwrite=False)
-    CreatePath(os.path.join(args.view4label_dir, "{}_left".format(args.seq_idx)))
-    CreatePath(os.path.join(args.view4label_dir, "{}_right".format(args.seq_idx)))
+    CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_left".format(args.seq_idx)))
+    CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_right".format(args.seq_idx)))
     lmdb_writer = LmdbWriter(args.lmdb_dir, isDummyMode=False)
     with open(
         os.path.join(args.lmdb_dir, "{}_timestamp.txt".format(args.seq_idx)), "w"
     ) as tsFile:
         for indexBatch in range(len(data_loader.dataset) // batch_size):
+            if indexBatch % 2 ==0:
+                continue  # hack: sampling by 2
             batch_data = next(data_iter)
             for indexInBatch in range(batch_size):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
-
+                
                 code_l = "%03d_%06d_l" % (
                     args.seq_idx,
                     indexBatch * batch_size + indexInBatch,
@@ -255,16 +258,18 @@ def main(args):
                 code_ts = code_ts.encode()
                 lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
 
-                leftView = ConvertEventsToImage(leftEvents[..., 5])
-                rightView = ConvertEventsToImage(rightEvents[..., 5])
+                leftView = ConvertEventsToImage(leftEvents[..., 0])
+                rightView = ConvertEventsToImage(rightEvents[..., 0])
                 leftViewPath = os.path.join(
                     args.view4label_dir,
-                    "{}_left".format(args.seq_idx),
+                    "{}".format(args.seq_idx),
+                    "{}_right".format(args.seq_idx),  # hack, FIXME!!
                     "{}.png".format(str(ts).zfill(12)),
                 )
                 rightViewPath = os.path.join(
                     args.view4label_dir,
-                    "{}_right".format(args.seq_idx),
+                    "{}".format(args.seq_idx),
+                    "{}_left".format(args.seq_idx),
                     "{}.png".format(str(ts).zfill(12)),
                 )
                 cv2.imwrite(leftViewPath, leftView)
