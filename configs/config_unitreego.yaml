@@ -6,13 +6,13 @@ DATASET:
     PARAMS:
       split: train
       sampling_ratio: 1
-      crop_height: 768
-      crop_width: 1344
+      crop_height: 480
+      crop_width: 640
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -21,13 +21,13 @@ DATASET:
     PARAMS:
       split: valid
       sampling_ratio: 1
-      crop_height: 768
-      crop_width: 1344
+      crop_height: 480
+      crop_width: 640
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -35,19 +35,19 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 3
+      batch_size: 1
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 3
+      batch_size: 1
       shuffle: False
       drop_last: True
   TEST:
-    NAME: get_multi_epochs_dataloader
+    NAME: get_sequence_dataloader
     PARAMS:
-      batch_size: 2
+      batch_size: 1
       shuffle: False
       drop_last: False
 MODEL:
@@ -88,30 +88,8 @@ MODEL:
             eps: 0.001
           act_cfg:
             type: 'Swish'
-    keypt_feature_extraction_net_cfg:
-      PARAMS:
-        backbone:
-          type: ResNeXt
-          depth: 101
-          groups: 64
-          base_width: 4
-          num_stages: 4
-          out_indices: [0, 1, 2, 3]
-          frozen_stages: 1
-          norm_cfg:
-            type: BN
-            requires_grad: True
-          style: pytorch
-          init_cfg:
-              type: Pretrained
-              checkpoint: 'open-mmlab://resnext101_64x4d'
-        neck:
-          type: FPN
-          in_channels: [256, 512, 1024, 2048]
-          out_channels: 256
-          num_outs: 5
     disp_head_cfg:
-      is_freeze: True
+      is_freeze: False
       PARAMS:
         in_channels: 1
         max_disp: 288

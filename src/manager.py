@@ -39,6 +39,7 @@ class DLManager:
         )
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
+        
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
             checkpoint = torch.load(self.args.resume_cpt, map_location=device)
@@ -49,8 +50,8 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = self.model.state_dict()
             for key, value in checkpoint["model"].items():
-                if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
-                    continue
+                # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
+                #     continue
                 if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
                     model_statedict["module." + key] = value
                 else:
@@ -168,15 +169,14 @@ class DLManager:
 
         self.logger.test()
 
-        for sequence_dataloader in test_loader:
+        for sequence_dataloader in test_loader:            
             sequence_name = sequence_dataloader.dataset.sequence_name
             self.method.test(
                 model=self.model,
                 data_loader=sequence_dataloader,
-                sequence_name=sequence_name
+                sequence_name=sequence_name,
+                save_root=self.args.save_root
             )
-
-            from IPython import embed; print('here!'); embed()
 
     def save(self, name):
         checkpoint = self._make_checkpoint()

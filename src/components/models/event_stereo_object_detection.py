@@ -11,7 +11,7 @@ from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
 from .objectdetection import Cylinder5DDetectionHead
 from .feature_extractor import FeatureExtractor2
-from .utils.misc import multi_apply, timeit
+from .utils.misc import multi_apply, DrawResultBboxesAndKeyptsOnStereoEventFrame
 
 from . import losses
 from .utils.misc import freeze_module_grads, unfreeze_module_grads
@@ -23,7 +23,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         self,
         concentration_net_cfg: dict = None,
         feature_extraction_net_cfg: dict = None,
-        keypt_feature_extraction_net_cfg: dict = None,
         disp_head_cfg: dict = None,
         object_detection_head_cfg: dict = None,
         losses_cfg: dict = None,  # Cylinder5DDetectionLoss, disparityLoss
@@ -43,7 +42,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         )
         if not self.is_freeze_disp:
             freeze_module_grads(self._feature_extraction_net)
-            # freeze_module_grads(self._keypt_feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
             **disp_head_cfg.PARAMS, isInputFeature=False  # Note: an efficient feature extractor for object detection might not be good for stereo matching?
@@ -124,7 +122,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             )
 
             preds_final['objdet'] = object_preds
-            if self.logger is not None and len(object_preds) > 0:
+            if self.logger is not None and len(object_preds) > 0 and loss_final is not None:
                 if 'sbboxes' in object_preds[0]:
                     leftimage_views, rightimage_views = multi_apply(
                         self.RenderImageWithBboxesAndKeypts,
@@ -155,6 +153,10 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 print("Zero detection occured.")
 
         preds_final['disparity'] = pred_disparity_pyramid[-1]
+        preds_final['concentrate'] = {
+            'left': left_event_sharp,
+            'right': right_event_sharp
+        }
         torch.cuda.synchronize()
         
         return preds_final, loss_final
@@ -231,33 +233,16 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             left_event_sharp: ...
         """
         sbboxes, classes, confidences, keypts1, keypts2 = obj_preds['sbboxes'], obj_preds['classes'], obj_preds['confidences'], obj_preds['keypt1s'], obj_preds['keypt2s']
-        if keypts1.ndim == 1:
-            keypts1 = keypts1.unsqueeze(0)
-            keypts2 = keypts2.unsqueeze(0)
-        left_event_sharp = left_event_sharp - left_event_sharp.min()
-        left_event_sharp = (left_event_sharp * 255 / left_event_sharp.max()).astype('uint8')
-        left_event_sharp = cv2.cvtColor(left_event_sharp, cv2.COLOR_GRAY2RGB)
-        right_event_sharp = right_event_sharp - right_event_sharp.min()
-        right_event_sharp = (right_event_sharp * 255 / right_event_sharp.max()).astype('uint8')
-        right_event_sharp = cv2.cvtColor(right_event_sharp, cv2.COLOR_GRAY2RGB)
-        for bbox, classindex, confidence, keypt1, keypt2 in zip(sbboxes, classes, confidences, keypts1, keypts2):
-            top_left = (int(bbox[0]), int(bbox[1]))
-            top_right = (int(bbox[2]), int(bbox[1]))
-            bottom_right = (int(bbox[2]), int(bbox[3]))
-            cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-            text = 'cls: {}\nconfi: {}'.format(format(classindex.item(), '.2f'), format(confidence.item(), '.2f'))
-            textposition = (int(top_right[0] + bottom_right[1]) // 2, int(top_right[1] + bottom_right[1]) // 2)
-            cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
-            w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
-            keypt1_int = (int(keypt1[0] * w + top_left[0]), int(keypt1[1] * h + top_left[1]))
-            keypt2_int = (int(keypt2[0] * w + top_left[0]), int(keypt2[1] * h + top_left[1]))
-            cv2.circle(left_event_sharp, keypt1_int, radius=3, color=(0, 255, 0), thickness=-1)
-            cv2.circle(left_event_sharp, keypt2_int, radius=3, color=(0, 0, 255), thickness=-1)
-
-            top_left = (int(bbox[4]), int(bbox[1]))
-            bottom_right = (int(bbox[5]), int(bbox[3]))
-            cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-        return torch.from_numpy(left_event_sharp), torch.from_numpy(right_event_sharp)
+        visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
+            left_event_sharp,
+            right_event_sharp,
+            sbboxes,
+            classes,
+            confidences,
+            keypts1,
+            keypts2
+        )
+        return torch.from_numpy(visz_left), torch.from_numpy(visz_right)
 
     def RenderImageWithBboxes(
         self,

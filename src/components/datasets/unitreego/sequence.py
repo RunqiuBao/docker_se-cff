@@ -82,7 +82,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             # 'h': self.event_dataset.event_h,
             # 'w': self.event_dataset.event_w,
             "h": crop_height,
-            "w": crop_width,
+            "w": crop_width
         }
         self.disparity_dataset = disparity_module.DisparityDataset(
             img_metadata=img_metadata
@@ -177,6 +177,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         output["image_metadata"] = {
             "h": self.crop_height,
             "w": self.crop_width,
+            "h_cam": self.event_dataset.event_h,
+            "w_cam": self.event_dataset.event_w
         }
         output["event"]["left"] = (
             output["event"]["left"]

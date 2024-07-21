@@ -50,13 +50,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 3
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 3
       shuffle: False
       drop_last: True
   TEST:
@@ -117,7 +117,7 @@ MODEL:
         in_channels: 128
         feat_channels: 256
         num_stacked_convs: 2
-        num_topk_candidates: 1000
+        num_topk_candidates: 30
         bbox_expand_factor: 1.6
         strides: [8, 16, 32]
         norm_cfg:
@@ -128,7 +128,7 @@ MODEL:
           type: ReLU
         # region proposal
         nms_pre: 3000
-        nms_iou_threshold: 0.5
+        nms_iou_threshold: 0.2
         # right bbox regression
         right_roi_feat_size: 7
         iou_threshold: 0.4
@@ -137,6 +137,9 @@ MODEL:
         keypts_feat_size: 14
         keypt_in_channels: 3
         keypt_feat_channels: 512
+        # inference params
+        lconfidence_threshold: 0.2
+        rscore_threshold: 0
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

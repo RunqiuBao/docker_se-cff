@@ -9,6 +9,8 @@ from collections import OrderedDict
 
 from utils.metrics import AverageMeter, EndPointError, NPixelError, RootMeanSquareError
 from utils import visualizer
+from ..models.utils.misc import DrawResultBboxesAndKeyptsOnStereoEventFrame
+
 
 
 def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
@@ -156,13 +158,14 @@ def valid(model, data_loader, is_distributed=False, world_size=1, logger=None):
 def test(
     model,
     data_loader,
-    sequence_name
+    sequence_name,
+    save_root
 ):
     model.eval()
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-    for indexFrame in range(len(data_loader.dataset)):
+    for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
 
         pred, _ = model(
@@ -170,9 +173,9 @@ def test(
             right_event=batch_data["event"]["right"],
             gt_labels={},
             batch_img_metas=batch_data["image_metadata"]
-        )
+        )        
 
-        SaveTestResultsAndVisualize(pred, indexFrame, batch_data["end_timestamp"], sequence_name)
+        SaveTestResultsAndVisualize(pred, indexBatch, batch_data["end_timestamp"].item(), sequence_name, save_root, batch_data["image_metadata"])
         pbar.update(1)
     pbar.close()
     return
@@ -213,5 +216,67 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
     return batch_data
 
 
-def SaveTestResultsAndVisualize(pred:  dict, indexFrame: int, timestamp: int, sequence_name: str):
-    pass
+def SaveTestResultsAndVisualize(pred:  dict, indexBatch: int, timestamp: int, sequence_name: str, save_root: str, img_metas: dict):
+    # save detection results in txt, frame by frame.
+    path_det_results_folder = os.path.join(save_root, "inference", "detections")
+    path_tsfile = os.path.join(save_root, "inference", "timestamps.txt")
+    os.makedirs(path_det_results_folder, exist_ok=True)
+    ts_openmode = "a" if os.path.isfile(path_tsfile) else "w"
+    with open(path_tsfile, ts_openmode) as tsfile:
+        tsfile.write(str(timestamp) + "\n")
+    detresults_openmode = "w"
+    batch_size = len(pred['objdet'])
+    for indexInBatch, detection in enumerate(pred['objdet']):
+        with open(os.path.join(path_det_results_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".txt"), detresults_openmode) as detresult_file:
+            for indexDet in range(detection.shape[0]):
+                oneDet = numpy.array2string(detection[indexDet].cpu().numpy(), separator=" ", max_line_width=numpy.inf, formatter={'float_kind':lambda x: "%.4f" % x})[1:-1]
+                detresult_file.write(oneDet + "\n")
+
+    # save detection visualization results, frame by frame. Concate left and right horizontally.
+    path_det_visz_folder = os.path.join(save_root, "inference", "det_visz")
+    path_concentrate_left_folder = os.path.join(save_root, "inference", "left")
+    path_concentrate_right_folder = os.path.join(save_root, "inference", "right")
+    os.makedirs(path_det_visz_folder, exist_ok=True)
+    os.makedirs(path_concentrate_left_folder, exist_ok=True)
+    os.makedirs(path_concentrate_right_folder, exist_ok=True)
+    imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
+    for indexInBatch, detection in enumerate(pred['objdet']):
+        left_bboxes = detection[:, 1:5].cpu().numpy()
+        left_bboxes[:, [0, 2]] *= imgWidth
+        left_bboxes[:, [1, 3]] *= imgHeight
+        tl_x = left_bboxes[:, 0] - left_bboxes[:, 2] / 2
+        tl_y = left_bboxes[:, 1] - left_bboxes[:, 3] / 2
+        br_x = left_bboxes[:, 0] + left_bboxes[:, 2] / 2
+        br_y = left_bboxes[:, 1] + left_bboxes[:, 3] / 2
+        left_bboxes = numpy.stack([tl_x, tl_y, br_x, br_y], axis=1)
+        right_bboxes = detection[:, [5, 7]].cpu().numpy() * imgWidth
+        tl_x_r = right_bboxes[:, 0] - right_bboxes[:, 1] / 2
+        br_x_r = right_bboxes[:, 0] + right_bboxes[:, 1] / 2
+        right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
+        sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
+        classes = detection[:, 0].cpu().numpy().astype('int')
+        confidences = detection[:, -4].cpu().numpy()
+        stereo_confidences = detection[:, -3].cpu().numpy()
+        keypts1 = detection[:, -8:-6].cpu().numpy()
+        keypts2 = detection[:, -6:-4].cpu().numpy()        
+        visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
+            pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
+            pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
+            sbboxes,
+            classes,
+            confidences,
+            keypts1,
+            keypts2,
+            stereo_confidences=stereo_confidences)
+        visz = numpy.concatenate([visz_left, visz_right], axis=-2)
+        visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)
+        left_concentrated = pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        left_concentrated = left_concentrated - left_concentrated.min()
+        left_concentrated = (left_concentrated * 255 / left_concentrated.max()).astype('uint8')
+        right_concentrated = pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        right_concentrated = right_concentrated - right_concentrated.min()
+        right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
+        cv2.imwrite(os.path.join(path_concentrate_left_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), left_concentrated)
+        cv2.imwrite(os.path.join(path_concentrate_right_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), right_concentrated)
+    return
