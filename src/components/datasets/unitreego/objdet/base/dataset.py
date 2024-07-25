@@ -32,14 +32,19 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         if not self.is_initilized:
             return
 
-        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(8) + ".json")
+        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(12) + ".json")
         try:
             with open(file_path, "r") as file:
                 labels_data = json.load(file)
         except:
             raise FileNotFoundError(f"The label file {file_path} does not exist.")
 
-        labels_data = self.FormatLabels(labels_data)
+        try:        
+            labels_data = self.FormatLabels(labels_data)
+        except:
+            print("file_path: ", file_path)
+            raise
+
         return labels_data
 
     def FormatLabels(self, labels_data):
@@ -126,12 +131,12 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             oneMask = oneMask.astype('float')
             oneMask[maskedPoints] *= numpy.sqrt(numpy.power((maskedPoints[1] - keypt[0]), 2) + numpy.power((maskedPoints[0] - keypt[1]), 2))
             oneMask[maskedPoints] = 1 - oneMask[maskedPoints] / oneMask.max()  # Note: do this after roi align.
-            # crop by triangle
-            triangleMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
-            bottom_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 3]))
-            trianglePoints = numpy.array([keypt_all[0:2].astype('int'), bottom_left, bottom_right])
-            cv2.fillPoly(triangleMask, [trianglePoints], 255)
-            oneMask[~triangleMask.view('bool')] *= 0
+            # # crop by triangle
+            # triangleMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
+            # bottom_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 3]))
+            # trianglePoints = numpy.array([keypt_all[0:2].astype('int'), bottom_left, bottom_right])
+            # cv2.fillPoly(triangleMask, [trianglePoints], 255)
+            # oneMask[~triangleMask.view('bool')] *= 0
             gtMasks.append(oneMask)
         return numpy.stack(gtMasks, axis=0)
 
