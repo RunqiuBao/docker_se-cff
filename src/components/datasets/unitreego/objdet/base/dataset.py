@@ -32,7 +32,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         if not self.is_initilized:
             return
 
-        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(8) + ".json")
+        file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(12) + ".json")
         try:
             with open(file_path, "r") as file:
                 labels_data = json.load(file)

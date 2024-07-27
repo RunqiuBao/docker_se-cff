@@ -216,26 +216,26 @@ def main(args):
     with open(
         os.path.join(args.lmdb_dir, "{}_timestamp.txt".format(args.seq_idx)), "w"
     ) as tsFile:
+        indexSavedBatch = 0
         for indexBatch in range(len(data_loader.dataset) // batch_size):
-            if indexBatch % 2 ==0:
-                continue  # hack: sampling by 2
             batch_data = next(data_iter)
             for indexInBatch in range(batch_size):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
                 
+                print("seq_idx: {}, index frame: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch))
                 code_l = "%03d_%06d_l" % (
                     args.seq_idx,
-                    indexBatch * batch_size + indexInBatch,
+                    indexSavedBatch * batch_size + indexInBatch,
                 )
                 code_l = code_l.encode()
                 leftEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["left"][indexInBatch].numpy())
-                )
+                )                
 
                 code_r = "%03d_%06d_r" % (
                     args.seq_idx,
-                    indexBatch * batch_size + indexInBatch,
+                    indexSavedBatch * batch_size + indexInBatch,
                 )
                 code_r = code_r.encode()
                 rightEvents = numpy.ascontiguousarray(
@@ -246,14 +246,16 @@ def main(args):
                     leftEvents = leftEvents.astype("int8")
                     rightEvents = rightEvents.astype("int8")
                 else:
-                    leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
+                    # hack, FIXME!!: in the dataset, left and right camera are corrected.
+                    # leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
+                    rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
 
                 lmdb_writer.write(code_l, leftEvents)
                 lmdb_writer.write(code_r, rightEvents)
 
                 code_ts = "%03d_%06d_ts" % (
                     args.seq_idx,
-                    indexBatch * batch_size + indexInBatch,
+                    indexSavedBatch * batch_size + indexInBatch,
                 )
                 code_ts = code_ts.encode()
                 lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
@@ -263,18 +265,19 @@ def main(args):
                 leftViewPath = os.path.join(
                     args.view4label_dir,
                     "{}".format(args.seq_idx),
-                    "{}_right".format(args.seq_idx),  # hack, FIXME!!
+                    "{}_left".format(args.seq_idx),
                     "{}.png".format(str(ts).zfill(12)),
                 )
                 rightViewPath = os.path.join(
                     args.view4label_dir,
                     "{}".format(args.seq_idx),
-                    "{}_left".format(args.seq_idx),
+                    "{}_right".format(args.seq_idx),
                     "{}.png".format(str(ts).zfill(12)),
                 )
                 cv2.imwrite(leftViewPath, leftView)
                 cv2.imwrite(rightViewPath, rightView)
             pbar.update(1)
+            indexSavedBatch += 1
         log.info("commiting dataset...")
         lmdb_writer.commitchange()
         lmdb_writer.endwriting()
