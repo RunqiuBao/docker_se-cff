@@ -7,7 +7,7 @@ DATASET:
       split: train
       sampling_ratio: 1
       crop_height: 480
-      crop_width: 640
+      crop_width: 672
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
@@ -22,7 +22,22 @@ DATASET:
       split: valid
       sampling_ratio: 1
       crop_height: 480
-      crop_width: 640
+      crop_width: 672
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 500000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  TEST:
+    NAME: unitreego
+    PARAMS:
+      split: test
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 672
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
@@ -89,10 +104,10 @@ MODEL:
           act_cfg:
             type: 'Swish'
     disp_head_cfg:
-      is_freeze: False
+      is_freeze: True
       PARAMS:
         in_channels: 1
-        max_disp: 288
+        max_disp: 168
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
@@ -122,6 +137,7 @@ MODEL:
         keypts_feat_size: 14
         keypt_in_channels: 3
         keypt_feat_channels: 512
+        is_train_keypt: True
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss
