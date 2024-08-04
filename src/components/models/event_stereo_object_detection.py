@@ -32,6 +32,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         super(EventStereoObjectDetectionNetwork, self).__init__()
         self.logger = logger
         self.is_freeze_disp = disp_head_cfg['is_freeze']  # Note: when training disparity, skip object detection.
+        is_train_keypt = object_detection_head_cfg['PARAMS']['is_train_keypt']
         # ==========  concentration net ===========
         self._concentration_net = ConcentrationNet(**concentration_net_cfg.PARAMS)
         if self.is_freeze_disp:
@@ -41,6 +42,8 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             net_cfg=feature_extraction_net_cfg.PARAMS
         )
         if not self.is_freeze_disp:
+            freeze_module_grads(self._feature_extraction_net)
+        if is_train_keypt:
             freeze_module_grads(self._feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
@@ -86,15 +89,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
         left_event_sharp = self._concentration_net(left_event)
         right_event_sharp = self._concentration_net(right_event)
-
-        if self.logger is not None:
-            lsharp_view = left_event_sharp[0, 0, :, :,].detach().cpu()
-            lsharp_view -= lsharp_view.min()
-            lsharp_view /= lsharp_view.max()
-            self.logger.add_image(
-                "left sharp",
-                lsharp_view
-            )
 
         # FIXME: test using same feature extractor for both head
         pred_disparity_pyramid = self._disp_head(left_event_sharp, right_event_sharp)
@@ -158,7 +152,31 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             'right': right_event_sharp
         }
         torch.cuda.synchronize()
-        
+
+        if self.logger is not None:
+            lsharp_view = left_event_sharp[0, 0, :, :,].detach().cpu()
+            lsharp_view -= lsharp_view.min()
+            lsharp_view /= lsharp_view.max()
+            self.logger.add_image(
+                "left sharp",
+                lsharp_view
+            )
+            disparity_view = preds_final['disparity'].detach().cpu()
+            disparity_view -= disparity_view.min()
+            disparity_view /= disparity_view.max()
+            self.logger.add_image(
+                "disparity view",
+                disparity_view
+            )
+            if 'disparity' in gt_labels:
+                disparity_gt = gt_labels['disparity'].detach().squeeze().cpu()
+                disparity_gt -= disparity_gt.min()
+                disparity_gt /= disparity_gt.max()
+                self.logger.add_image(
+                    "disparity gt",
+                    disparity_gt
+                )
+
         return preds_final, loss_final
 
     def get_params_group(self, learning_rate, keypt_lr=None):

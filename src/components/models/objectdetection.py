@@ -18,7 +18,7 @@ from mmdet.structures.mask import mask_target, BitmapMasks
 from mmengine.config import Config
 from mmcv.ops import batched_nms
 
-from .utils.misc import DetachCopyNested
+from .utils.misc import DetachCopyNested, freeze_module_grads
 from . import losses
 
 
@@ -40,6 +40,16 @@ class Cylinder5DDetectionHead(nn.Module):
 
         self._init_layers()
         self._init_weights()
+
+        if self._config['is_train_keypt']:
+            freeze_module_grads(self._multi_level_cls_convs)
+            freeze_module_grads(self._multi_level_reg_convs)
+            freeze_module_grads(self._multi_level_conv_cls)
+            freeze_module_grads(self._multi_level_conv_reg)
+            freeze_module_grads(self._multi_level_conv_obj)
+            freeze_module_grads(self.right_bbox_refiner)
+            freeze_module_grads(self.right_bbox_refiner_scorer)
+
         # objdet tools
         self.assigner = TASK_UTILS.build({'type': 'SimOTAAssigner', 'center_radius': 2.5})
         self.sampler = PseudoSampler()
@@ -425,8 +435,14 @@ class Cylinder5DDetectionHead(nn.Module):
                         'keypt1s': indices_keypt1s.to(torch.float) / featmap_size,
                         'keypt2s': indices_keypt2s.to(torch.float) / featmap_size
                     })
+
+            if self._config['is_train_keypt']:
+                active_losses = ["loss_keypt1", "loss_keypt2"]
+                for key, value in loss_dict_final.items():
+                    if key not in active_losses:
+                        loss_dict_final[key] *= 0
         else:
-            # inference code            
+            # inference code
             batch_positive_detections = self.FormatPredictionResult(
                 bboxes_selected,
                 cls_scores_selected,

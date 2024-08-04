@@ -218,8 +218,8 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
 
 def SaveTestResultsAndVisualize(pred:  dict, indexBatch: int, timestamp: int, sequence_name: str, save_root: str, img_metas: dict):
     # save detection results in txt, frame by frame.
-    path_det_results_folder = os.path.join(save_root, "inference", "detections")
-    path_tsfile = os.path.join(save_root, "inference", "timestamps.txt")
+    path_det_results_folder = os.path.join(save_root, "inference", "detections", sequence_name)
+    path_tsfile = os.path.join(save_root, "inference", "detections", sequence_name, "timestamps.txt")
     os.makedirs(path_det_results_folder, exist_ok=True)
     ts_openmode = "a" if os.path.isfile(path_tsfile) else "w"
     with open(path_tsfile, ts_openmode) as tsfile:
@@ -233,9 +233,9 @@ def SaveTestResultsAndVisualize(pred:  dict, indexBatch: int, timestamp: int, se
                 detresult_file.write(oneDet + "\n")
 
     # save detection visualization results, frame by frame. Concate left and right horizontally.
-    path_det_visz_folder = os.path.join(save_root, "inference", "det_visz")
-    path_concentrate_left_folder = os.path.join(save_root, "inference", "left")
-    path_concentrate_right_folder = os.path.join(save_root, "inference", "right")
+    path_det_visz_folder = os.path.join(save_root, "inference", "det_visz", sequence_name)
+    path_concentrate_left_folder = os.path.join(save_root, "inference", "left", sequence_name)
+    path_concentrate_right_folder = os.path.join(save_root, "inference", "right", sequence_name)
     os.makedirs(path_det_visz_folder, exist_ok=True)
     os.makedirs(path_concentrate_left_folder, exist_ok=True)
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
