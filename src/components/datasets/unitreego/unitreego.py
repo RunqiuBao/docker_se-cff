@@ -42,6 +42,8 @@ class UnitreegoDataset(torch.utils.data.Dataset):
                 os.path.join(root, split, "lmdb"), map_size=1099511627776
             )
             self.lmdb_txn = self.lmdb_env.begin()
+        else:
+            print("baodebug: ==========================: skip lmdb due to isDisableLmdbRead {} and isDir {} and database size {}", str(isDisableLmdbRead), str(os.path.isdir(os.path.join(root, split, "lmdb"))), str(os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb"))))
 
         sequence_list = DATA_SPLIT[split]
         if defineSeqIdx is not None:

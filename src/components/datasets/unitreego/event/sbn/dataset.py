@@ -43,28 +43,28 @@ class EventDataset(torch.utils.data.Dataset):
         self.event_w = constant.EVENT_WIDTH
         self.event_channels = constant.EVENT_CHANNELS
         self.sequence_length = sequence_length
+        self.NO_VALUE = constant.STACK_NO_VALUE
 
         # moving events into lmdb
         if lmdb_txn is not None:
             self.lmdb_txn = lmdb_txn
             self.sequence_name = sequence_name
+        else:
+            self.event_slicer = {}
+            for location in self._LOCATION:
+                event_path = os.path.join(root, location, "events.h5")
+                rectify_map_path = os.path.join(root, location, "rectify_map.h5")
+                self.event_slicer[location] = EventSlicer(
+                    event_path, rectify_map_path, num_of_event, num_of_future_event
+                )
 
-        self.event_slicer = {}
-        for location in self._LOCATION:
-            event_path = os.path.join(root, location, "events.h5")
-            rectify_map_path = os.path.join(root, location, "rectify_map.h5")
-            self.event_slicer[location] = EventSlicer(
-                event_path, rectify_map_path, num_of_event, num_of_future_event
+            self.stack_function = getattr(stack, stack_method)(
+                stack_size,
+                num_of_event,
+                constant.EVENT_HEIGHT,
+                constant.EVENT_WIDTH,
+                **kwargs,
             )
-
-        self.stack_function = getattr(stack, stack_method)(
-            stack_size,
-            num_of_event,
-            constant.EVENT_HEIGHT,
-            constant.EVENT_WIDTH,
-            **kwargs,
-        )
-        self.NO_VALUE = self.stack_function.NO_VALUE
 
     def __len__(self):
         return self.sequence_length

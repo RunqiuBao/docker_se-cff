@@ -62,18 +62,16 @@ def make_disparity(objdet_data, metadata, no_value):
     """
     method:
         For all the left image bboxes, create approximate disparity inside the
-        triangle formed by keypt1 and bottom_left corner and bottom_right corner.
+        rectangle of bounding box.
         For other areas, set to no_value.
     """
     disparity = np.full((metadata["h"], metadata["w"]), no_value, dtype="float32")
     for bbox in objdet_data["bboxes"]:
         oneInstanceMask = np.zeros_like(disparity, dtype="uint8")
-        x_keypt1 = bbox[6] * (bbox[2] - bbox[0]) + bbox[0]
-        y_keypt1 = bbox[7] * (bbox[3] - bbox[1]) + bbox[1]
-        triangle = np.array(
-            [[x_keypt1, y_keypt1], [bbox[2], bbox[3]], [bbox[0], bbox[3]]], dtype="int"
+        rectangle = np.array(
+            [[bbox[0], bbox[1]], [bbox[0], bbox[3]], [bbox[2], bbox[3]], [bbox[2], bbox[1]]], dtype="int"
         )
-        cv2.fillPoly(oneInstanceMask, pts=[triangle], color=(1,))
+        cv2.fillPoly(oneInstanceMask, pts=[rectangle], color=(1,))
         disparityValue = (bbox[2] + bbox[0]) / 2 - (bbox[5] + bbox[4]) / 2
         disparity[oneInstanceMask.view("bool")] = disparityValue
     return disparity

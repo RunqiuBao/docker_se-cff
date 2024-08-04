@@ -21,7 +21,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         "event": "events",  # Note: events are from lmdb now.
         "objdet": "objdet",
         # 'disparity': 'disparity',  # Note: use stereobbox from objdet to construct simple disparity labeling.
-        "timestamps": "timestamps.txt",
+        "timestamps": "timestamps",
     }
 
     def __init__(
@@ -47,7 +47,11 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.sequence_name = root.split("/")[-1]
 
         # Timestamps
-        if split in ["train", "valid", "test"]:            
+        if split in ["train", "valid", "test"]:   
+            if split == "test":
+                self._PATH_DICT["timestamps"] = "timestamps_slam.txt"
+            else:
+                self._PATH_DICT["timestamps"] = "timestamps_objdet.txt"
             self.timestamps = np.loadtxt(
                 os.path.join(root, self._PATH_DICT["timestamps"]), dtype="int64"
             )
