@@ -83,7 +83,13 @@ def ConfigureArguments():
         "--seq_idx",
         type=int,
         required=True,
-        help="index of the sequence in the dataset."
+        help="index of the sequence in the lmdb dataset."
+    )
+    parser.add_argument(
+        "--seq_idx_toselect",
+        type=int,
+        required=True,
+        help="index to select the seq. in the dataset constant list"
     )
     parser.add_argument("--calib_path", type=str, default=None)
 
@@ -189,7 +195,7 @@ def main(args):
         dataset_cfg=dataset_cfg,
         dataloader_cfg=dataloader_cfg,
         is_distributed=False,
-        defineSeqIdx=args.seq_idx,
+        defineSeqIdx=args.seq_idx_toselect,
         isDisableLmdbRead=True
     )
     data_iter = iter(data_loader)
@@ -217,8 +223,6 @@ def main(args):
         os.path.join(args.lmdb_dir, "{}_timestamp.txt".format(args.seq_idx)), "w"
     ) as tsFile:
         for indexBatch in range(len(data_loader.dataset) // batch_size):
-            if indexBatch % 2 ==0:
-                continue  # hack: sampling by 2
             batch_data = next(data_iter)
             for indexInBatch in range(batch_size):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
@@ -246,7 +250,9 @@ def main(args):
                     leftEvents = leftEvents.astype("int8")
                     rightEvents = rightEvents.astype("int8")
                 else:
-                    leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
+                    # hack, FIXME!!: in the unitree dataset, left and right camera are already corrected, but the calib file is not fixed.
+                    # leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
+                    rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
 
                 lmdb_writer.write(code_l, leftEvents)
                 lmdb_writer.write(code_r, rightEvents)
