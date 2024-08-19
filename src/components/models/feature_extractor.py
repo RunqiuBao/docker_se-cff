@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
 
 from .deform import DeformBottleneck
 
@@ -317,20 +318,25 @@ class FeatureExtractor2(nn.Module):
     def __init__(self, net_cfg: dict):
         super().__init__()
         if 'type' in net_cfg['backbone']:
-            backboneType = net_cfg['backbone'].pop('type')
-        
+            backboneType = net_cfg['backbone']['type']
+            backboneCfg = copy.deepcopy(net_cfg['backbone'])
+            backboneCfg.pop('type')
+
         if backboneType == "CSPDarknet":
-            self._backbone = CSPDarknet(**net_cfg['backbone'])
+            
+            self._backbone = CSPDarknet(**backboneCfg)
         elif backboneType == "ResNeXt":
-            self._backbone = ResNeXt(**net_cfg['backbone'])
+            self._backbone = ResNeXt(**backboneCfg)
         
         if 'type' in net_cfg['neck']:
-            neckType = net_cfg['neck'].pop('type')
-        
+            neckType = net_cfg['neck']['type']
+            neckCfg = copy.deepcopy(net_cfg['neck'])
+            neckCfg.pop('type')
+
         if neckType == "YOLOXPAFPN":
-            self._neck = YOLOXPAFPN(**net_cfg['neck'])
+            self._neck = YOLOXPAFPN(**neckCfg)
         elif neckType == "FPN":
-            self._neck = FPN(**net_cfg['neck'])
+            self._neck = FPN(**neckCfg)
 
     def forward(self, x):
         feature = self._backbone(x)

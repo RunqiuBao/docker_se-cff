@@ -112,7 +112,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 [left_event_sharp.repeat(1, 3, 1, 1)],
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
-                gt_labels["objdet"] if len(gt_labels) != 0 else None
+                gt_labels["objdet"] if gt_labels is not None and len(gt_labels) != 0 else None
             )
 
             preds_final['objdet'] = object_preds
@@ -237,7 +237,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         left_event = torch.randn(*inputShape).to(device)
         right_event = torch.randn(*inputShape).to(device)
         model = model.to(device)
-        flops, numParams = profile(model, inputs=(left_event, right_event), verbose=False)
+        flops, numParams = profile(model, inputs=(left_event, right_event, {}, {'h': inputShape[0], 'w': inputShape[1]}), verbose=False)
         return flops, numParams
 
     def RenderImageWithBboxesAndKeypts(

@@ -45,7 +45,6 @@ def train(model, data_loader, optimizer, is_distributed=False, world_size=1):
     for indexBatch in range(len(data_loader)):
         batch_data = batch_to_cuda(next(data_iter))
         # print("max disp: {}".format(batch_data["gt_labels"]["disparity"].max()))        
-
         mask = batch_data["gt_labels"]["disparity"] > 0
         if not mask.any():
             continue
@@ -165,7 +164,7 @@ def test(
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-    for indexBatch in range(len(data_loader.dataset)):
+    for indexBatch in range(len(data_loader.dataset)):            
         batch_data = batch_to_cuda(next(data_iter))
 
         pred, _ = model(
@@ -173,7 +172,7 @@ def test(
             right_event=batch_data["event"]["right"],
             gt_labels={},
             batch_img_metas=batch_data["image_metadata"]
-        )        
+        )
 
         SaveTestResultsAndVisualize(pred, indexBatch, batch_data["end_timestamp"].item(), sequence_name, save_root, batch_data["image_metadata"])
         pbar.update(1)

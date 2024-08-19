@@ -564,7 +564,7 @@ class Cylinder5DDetectionHead(nn.Module):
             valid_mask = (w > self._config['min_bbox_size']) & (h > self._config['min_bbox_size'])
             if not valid_mask.all():
                 results = results[valid_mask]
-
+        
         det_bboxes, keep_idxs = batched_nms(
             results.bboxes,
             results.scores,
@@ -802,7 +802,7 @@ class Cylinder5DDetectionHead(nn.Module):
         keypts_scores = []
         for keypt_pred in [keypt1_pred, keypt2_pred]:
             device = keypt_pred.device
-            keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
+            keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]            
             max_keypt = torch.max(keypt_pred_classified.view(num_imgs, topk, -1), dim=-1)            
             keypt_pred_classified_bestx = (max_keypt[1] % ker_w_keypt) / ker_w_keypt
             keypt_pred_classified_besty = (max_keypt[1] // ker_w_keypt) / ker_h_keypt
@@ -813,20 +813,42 @@ class Cylinder5DDetectionHead(nn.Module):
             )
 
         detectionsBatch = []
-        for indexImg in range(num_imgs):
-            detections = []
+        for indexImg in range(num_imgs):            
             maskGood = torch.logical_and(object_confidences[indexImg] > self._config['lconfidence_threshold'], stereo_confidences[indexImg] > self._config['rscore_threshold'])
             clsIds_selected = clsIds[indexImg][maskGood]
-            left_bboxes_selected = self.encode_bboxes(left_bboxes_pred[indexImg][maskGood], batch_img_metas['w_cam'], batch_img_metas['h_cam'])
-            right_bboxes_selected = self.encode_bboxes(refined_right_bboxes_pred[indexImg][maskGood], batch_img_metas['w_cam'], batch_img_metas['h_cam'])
-            keypt1_selected = keypts_pred[0][indexImg][maskGood]
-            keypt2_selected = keypts_pred[1][indexImg][maskGood]
-            object_confidence_selected = object_confidences[indexImg][maskGood]
-            stereo_confidence_selected = stereo_confidences[indexImg][maskGood]
-            keypt1_score = keypts_scores[0][indexImg][maskGood]
-            keypt2_score = keypts_scores[1][indexImg][maskGood]
+            left_bboxes_selected = left_bboxes_pred[indexImg][maskGood]
+            right_bboxes_selected = refined_right_bboxes_pred[indexImg][maskGood]
+            # nms final round
+            if left_bboxes_selected.shape[0] > 0:
+                keep_idxs = batched_nms(
+                    left_bboxes_selected,
+                    object_confidences[indexImg][maskGood],
+                    torch.zeros_like(object_confidences[indexImg][maskGood]),
+                    {'type': 'nms', 'iou_threshold': self._config['final_iou_threshold']}
+                )[1]
+                r_keep_idxs = batched_nms(
+                    right_bboxes_selected[keep_idxs],
+                    object_confidences[indexImg][maskGood][keep_idxs],
+                    torch.zeros_like(object_confidences[indexImg][maskGood][keep_idxs]),
+                    {'type': 'nms', 'iou_threshold': self._config['final_iou_threshold']}
+                )[1]
+            else:
+                continue
+            
+            left_bboxes_selected = left_bboxes_selected[keep_idxs][r_keep_idxs]
+            right_bboxes_selected = right_bboxes_selected[keep_idxs][r_keep_idxs]
+
+            left_bboxes_selected = self.encode_bboxes(left_bboxes_selected, batch_img_metas['w_cam'], batch_img_metas['h_cam'])
+            right_bboxes_selected = self.encode_bboxes(right_bboxes_selected, batch_img_metas['w_cam'], batch_img_metas['h_cam'])            
+            keypt1_selected = keypts_pred[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
+            keypt2_selected = keypts_pred[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
+
+            object_confidence_selected = object_confidences[indexImg][maskGood][keep_idxs][r_keep_idxs]
+            stereo_confidence_selected = stereo_confidences[indexImg][maskGood][keep_idxs][r_keep_idxs]
+            keypt1_score = keypts_scores[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
+            keypt2_score = keypts_scores[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
             detection = torch.cat([
-                clsIds_selected.unsqueeze(-1),
+                clsIds_selected.unsqueeze(-1)[keep_idxs][r_keep_idxs],
                 left_bboxes_selected,
                 right_bboxes_selected,
                 keypt1_selected,
@@ -943,7 +965,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 rbboxes_refined,
                 ious,
                 rbboxes_targets,
-                self._config['iou_threshold'],
+                self._config['r_iou_threshold'],
                 self._config['candidates_k']
             )
             num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
