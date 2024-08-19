@@ -93,19 +93,19 @@ class DLManager:
             is_distributed=self.args.is_distributed,
         )
 
-        # # profiling the network
-        # netWorkClass = getattr(models, self.cfg.MODEL.NAME)
-        # profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
-        # # torch.Size([4, 1, 360, 576, 1, 10])
-        # flops, numParams = netWorkClass.ComputeCostProfile(
-        #     profile_model, next(iter(train_loader))["event"]["left"].shape
-        # )
-        # if self.args.is_master:
-        #     self.logger.write(
-        #         "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-        #         % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6))
-        #     )
-        # del profile_model
+        # profiling the network
+        netWorkClass = getattr(models, self.cfg.MODEL.NAME)
+        profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
+        # torch.Size([4, 1, 360, 576, 1, 10])
+        flops, numParams = netWorkClass.ComputeCostProfile(
+            profile_model, next(iter(train_loader))["event"]["left"].shape
+        )
+        if self.args.is_master:
+            self.logger.write(
+                "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+                % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6))
+            )
+        del profile_model
 
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
