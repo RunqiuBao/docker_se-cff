@@ -222,7 +222,7 @@ def main(args):
             for indexInBatch in range(batch_size):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
-                
+
                 print("seq_idx: {}, index frame: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch))
                 code_l = "%03d_%06d_l" % (
                     args.seq_idx,
@@ -246,7 +246,7 @@ def main(args):
                     leftEvents = leftEvents.astype("int8")
                     rightEvents = rightEvents.astype("int8")
                 else:
-                    # hack, FIXME!!: in the dataset, left and right camera are corrected.
+                    # hack, FIXME!!: in the dataset, left and right camera are corrected. but calib is done by right-left.
                     # leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
                     rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
 
@@ -260,8 +260,8 @@ def main(args):
                 code_ts = code_ts.encode()
                 lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
 
-                leftView = ConvertEventsToImage(leftEvents[..., 0])
-                rightView = ConvertEventsToImage(rightEvents[..., 0])
+                leftView = ConvertEventsToImage(leftEvents[..., 4])
+                rightView = ConvertEventsToImage(rightEvents[..., 4])
                 leftViewPath = os.path.join(
                     args.view4label_dir,
                     "{}".format(args.seq_idx),
@@ -276,6 +276,13 @@ def main(args):
                 )
                 cv2.imwrite(leftViewPath, leftView)
                 cv2.imwrite(rightViewPath, rightView)
+
+                # save once every 50 frames:
+                if (indexSavedBatch * batch_size + indexInBatch) % 50 == 0:
+                    log.info("commiting dataset...")
+                    lmdb_writer.commitchange()
+                    lmdb_writer.endwriting()
+                    lmdb_writer = LmdbWriter(args.lmdb_dir, isDummyMode=False)
             pbar.update(1)
             indexSavedBatch += 1
         log.info("commiting dataset...")
