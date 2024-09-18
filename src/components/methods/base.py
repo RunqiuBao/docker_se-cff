@@ -3,6 +3,7 @@ import numpy
 import torch
 import torch.distributed as dist
 import cv2
+import time
 
 from tqdm import tqdm
 from collections import OrderedDict
@@ -166,13 +167,14 @@ def test(
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader.dataset)):            
         batch_data = batch_to_cuda(next(data_iter))
-
+        starttime = time.time()
         pred, _ = model(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
             gt_labels={},
             batch_img_metas=batch_data["image_metadata"]
         )
+        print("one infer time: {}".format(time.time() - starttime))
 
         SaveTestResultsAndVisualize(pred, indexBatch, batch_data["end_timestamp"].item(), sequence_name, save_root, batch_data["image_metadata"])
         pbar.update(1)

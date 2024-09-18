@@ -318,6 +318,7 @@ class Cylinder5DDetectionHead(nn.Module):
             Tuple[List]: A tuple of multi-level classification scores, bbox predictions, keypts predcitions, objectnesses.
         """
         cls_scores, bboxes, objectnesses = [], [], []
+        starttime = time.time()
         for indexLevel in range(len(left_feature)):
             cls_scores_one, bboxes_one, objectnesses_one = self.forward_objdet_single(
                 left_feature[indexLevel],
@@ -331,6 +332,7 @@ class Cylinder5DDetectionHead(nn.Module):
             cls_scores.append(cls_scores_one)
             bboxes.append(bboxes_one)
             objectnesses.append(objectnesses_one)
+        print("time sub1: {}".format(time.time() - starttime))
         torch.cuda.synchronize()
 
         if gt_labels is not None:
@@ -359,15 +361,18 @@ class Cylinder5DDetectionHead(nn.Module):
         #     })
 
         # select top candidates for stereo bbox regression.
+        starttime = time.time()
         preds_items_multilevels_detachcopy = DetachCopyNested([cls_scores, bboxes, objectnesses])
         (
             cls_scores_selected,  # shape [B, 100, num_class]
             bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
             objectness_selected,  # Note: shape is [B, 100,].
             priors_selected  # shape [B, 100, 4]
-        ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)        
+        ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)   
+        print("time sub2: {}".format(time.time() - starttime))     
 
         # return shape [B, 100, 6]
+        starttime = time.time()
         sbboxes, refined_right_bboxes, refined_right_scores = self.forward_stereo_det(
             right_feature,
             bboxes_selected,
@@ -375,8 +380,10 @@ class Cylinder5DDetectionHead(nn.Module):
             batch_img_metas,
             self._config['bbox_expand_factor']
         )
+        print("time sub3: {}".format(time.time() - starttime))
         torch.cuda.synchronize()
 
+        starttime = time.time()
         keypt1_pred = self.forward_keypt_det(
             keypt_left_feat,
             bboxes_selected.detach(),
@@ -389,6 +396,7 @@ class Cylinder5DDetectionHead(nn.Module):
             self.keypt2_predictor,
             keypt_id='2',
         )
+        print("time sub4: {}".format(time.time() - starttime))
         torch.cuda.synchronize()
 
         loss_dict_final = None
@@ -443,6 +451,7 @@ class Cylinder5DDetectionHead(nn.Module):
                         loss_dict_final[key] *= 0
         else:
             # inference code
+            starttime = time.time()
             batch_positive_detections = self.FormatPredictionResult(
                 bboxes_selected,
                 cls_scores_selected,
@@ -453,6 +462,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 keypt2_pred,
                 batch_img_metas
             )
+            print("time sub5: {}".format(time.time() - starttime))
 
         torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
@@ -663,6 +673,7 @@ class Cylinder5DDetectionHead(nn.Module):
             right_feat_sample = F.interpolate(right_feat_sample.unsqueeze(0).unsqueeze(0), size=(720, 1280), mode='bilinear', align_corners=False)
             self.logger.add_image("right_feat_sample", right_feat_sample.squeeze())
 
+        starttime = time.time()
         # enlarge bboxes
         _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
         dwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * (bbox_expand_factor - 1.)
@@ -673,7 +684,9 @@ class Cylinder5DDetectionHead(nn.Module):
         # _bboxes_pred[..., 3] += dhboxes / 2
 
         batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(_bboxes_pred.device)
+        print("time sub sub1: {}".format(time.time() - starttime))
 
+        starttime = time.time()
         # extract right bbox roi feature
         xindi = ((_bboxes_pred[..., 0] + _bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1)
         yindi = ((_bboxes_pred[..., 1] + _bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1)
@@ -694,13 +707,16 @@ class Cylinder5DDetectionHead(nn.Module):
             roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
             roi_feat_sample /= roi_feat_sample.max()
             self.logger.add_image("roi_feat_sample", roi_feat_sample)
+        print("time sub sub2: {}".format(time.time() - starttime))
 
+        starttime = time.time()
         batch_size = bboxes_pred.shape[0]
         x_tl_r = _bboxes_pred[..., 0].view(batch_size, -1).unsqueeze(-1)
         x_br_r = _bboxes_pred[..., 2].view(batch_size, -1).unsqueeze(-1)
         sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1)
         right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
         refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
+        print("time sub sub3: {}".format(time.time() - starttime))
 
         return sbboxes_pred, refined_right_bboxes, right_scores_refine.view(batch_size, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2)
 
@@ -802,10 +818,23 @@ class Cylinder5DDetectionHead(nn.Module):
         keypts_scores = []
         for keypt_pred in [keypt1_pred, keypt2_pred]:
             device = keypt_pred.device
-            keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]            
-            max_keypt = torch.max(keypt_pred_classified.view(num_imgs, topk, -1), dim=-1)            
-            keypt_pred_classified_bestx = (max_keypt[1] % ker_w_keypt) / ker_w_keypt
-            keypt_pred_classified_besty = (max_keypt[1] // ker_w_keypt) / ker_h_keypt
+            keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
+            if self._config.get("keypt_by_centroid", False):
+                quantile_thres = torch.quantile(keypt_pred_classified.view(num_imgs, topk, -1), self._config.get("keypt_quantile_threshold", 1.0), dim=-1)
+                ptarea_masks = keypt_pred_classified > quantile_thres.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ker_h_keypt, ker_w_keypt)
+                # FIXME: nonzero ope need a for loop
+                list_centerx, list_centery = [], []
+                for mask_oneroi in ptarea_masks.view(-1, ker_h_keypt, ker_w_keypt):
+                    true_indices = torch.nonzero(mask_oneroi, as_tuple=False)
+                    centerarea = true_indices.float().mean(dim=0)
+                    list_centerx.append(centerarea[1])
+                    list_centery.append(centerarea[0])
+                keypt_pred_classified_bestx = torch.tensor(list_centerx, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_w_keypt
+                keypt_pred_classified_besty = torch.tensor(list_centery, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_h_keypt
+            else:
+                max_keypt = torch.max(keypt_pred_classified.view(num_imgs, topk, -1), dim=-1)
+                keypt_pred_classified_bestx = (max_keypt[1] % ker_w_keypt) / ker_w_keypt
+                keypt_pred_classified_besty = (max_keypt[1] // ker_w_keypt) / ker_h_keypt
             keypt_pred_classified = torch.stack([keypt_pred_classified_bestx, keypt_pred_classified_besty], dim=-1)
             keypts_pred.append(keypt_pred_classified)
             keypts_scores.append(

@@ -87,11 +87,15 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         left_event = left_event.squeeze(1).squeeze(3).permute(0, 3, 1, 2)
         right_event = right_event.squeeze(1).squeeze(3).permute(0, 3, 1, 2)
 
+        starttime = time.time()
         left_event_sharp = self._concentration_net(left_event)
         right_event_sharp = self._concentration_net(right_event)
+        print("time1: {}".format(time.time() - starttime))
 
         # FIXME: test using same feature extractor for both head
+        starttime = time.time()
         pred_disparity_pyramid = self._disp_head(left_event_sharp, right_event_sharp)
+        print("time2: {}".format(time.time() - starttime))
 
         loss_final = None
         preds_final = {}
@@ -103,9 +107,13 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 right_event_sharp
             ))
 
-        if self.is_freeze_disp or len(gt_labels) == 0:            
+        if self.is_freeze_disp or len(gt_labels) == 0:
+            starttime = time.time()
             left_feature = self._feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
             right_feature = self._feature_extraction_net(right_event_sharp.repeat(1, 3, 1, 1))
+            print("time3: {}".format(time.time() - starttime))
+
+            starttime = time.time()
             object_preds, loss_final = self._object_detection_head(
                 left_feature,
                 right_feature,
@@ -114,6 +122,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                 batch_img_metas,
                 gt_labels["objdet"] if gt_labels is not None and len(gt_labels) != 0 else None
             )
+            print("time4: {}".format(time.time() - starttime))
 
             preds_final['objdet'] = object_preds
             if self.logger is not None and len(object_preds) > 0 and loss_final is not None:
