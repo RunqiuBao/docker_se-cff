@@ -1,8 +1,8 @@
 # python3 teod_makedataset.py \
-#     --data_root /mnt/data/datasets/blender-vibration \
+#     --data_root /media/runqiu/t7shield/datasets/blender-vibration/raw-data/x-shape-vib-hdr/ \
 #     --dataset_type train \
-#     --lmdb_dir /mnt/data/datasets/blender-vibration/train/lmdb/ \
-#     --view4label_dir /mnt/data/datasets/blender-vibration/train/view4label/ \
+#     --lmdb_dir /media/runqiu/t7shield/datasets/blender-vibration/raw-data/x-shape-vib-hdr/train/lmdb/ \
+#     --view4label_dir /media/runqiu/t7shield/datasets/blender-vibration/raw-data/x-shape-vib-hdr/train/view4label/ \
 #     --config_path /home/runqiu/code/docker_se-cff/configs/config_blendervib.yaml \
 #     --seq_idx 0 
 
