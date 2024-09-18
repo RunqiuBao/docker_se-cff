@@ -131,12 +131,15 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             oneMask = oneMask.astype('float')
             oneMask[maskedPoints] *= numpy.sqrt(numpy.power((maskedPoints[1] - keypt[0]), 2) + numpy.power((maskedPoints[0] - keypt[1]), 2))
             oneMask[maskedPoints] = 1 - oneMask[maskedPoints] / oneMask.max()  # Note: do this after roi align.
-            # # crop by triangle
-            # triangleMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
-            # bottom_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 3]))
-            # trianglePoints = numpy.array([keypt_all[0:2].astype('int'), bottom_left, bottom_right])
-            # cv2.fillPoly(triangleMask, [trianglePoints], 255)
-            # oneMask[~triangleMask.view('bool')] *= 0
+            # crop by pencil
+            shapeMask = numpy.zeros((self.img_height, self.img_width), dtype='uint8')
+            bottom_left = (int(bboxes[indexBbox, 0]), int(bboxes[indexBbox, 3]))
+            shoulderY = (int(bboxes[indexBbox, 3]) - int(bboxes[indexBbox, 1])) // 5 + int(bboxes[indexBbox, 1])
+            shoulder_right = (int(bboxes[indexBbox, 2]), shoulderY)
+            shoulder_left = (int(bboxes[indexBbox, 0]), shoulderY)
+            shapePoints = numpy.array([bottom_left, bottom_right, shoulder_right, keypt_all[0:2].astype('int'), shoulder_left])
+            cv2.fillPoly(shapeMask, [shapePoints], 255)
+            oneMask[~shapeMask.view('bool')] *= 0
             gtMasks.append(oneMask)
         return numpy.stack(gtMasks, axis=0)
 
