@@ -31,6 +31,21 @@ DATASET:
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
+  TEST:
+    NAME: unitreego
+    PARAMS:
+      split: test
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 640
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 500000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
 DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader

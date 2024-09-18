@@ -4,9 +4,9 @@ set -x
 
 cuda_idx='0, 2, 3'
 
-config_path=/root/code/docker_se-cff/configs/config_unitreego.yaml
+config_path=/root/code/docker_se-cff/configs/config_unitreego_inference.yaml
 data_root=/root/data/unitree-go-dataset/objdet/
-save_root=/root/code/docker_se-cff/experiments/unitree-go/
+save_root=/root/code/docker_se-cff/experiments/unitree-go/ 
 num_workers=3
 NUM_PROC=1
 

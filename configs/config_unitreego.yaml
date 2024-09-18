@@ -117,7 +117,7 @@ MODEL:
         in_channels: 128
         feat_channels: 256
         num_stacked_convs: 2
-        num_topk_candidates: 1000
+        num_topk_candidates: 30
         bbox_expand_factor: 1.6
         strides: [8, 16, 32]
         norm_cfg:
@@ -127,17 +127,21 @@ MODEL:
         act_cfg:
           type: ReLU
         # region proposal
-        nms_pre: 3000
+        nms_pre: 100
         nms_iou_threshold: 0.5
         # right bbox regression
         right_roi_feat_size: 7
-        iou_threshold: 0.4
+        r_iou_threshold: 0.4
         candidates_k: 8
         # keypt prediction
         keypts_feat_size: 14
         keypt_in_channels: 3
         keypt_feat_channels: 512
         is_train_keypt: True
+        # inference params
+        lconfidence_threshold: 0.80
+        rscore_threshold: 0.9
+        final_iou_threshold: 0.2
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

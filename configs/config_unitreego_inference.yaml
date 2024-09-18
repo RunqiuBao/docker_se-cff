@@ -1,48 +1,48 @@
-TOTAL_EPOCH: 100
+TOTAL_EPOCH: 300
 METHOD: base
 DATASET:
   TRAIN:
-    NAME: blenderdata
+    NAME: unitreego
     PARAMS:
       split: train
       sampling_ratio: 1
-      crop_height: 768
-      crop_width: 1344
+      crop_height: 480
+      crop_width: 672
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
   VALID:
-    NAME: blenderdata
+    NAME: unitreego
     PARAMS:
       split: valid
       sampling_ratio: 1
-      crop_height: 768
-      crop_width: 1344
+      crop_height: 480
+      crop_width: 672
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
   TEST:
-    NAME: blenderdata
+    NAME: unitreego
     PARAMS:
       split: test
       sampling_ratio: 1
-      crop_height: 768
-      crop_width: 1344
+      crop_height: 480
+      crop_width: 672
       randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 1000000
+          num_of_event: 500000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -107,7 +107,7 @@ MODEL:
       is_freeze: True
       PARAMS:
         in_channels: 1
-        max_disp: 288
+        max_disp: 168
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
@@ -117,7 +117,7 @@ MODEL:
         in_channels: 128
         feat_channels: 256
         num_stacked_convs: 2
-        num_topk_candidates: 1000
+        num_topk_candidates: 30
         bbox_expand_factor: 1.6
         strides: [8, 16, 32]
         norm_cfg:
@@ -127,7 +127,7 @@ MODEL:
         act_cfg:
           type: ReLU
         # region proposal
-        nms_pre: 3000
+        nms_pre: 100
         nms_iou_threshold: 0.5
         # right bbox regression
         right_roi_feat_size: 7
@@ -142,6 +142,8 @@ MODEL:
         lconfidence_threshold: 0.80
         rscore_threshold: 0.9
         final_iou_threshold: 0.2
+        keypt_by_centroid: True
+        keypt_quantile_threshold: 0.88
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss
