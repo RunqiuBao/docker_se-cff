@@ -1,6 +1,8 @@
 **/__pycache__/
 **/build/
 *.so
+weight*/
+experiments/
 
 # vs code
 .vscode/

@@ -1,0 +1,173 @@
+TOTAL_EPOCH: 300
+METHOD: base
+DATASET:
+  TRAIN:
+    NAME: binpicking
+    PARAMS:
+      split: train
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 640
+      randomhorizontalflip: False
+      isLoadCOCOFormat: True
+      event_cfg:
+        NAME: sbn
+        EVENT_TENSOR_TYPE: secff
+        PARAMS:
+          num_of_event: 200000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  VALID:
+    NAME: binpicking
+    PARAMS:
+      split: valid
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 640
+      randomhorizontalflip: False
+      isLoadCOCOFormat: True
+      event_cfg:
+        NAME: sbn
+        EVENT_TENSOR_TYPE: secff
+        PARAMS:
+          num_of_event: 200000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  TEST:
+    NAME: binpicking
+    PARAMS:
+      split: test
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 640
+      randomhorizontalflip: False
+      isLoadCOCOFormat: True
+      event_cfg:
+        NAME: sbn
+        EVENT_TENSOR_TYPE: secff
+        PARAMS:
+          num_of_event: 200000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+DATALOADER:
+  TRAIN:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  VALID:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  TEST:
+    NAME: get_sequence_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: False
+MODEL:
+  NAME: EventPickTargetPredictionNetwork
+  PARAMS:
+    concentration_net_cfg:
+      PARAMS:
+        in_channels: 10
+        attention_method: soft
+        base_channels: 32
+    rtdetr_cfg:
+      backbone:
+        network_class: PResNet
+        params:
+          depth: 101
+          variant: d
+          freeze_at: 0
+          return_idx: [1, 2, 3]
+          num_stages: 4
+          freeze_norm: True
+          pretrained: True
+      encoder:
+        network_class: HybridEncoder
+        params:
+          in_channels: [512, 1024, 2048]
+          feat_strides: [8, 16, 32]
+          # intra
+          hidden_dim: 384
+          dim_feedforward: 2048
+          use_encoder_idx: [2]
+          num_encoder_layers: 1
+          nhead: 8
+          dropout: 0.
+          enc_act: 'gelu'
+          # cross
+          expansion: 1.0
+          depth_mult: 1
+          act: 'silu'
+      decoder:
+        network_class: RTDETRTransformerv2
+        params:
+          feat_channels: [384, 384, 384]
+          feat_strides: [8, 16, 32]
+          hidden_dim: 256
+          num_levels: 3
+          num_layers: 6
+          num_queries: 300
+          num_denoising: 100
+          label_noise_ratio: 0.5
+          box_noise_scale: 1.0 # 1.0 0.4
+          eval_idx: -1
+          # NEW
+          num_points: [4, 4, 4] # [3,3,3] [2,2,2]
+          cross_attn_method: default # default, discrete
+          query_select_method: default # default, agnostic
+    losses_cfg:
+      params:
+        weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2,}
+        losses: ['vfl', 'boxes', ]
+        alpha: 0.75
+        gamma: 2.0
+      matcher:
+        type: HungarianMatcher
+        params:
+          weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+          alpha: 0.25
+          gamma: 2.0
+OPTIMIZER:
+  NAME: AdamW
+  PARAMS:
+    params: 
+      - 
+        params: '^(?=.*backbone)(?!.*norm|bn).*$'
+        lr: 0.000001
+      - 
+        params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$'
+        weight_decay: 0.
+    lr: 0.0001
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+LEARNING_CONFIG:
+  clip_max_norm: 0.1
+  use_amp: True  # Automatic Mixed Precision
+  amp:
+    type: GradScaler
+  use_ema: True # Exponential Moving Average
+  ema:
+    type: 
+    params:
+      decay: 0.9999
+      warmups: 2000
+SCHEDULER:
+  PARAMS:
+    lr_scheduler:
+      type: MultiStepLR
+      params:
+        milestones: [1000]
+        gamma: 0.1
+    lr_warmup_scheduler:
+      type: LinearWarmup
+      params:
+        warmup_duration: 2000

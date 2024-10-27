@@ -7,6 +7,8 @@ import torch.optim as optim
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 import torch.distributed as dist
+import copy
+import re
 
 from components import models
 from components import datasets
@@ -37,9 +39,12 @@ class DLManager:
             local_rank=self.args.local_rank if self.args.is_distributed else None,
             logger=self.logger,
         )
+
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
-        
+        self.scaler = _prepare_scaler(self.cfg.LEARNING_CONFIG)  # for amp training
+        self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.model)
+
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
             checkpoint = torch.load(self.args.resume_cpt, map_location=device)
@@ -50,6 +55,9 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             model_statedict = self.model.state_dict()
             for key, value in checkpoint["model"].items():
+                if self.args.only_resume_weight_from is not None:
+                    if self.args.only_resume_weight_from not in key:
+                        continue
                 # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
                 #     continue
                 if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
@@ -118,8 +126,12 @@ class DLManager:
                 model=self.model,
                 data_loader=train_loader,
                 optimizer=self.optimizer,
+                scaler=self.scaler,
+                ema=self.ema,
+                clip_max_norm=self.cfg.LEARNING_CONFIG.clip_max_norm,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
+                epoch=epoch
             )
 
             for key, scheduler in self.scheduler.items():
@@ -137,11 +149,12 @@ class DLManager:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
             valid_log_dict = self.method.valid(
-                model=self.model,
+                model=self.ema.module if self.ema else self.model.module,
                 data_loader=valid_loader,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
                 logger=self.logger,
+                epoch=epoch
             )
 
             if self.args.is_distributed:
@@ -174,7 +187,7 @@ class DLManager:
             self.method.test(
                 model=self.model,
                 data_loader=sequence_dataloader,
-                sequence_name=sequence_name,
+                sequence_name=sequence_name,  # Note: for saving debug images
                 save_root=self.args.save_root
             )
 
@@ -195,9 +208,7 @@ class DLManager:
             "cfg": self.cfg,
             "model": self.model.module.state_dict(),
             "optimizer": self.optimizer['optimizer'].state_dict(),
-            "optimizer_keypt": self.optimizer['optimizer_keypt'].state_dict(),
             "scheduler": self.scheduler['scheduler'].state_dict(),
-            "scheduler_keypt": self.scheduler['scheduler_keypt'].state_dict()
         }
 
         return checkpoint
@@ -271,7 +282,7 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None
 
     if is_distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
     else:
         model = nn.DataParallel(model).cuda()
 
@@ -280,40 +291,50 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None
 
 def _prepare_optimizer(optimizer_cfg, model):
     name = optimizer_cfg.NAME
-    parameters = optimizer_cfg.PARAMS
-    learning_rate = parameters.lr
+    params = get_optim_params(optimizer_cfg.PARAMS, model)
+    module_kwargs = {
+        "params": params,
+        "lr": optimizer_cfg.PARAMS.lr,
+        "betas": optimizer_cfg.PARAMS.betas,
+        "weight_decay": optimizer_cfg.PARAMS.weight_decay
+    }
 
-    params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
-    params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
-    params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
-
-    optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
-    optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
-
+    optimizer = getattr(optim, name)(**module_kwargs)
     return {
         'optimizer': optimizer,
-        'optimizer_keypt': optimizer_keypt
     }
 
 
 def _prepare_scheduler(scheduler_cfg, optimizer):
-    name = scheduler_cfg.NAME
-    parameters = scheduler_cfg.PARAMS
+    name = scheduler_cfg.PARAMS.lr_scheduler.type
+    parameters = scheduler_cfg.PARAMS.lr_scheduler.params
 
-    if name == "CosineAnnealingWarmupRestarts":
-        from utils.scheduler import CosineAnnealingWarmupRestarts
-
-        scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
-    else:
-        scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
-
-    # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
-    scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
+    scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
 
     return {
-        'scheduler': scheduler,
-        'scheduler_keypt': scheduler_keypt
+        'scheduler': scheduler
     }
+
+
+def _prepare_scaler(learning_cfg):
+    """
+    prepare scaler for automatic mixed precision learning
+    """
+    if learning_cfg.use_amp:
+        scaler = torch.cuda.amp.grad_scaler.GradScaler()
+        return scaler
+    else:
+        return None
+    
+
+def _prepare_ema(learning_cfg, model):
+    """
+    prepare ema for exponential moving average training
+    """
+    if learning_cfg.use_ema:
+        return methods.ema.ModelEMA(model, **learning_cfg.ema.params)
+    else:
+        return None
 
 
 class CustomStepLRScheduler(_LRScheduler):
@@ -327,3 +348,44 @@ class CustomStepLRScheduler(_LRScheduler):
             return [base_lr * self.factor for base_lr in self.base_lrs]
         else:
             return [group['lr'] for group in self.optimizer.param_groups]
+
+
+@staticmethod
+def get_optim_params(cfg: dict, model: nn.Module):
+    """
+    Used in RTDetr to select submodule params and control their learning rate differently. 
+    E.g.:
+        ^(?=.*a)(?=.*b).*$  means including a and b
+        ^(?=.*(?:a|b)).*$   means including a or b
+        ^(?=.*a)(?!.*b).*$  means including a, but not b
+    """
+    cfg = copy.deepcopy(cfg)
+
+    if 'params' not in cfg:
+        return model.parameters() 
+
+    assert isinstance(cfg['params'], list), ''
+
+    param_groups = []
+    visited = []
+    for pg in cfg['params']:
+        pattern = pg['params']
+        params = {k: v for k, v in model.named_parameters() if v.requires_grad and len(re.findall(pattern, k)) > 0}
+        pg['params'] = params.values()
+        param_groups.append(pg)
+        visited.extend(list(params.keys()))
+        # print(params.keys())
+
+    names = [k for k, v in model.named_parameters() if v.requires_grad]
+
+    if len(visited) < len(names):
+        unseen = set(names) - set(visited)
+        params = {k: v for k, v in model.named_parameters() if v.requires_grad and k in unseen}
+        param_groups.append({'params': params.values()})
+        visited.extend(list(params.keys()))
+        # print(params.keys())
+
+    assert len(visited) == len(names), ''
+
+    return param_groups
+
