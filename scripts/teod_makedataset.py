@@ -10,6 +10,8 @@ from tqdm import tqdm
 import sys, os
 import json
 
+from evshow.event2frame.concentration_net.concentration_net import EventFrameConcentrater
+
 
 def ConfigureLogger():
     formatter = logging.Formatter(
@@ -85,11 +87,16 @@ def ConfigureArguments():
         required=True,
         help="index of the sequence in the dataset."
     )
+    parser.add_argument(
+        "--is_leftright_flipped",
+        action="store_true",
+        help="in some sequences, left and right cameras are flipped. A hack for fixing them."
+    )
     parser.add_argument("--calib_path", type=str, default=None)
 
     args = parser.parse_args()
     args.world_size = 1
-    args.num_workers = 4
+    args.num_workers = 1
     return args
 
 
@@ -106,7 +113,7 @@ def ConvertEventsToImage(events):
 def UndistortAndRectifyStereoEvents(leftEvents, rightEvents, calib_dict):
     """
     Args:
-        leftEvents: (h, w, 10) shape.
+        leftEvents: (h, w, ?) shape.
         ...
     """
     left_min = int(leftEvents.min())  # Note: should always be -1 in se-cff datasets.
@@ -114,10 +121,14 @@ def UndistortAndRectifyStereoEvents(leftEvents, rightEvents, calib_dict):
     right_min = int(rightEvents.min())
     rightEvents = (rightEvents - rightEvents.min()).astype('uint8')
 
-    left_groups = [leftEvents[..., :3], leftEvents[..., 3:6], leftEvents[..., 6:9], leftEvents[..., 9]]
-    right_groups = [rightEvents[..., :3], rightEvents[..., 3:6], rightEvents[..., 6:9], rightEvents[..., 9]]
-    # left_groups = [leftone for leftone in leftEvents.transpose(2, 0, 1)]
-    # right_groups = [rightone for rightone in rightEvents.transpose(2, 0, 1)]
+    if leftEvents.shape[-1] == 10:
+        left_groups = [leftEvents[..., :3], leftEvents[..., 3:6], leftEvents[..., 6:9], leftEvents[..., 9]]
+        right_groups = [rightEvents[..., :3], rightEvents[..., 3:6], rightEvents[..., 6:9], rightEvents[..., 9]]
+        # left_groups = [leftone for leftone in leftEvents.transpose(2, 0, 1)]
+        # right_groups = [rightone for rightone in rightEvents.transpose(2, 0, 1)]
+    else:
+        left_groups = [leftEvents]
+        right_groups = [rightEvents]
     left_groups_results, right_groups_results = [], []
     for leftone, rightone in zip(left_groups, right_groups):
         leftone_undist = cv2.undistort(leftone, calib_dict['undistort']['cam0']['kk'], calib_dict['undistort']['cam0']['distCoeff'], None, calib_dict['undistort']['cam0']['kk'])
@@ -138,7 +149,7 @@ def UndistortAndRectifyStereoEvents(leftEvents, rightEvents, calib_dict):
             cv2.BORDER_CONSTANT,
             0
         )
-        
+
         imgHeight, imgWidth = leftone_rect.shape[:2]
         margin = calib_dict['stereo_rectify']['margin']        
         leftone_rect = leftone_rect[margin:imgHeight - margin, margin:imgWidth - margin]
@@ -153,8 +164,6 @@ def UndistortAndRectifyStereoEvents(leftEvents, rightEvents, calib_dict):
     rightEvents_rect = numpy.concatenate(right_groups_results, axis=-1).astype('int8')
     leftEvents_rect += left_min
     rightEvents_rect += right_min
-    leftEvents_rect = numpy.clip(leftEvents_rect, -1, 1)
-    rightEvents_rect = numpy.clip(rightEvents_rect, -1, 1)
 
     return leftEvents_rect, rightEvents_rect
 
@@ -183,7 +192,7 @@ def main(args):
     elif dataset_type == "test":
         dataset_cfg = cfg.DATASET.TEST
         dataloader_cfg = cfg.DATALOADER.VALID
-
+    
     data_loader = get_data_loader(
         args=args,
         dataset_cfg=dataset_cfg,
@@ -212,13 +221,17 @@ def main(args):
     CreatePath(args.lmdb_dir, isOverwrite=False)
     CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_left".format(args.seq_idx)))
     CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_right".format(args.seq_idx)))
+    CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_stereo".format(args.seq_idx)))
     lmdb_writer = LmdbWriter(args.lmdb_dir, isDummyMode=False)
+    
+    event_concentrater = EventFrameConcentrater(dataset_cfg.PARAMS.event_cfg.PARAMS.num_of_event, dataset_cfg.PARAMS.crop_height, dataset_cfg.PARAMS.crop_width, stack_size=10)
     with open(
         os.path.join(args.lmdb_dir, "{}_timestamp.txt".format(args.seq_idx)), "w"
     ) as tsFile:
         indexSavedBatch = 0
-        for indexBatch in range(len(data_loader.dataset) // batch_size):
+        for indexBatch in range(len(data_loader.dataset) // batch_size):            
             batch_data = next(data_iter)
+
             for indexInBatch in range(batch_size):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
@@ -229,15 +242,18 @@ def main(args):
                     indexSavedBatch * batch_size + indexInBatch,
                 )
                 code_l = code_l.encode()
+                
+                leftEventsView = event_concentrater[batch_data['event']['raw'][indexInBatch]['left']]
                 leftEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["left"][indexInBatch].numpy())
-                )                
+                ).astype("int8")
 
                 code_r = "%03d_%06d_r" % (
                     args.seq_idx,
                     indexSavedBatch * batch_size + indexInBatch,
                 )
                 code_r = code_r.encode()
+                rightEventsView = event_concentrater[batch_data['event']['raw'][indexInBatch]['right']]
                 rightEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["right"][indexInBatch].numpy())
                 ).astype("int8")
@@ -247,8 +263,12 @@ def main(args):
                     rightEvents = rightEvents.astype("int8")
                 else:
                     # hack, FIXME!!: in the dataset, left and right camera are corrected. but calib is done by right-left.
-                    # leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
-                    rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
+                    if args.is_leftright_flipped:
+                        leftEventsView, rightEventsView = UndistortAndRectifyStereoEvents(leftEventsView, rightEventsView, stereo_calib_dict)
+                        rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
+                    else:
+                        leftEventsView, rightEventsView = UndistortAndRectifyStereoEvents(leftEventsView, rightEventsView, stereo_calib_dict)
+                        leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
 
                 lmdb_writer.write(code_l, leftEvents)
                 lmdb_writer.write(code_r, rightEvents)
@@ -260,8 +280,10 @@ def main(args):
                 code_ts = code_ts.encode()
                 lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
 
-                leftView = ConvertEventsToImage(leftEvents[..., 4])
-                rightView = ConvertEventsToImage(rightEvents[..., 4])
+                leftEventsView = leftEventsView.astype('uint8')
+                # leftView = ConvertEventsToImage(leftEvents)
+                rightEventsView = rightEventsView.astype('uint8')
+                # rightView = ConvertEventsToImage(rightEvents)
                 leftViewPath = os.path.join(
                     args.view4label_dir,
                     "{}".format(args.seq_idx),
@@ -274,8 +296,16 @@ def main(args):
                     "{}_right".format(args.seq_idx),
                     "{}.png".format(str(ts).zfill(12)),
                 )
-                cv2.imwrite(leftViewPath, leftView)
-                cv2.imwrite(rightViewPath, rightView)
+                cv2.imwrite(leftViewPath, leftEventsView)
+                cv2.imwrite(rightViewPath, rightEventsView)
+                stereoView = numpy.hstack([leftEventsView, rightEventsView])
+                stereoViewPath = os.path.join(
+                    args.view4label_dir,
+                    "{}".format(args.seq_idx),
+                    "{}_stereo".format(args.seq_idx),
+                    "{}.png".format(str(ts).zfill(12))
+                )
+                cv2.imwrite(stereoViewPath, stereoView)
 
                 # save once every 50 frames:
                 if (indexSavedBatch * batch_size + indexInBatch) % 50 == 0:

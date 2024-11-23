@@ -1,8 +1,8 @@
-TOTAL_EPOCH: 400
+TOTAL_EPOCH: 1
 METHOD: base
 DATASET:
   TRAIN:
-    NAME: unitreego
+    NAME: eventpicking
     PARAMS:
       split: train
       sampling_ratio: 1
@@ -12,12 +12,13 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 100000
           stack_method: MixedDensityEventStacking
           stack_size: 10
+          # tau: 20000  # 50ms
           use_preprocessed_image: False
   VALID:
-    NAME: unitreego
+    NAME: eventpicking
     PARAMS:
       split: valid
       sampling_ratio: 1
@@ -27,12 +28,13 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 100000
           stack_method: MixedDensityEventStacking
           stack_size: 10
+          # tau: 20000  # 50ms
           use_preprocessed_image: False
   TEST:
-    NAME: unitreego
+    NAME: eventpicking
     PARAMS:
       split: test
       sampling_ratio: 1
@@ -42,9 +44,10 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 100000
           stack_method: MixedDensityEventStacking
           stack_size: 10
+          # tau: 20000  # 50ms
           use_preprocessed_image: False
 DATALOADER:
   TRAIN:

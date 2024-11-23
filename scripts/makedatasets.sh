@@ -14,74 +14,106 @@
 #     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen.yaml \
 #     --seq_idx 0 
 
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 0 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 1 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 2 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 3 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 4 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/ \
+#     --dataset_type test \
+#     --lmdb_dir /home/runqiu/Documents/datasets/test/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/test/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
+#     --seq_idx 5 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json
+
 python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
+    --data_root /home/runqiu/Documents/datasets/eventstereoslam_general/object_detection_trainset/ \
     --dataset_type train \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/view4label/ \
+    --lmdb_dir /home/runqiu/Documents/datasets/eventstereoslam_general/object_detection_trainset/train/lmdb/ \
+    --view4label_dir /home/runqiu/Documents/datasets/eventstereoslam_general/object_detection_trainset/train/view4label/ \
     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
     --seq_idx 0 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json
+    --calib_path /home/runqiu/Documents/datasets/calib.json \
+    --is_leftright_flipped
 
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type train \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 1 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/binpicking/ \
+#     --dataset_type train \
+#     --lmdb_dir /home/runqiu/Documents/datasets/binpicking/train/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/binpicking/train/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_binpicking.yaml \
+#     --seq_idx 1 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json \
+#     --is_leftright_flipped
 
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type train \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 2 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/binpicking/ \
+#     --dataset_type train \
+#     --lmdb_dir /home/runqiu/Documents/datasets/binpicking/train/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/binpicking/train/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_binpicking.yaml \
+#     --seq_idx 2 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json \
+#     --is_leftright_flipped
 
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type train \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 3 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/binpicking/ \
+#     --dataset_type valid \
+#     --lmdb_dir /home/runqiu/Documents/datasets/binpicking/valid/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/binpicking/valid/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_binpicking.yaml \
+#     --seq_idx 0 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json \
+#     --is_leftright_flipped
 
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type train \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/train/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 4 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
-
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type valid \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 0 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
-
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type valid \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 1 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
-
-python3 teod_makedataset.py \
-    --data_root /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/ \
-    --dataset_type valid \
-    --lmdb_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/lmdb/ \
-    --view4label_dir /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/seqs/valid/view4label/ \
-    --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_unitreego.yaml \
-    --seq_idx 2 \
-    --calib_path /media/runqiu/t7shield/stereo_eventcam_experiment/event_sequences/dataset/unitreego/calib.json 
+# python3 teod_makedataset.py \
+#     --data_root /home/runqiu/Documents/datasets/binpicking/ \
+#     --dataset_type valid \
+#     --lmdb_dir /home/runqiu/Documents/datasets/binpicking/valid/lmdb/ \
+#     --view4label_dir /home/runqiu/Documents/datasets/binpicking/valid/view4label/ \
+#     --config_path /home/runqiu/code/docker_se-cff/configs/config_datagen_binpicking.yaml \
+#     --seq_idx 1 \
+#     --calib_path /home/runqiu/Documents/datasets/calib.json \
+#     --is_leftright_flipped
