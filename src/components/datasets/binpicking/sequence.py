@@ -234,7 +234,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         data = {}
         event_data = self.event_dataset[(idx, self.timestamps[idx])]
         objdet_data = self.objdet_dataset[idx]
-        disparity_data = None #self.disparity_dataset[(idx, objdet_data)]
+        disparity_data = None  #self.disparity_dataset[(idx, objdet_data)]
 
         data["file_index"] = idx
         data["end_timestamp"] = self.timestamps[idx]

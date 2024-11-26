@@ -12,7 +12,7 @@ from collections import OrderedDict
 from utils.metrics import AverageMeter, EndPointError, NPixelError, RootMeanSquareError
 from utils import visualizer
 from ..methods.visz_utils import DrawResultBboxesAndKeyptsOnStereoEventFrame, RenderImageWithBboxes
-
+from .log_utils import GetLogDict
 
 def train(
     model,
@@ -27,36 +27,14 @@ def train(
 ):
     model.train()
 
-    log_dict = OrderedDict(
-        [
-            ("Loss", AverageMeter(string_format="%6.3lf")),
-            ("l1_loss", AverageMeter(string_format="%6.3lf")),
-            ("warp_loss", AverageMeter(string_format="%6.3lf")),
-            ("EPE", EndPointError(average_by="image", string_format="%6.3lf")),
-            ("1PE", NPixelError(n=1, average_by="image", string_format="%6.3lf")),
-            ("2PE", NPixelError(n=2, average_by="image", string_format="%6.3lf")),
-            ("RMSE", RootMeanSquareError(average_by="image", string_format="%6.3lf")),
-        ]
-    ) if (hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp) else OrderedDict(
-        [
-            ("Loss", AverageMeter(string_format="%6.3lf")),
-            ("loss_cls", AverageMeter(string_format="%6.3lf")),
-            ("loss_bbox", AverageMeter(string_format="%6.3lf")),
-            ("loss_rbbox", AverageMeter(string_format="%6.3lf")),
-            ("loss_rscore", AverageMeter(string_format="%6.3lf")),
-            ("loss_obj", AverageMeter(string_format="%6.3lf")),
-            ("loss_keypt1", AverageMeter(string_format="%6.3lf")),
-            ("loss_keypt2", AverageMeter(string_format="%6.3lf")),
-            ("loss_pmap", AverageMeter(string_format="%6.3lf"))
-        ]
-    )
+    log_dict = GetLogDict(is_train=True, is_secff=(hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp))
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
 
     for indexBatch in range(len(data_loader)):
-        batch_data = batch_to_cuda(next(data_iter))        
-        
+        batch_data = batch_to_cuda(next(data_iter))
+
         # print("max disp: {}".format(batch_data["gt_labels"]["disparity"].max()))
         if hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp:
             mask = batch_data["gt_labels"]["disparity"] > 0
@@ -67,7 +45,7 @@ def train(
             suboptimizer.zero_grad()
 
         global_step_info = dict(epoch=epoch, indexBatch=indexBatch, lengthDataLoader=len(data_loader))
-        if scaler is not None:
+        if scaler is not None:                        
             with torch.autocast(device_type="cuda", cache_enabled=True):
                 pred, lossDict = model(
                     left_event=batch_data["event"]["left"],
@@ -140,31 +118,7 @@ def valid(model, data_loader, ema=None, is_distributed=False, world_size=1, logg
     """
     model.eval()
 
-    log_dict = OrderedDict(
-        [
-            ("BestIndex", AverageMeter(string_format="%6.3lf")),
-            ("Loss", AverageMeter(string_format="%6.3lf")),
-            ("l1_loss", AverageMeter(string_format="%6.3lf")),
-            ("warp_loss", AverageMeter(string_format="%6.3lf")),
-            ("EPE", EndPointError(average_by="image", string_format="%6.3lf")),
-            ("1PE", NPixelError(n=1, average_by="image", string_format="%6.3lf")),
-            ("2PE", NPixelError(n=2, average_by="image", string_format="%6.3lf")),
-            ("RMSE", RootMeanSquareError(average_by="image", string_format="%6.3lf")),
-        ]
-    ) if (hasattr(model, 'is_freeze_disp') and not model.is_freeze_disp) else OrderedDict(
-        [
-            ("BestIndex", AverageMeter(string_format="%6.3lf")),
-            ("Loss", AverageMeter(string_format="%6.3lf")),
-            ("loss_cls", AverageMeter(string_format="%6.3lf")),
-            ("loss_bbox", AverageMeter(string_format="%6.3lf")),
-            ("loss_rbbox", AverageMeter(string_format="%6.3lf")),
-            ("loss_rscore", AverageMeter(string_format="%6.3lf")),
-            ("loss_obj", AverageMeter(string_format="%6.3lf")),
-            ("loss_keypt1", AverageMeter(string_format="%6.3lf")),
-            ("loss_keypt2", AverageMeter(string_format="%6.3lf")),
-            ("loss_pmap", AverageMeter(string_format="%6.3lf"))
-        ]
-    )
+    log_dict = GetLogDict(is_train=False, is_secff=(hasattr(model, 'is_freeze_disp') and not model.is_freeze_disp))
 
     if logger is not None:
         pbar = tqdm(total=len(data_loader))
@@ -232,7 +186,8 @@ def test(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
             gt_labels=None,
-            batch_img_metas=batch_data["image_metadata"]
+            batch_img_metas=batch_data["image_metadata"],
+            is_train=False
         )
         print("one infer time: {}".format(time.time() - starttime))
         
@@ -408,28 +363,30 @@ def SaveTestResultsForBinpickingTarget(pred: dict, indexBatch: int, timestamp: i
             path_det_visz_folder = os.path.join(save_root, "inference", "det_visz", sequence_name)
             os.makedirs(path_det_visz_folder, exist_ok=True)
             imgHeight, imgWidth = img_metas["h_cam"], img_metas["w_cam"]
-            left_concentrated = pred["left_sharprepr"][indexInBatch]
-            right_concentrated = pred["right_sharprepr"][indexInBatch]
-            cropHeight, cropWidth = left_concentrated.shape[-2:]
-            left_bboxes = torchvision.ops.box_convert(pred["left_detections"], in_fmt="cxcywh", out_fmt="xyxy".lower())
+            left_concentrated = pred["left_sharprepr"][indexInBatch].cpu().numpy()
+            right_concentrated = pred["right_sharprepr"][indexInBatch].cpu().numpy()
+            cropHeight, cropWidth = left_concentrated.shape[-2:]            
+            left_bboxes = torchvision.ops.box_convert(pred["left_detections"][indexInBatch], in_fmt="cxcywh", out_fmt="xyxy".lower())
             left_bboxes[:, [0, 2]] *= cropWidth
             left_bboxes[:, [1, 3]] *= cropHeight
-            right_bboxes = torchvision.ops.box_convert(pred["right_detections"], in_fmt="cxcywh", out_fmt="xyxy".lower())
+            right_bboxes = torchvision.ops.box_convert(pred["right_detections"][indexInBatch], in_fmt="cxcywh", out_fmt="xyxy".lower())
             right_bboxes[:, [0, 2]] *= cropWidth
             right_bboxes[:, [1, 3]] *= cropHeight
             left_view_img = RenderImageWithBboxes(
                 left_concentrated.squeeze(),
                 {
                     "bboxes": left_bboxes,
-                    "classes": pred["left_classes"]
+                    "classes": pred["left_classes"][indexInBatch],
+                    "segMaps": pred["left_segMaps"][indexInBatch]
                 },
                 is_output_torch=False
-            )[0][:imgHeight, :imgWidth]            
+            )[0][:imgHeight, :imgWidth]
             right_view_img = RenderImageWithBboxes(
                 right_concentrated.squeeze(),
                 {
                     "bboxes": right_bboxes,
-                    "classes": pred["right_classes"]
+                    "classes": pred["right_classes"][indexInBatch],
+                    "segMaps": pred["right_segMaps"][indexInBatch]
                 },
                 is_output_torch=False
             )[0][:imgHeight, :imgWidth]

@@ -90,9 +90,9 @@ class Cylinder5DDetectionHead(nn.Module):
                                         'reduction': 'sum',
                                         'loss_weight': 5.0})
         self.loss_rscore = MODELS.build({'type': 'CrossEntropyLoss',
-                                      'use_sigmoid': True,
-                                      'reduction': 'sum',
-                                      'loss_weight': 1.0})
+                                         'use_sigmoid': True,
+                                         'reduction': 'sum',
+                                         'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
         self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
         self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})

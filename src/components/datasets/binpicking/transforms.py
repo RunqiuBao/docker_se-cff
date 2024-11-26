@@ -95,7 +95,7 @@ class Padding:
         if "disparity" in sample.keys():
             sample["disparity"] = self.disparity_transform(sample["disparity"])
 
-        if "objdet" in sample.keys() and "pmap" in sample["objdet"].keys():
+        if "objdet" in sample.keys():
             sample["objdet"] = self.objdet_transform(sample["objdet"])
 
         return sample

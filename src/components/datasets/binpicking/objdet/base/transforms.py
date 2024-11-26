@@ -199,24 +199,39 @@ class Padding:
         self.no_objdet_value = no_objdet_value
 
     def __call__(self, sample):
-        ori_height, ori_width = sample["pmap"]["left"].shape[-2:]
+        if "pmap" in sample:
+            ori_height, ori_width = sample["pmap"]["left"].shape[-2:]
 
-        bottom_pad = self.img_height - ori_height
-        right_pad = self.img_width - ori_width
+            bottom_pad = self.img_height - ori_height
+            right_pad = self.img_width - ori_width
 
-        assert bottom_pad >= 0 and right_pad >= 0
-        sample["pmap"]["left"] = np.lib.pad(
-            sample["pmap"]["left"],
-            ((0, bottom_pad), (0, right_pad)),
-            mode="constant",
-            constant_values=self.no_objdet_value,
-        )
-        sample["pmap"]["right"] = np.lib.pad(
-            sample["pmap"]["right"],
-            ((0, bottom_pad), (0, right_pad)),
-            mode="constant",
-            constant_values=self.no_objdet_value,
-        )
+            assert bottom_pad >= 0 and right_pad >= 0
+            sample["pmap"]["left"] = np.lib.pad(
+                sample["pmap"]["left"],
+                ((0, bottom_pad), (0, right_pad)),
+                mode="constant",
+                constant_values=self.no_objdet_value,
+            )
+            sample["pmap"]["right"] = np.lib.pad(
+                sample["pmap"]["right"],
+                ((0, bottom_pad), (0, right_pad)),
+                mode="constant",
+                constant_values=self.no_objdet_value,
+            )
+        elif "left" in sample and "right" in sample:
+            ori_height, ori_width = sample["left"]["segMaps"].shape[-2:]
+
+            bottom_pad = self.img_height - ori_height
+            right_pad = self.img_width - ori_width
+            for side in ["left", "right"]:
+                sample[side]["segMaps"] = np.lib.pad(
+                    sample[side]["segMaps"],
+                    ((0, 0), (0, bottom_pad), (0, right_pad)),
+                    mode="constant",
+                    constant_values=self.no_objdet_value,
+                )
+        else:
+            raise NotImplementedError
 
         return sample
 

@@ -70,7 +70,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     image_ids[side].append(target['image_id'])
                     areas[side].append(target['area'])
                     iscrowd[side].append(target['iscrowd'])
-                    segMaps[side].append(target['segmentation'][numpy.newaxis, ...])
+                    segMaps[side].append(target['segmentation'][numpy.newaxis, ...].astype('float'))
                 labels_data = {
                     side: {
                         "boxes": numpy.concatenate(boxes[side], axis=0),
@@ -78,7 +78,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                         "image_id": numpy.array(image_ids[side]),
                         "area": numpy.array(areas[side]),
                         "iscrowd": numpy.array(iscrowd[side]),
-                        # "segMaps": numpy.concatenate(segMaps[side], axis=0),
+                        "segMaps": numpy.concatenate(segMaps[side], axis=0)[..., :self._imageSize[0]] if side == "left" else numpy.concatenate(segMaps[side], axis=0)[..., self._imageSize[0]:],
                         "orig_size": self._imageSize,
                         "idx": numpy.array([indexFrame])
                     } for side in ["left", "right"]

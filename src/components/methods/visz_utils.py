@@ -1,5 +1,7 @@
 from typing import List, Dict, Tuple
 
+import os
+import copy
 import cv2
 import torch
 from torch import Tensor
@@ -78,22 +80,40 @@ def RenderImageWithBboxes(
     Args:
         left_event_sharp: ...
     """
-    bboxes, classes = obj_preds['bboxes'], obj_preds['classes']    
+    bboxes, classes, segMaps = obj_preds['bboxes'], obj_preds['classes'], obj_preds.get('segMaps', None)
     confidences = obj_preds.get('confidences', torch.ones_like(classes) * -1)
-    
+
     left_event_sharp = left_event_sharp - left_event_sharp.min()
     left_event_sharp = (left_event_sharp * 255 / left_event_sharp.max()).astype('uint8')
-    left_event_sharp = cv2.cvtColor(left_event_sharp, cv2.COLOR_GRAY2RGB)    
-    for bbox, classindex, confidence in zip(bboxes, classes, confidences):
-        top_left = (int(bbox[0]), int(bbox[1]))
-        top_right = (int(bbox[2]), int(bbox[1]))
+    left_event_sharp = cv2.cvtColor(left_event_sharp, cv2.COLOR_GRAY2RGB)
+    imageHeight, imageWidth = left_event_sharp.shape[:2]
+    if segMaps is not None:  
+        instances_segmap = numpy.zeros_like(left_event_sharp, dtype='uint8')
+    for indexInstance, (bbox, classindex, confidence) in enumerate(zip(bboxes, classes, confidences)):
+        top_left = (max(min(int(bbox[0]), imageWidth), 0), max(min(int(bbox[1]), imageHeight), 0))
+        top_right = (max(min(int(bbox[2]), imageWidth), 0), max(min(int(bbox[1]), imageHeight), 0))
         bottom_right = (int(bbox[2]), int(bbox[3]))
         cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=1)
         text = 'cls: {}\nconfi: {}'.format(format(classindex.item(), '.2f'), format(confidence.item(), '.2f'))
         textposition = (int(top_right[0] + bottom_right[1]) // 2, int(top_right[1] + bottom_right[1]) // 2)
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
+        if segMaps is not None and (w > 0) and (h > 0):
+            segMap = numpy.clip(segMaps[indexInstance] * 255, 0, 255).astype('uint8')
+            # # hack: fix when black white inverted
+            # # put instance masks in each bounding boxes
+            # segMap = cv2.threshold(segMap, 200, 255, cv2.THRESH_BINARY)[-1]
+            # imageSize = segMap.shape[0]
+            # if numpy.mean(segMap[imageSize // 3:2 * imageSize // 3, imageSize // 3:2 * imageSize // 3]) < 127:
+            #     segMap = 255 - segMap
+            try:
+                instances_segmap[top_left[1]:bottom_right[1], top_left[0]:bottom_right[0]] = cv2.cvtColor(cv2.resize(segMap, (w, h), cv2.INTER_CUBIC), cv2.COLOR_GRAY2RGB)
+            except:
+                from IPython import embed; embed()
+    if segMaps is not None:
+        left_event_sharp = cv2.addWeighted(left_event_sharp, 0.5, (255 - instances_segmap), 0.5, 0)
+
     if is_output_torch:
         return [torch.from_numpy(left_event_sharp),]
-    else:
+    else:        
         return [left_event_sharp]

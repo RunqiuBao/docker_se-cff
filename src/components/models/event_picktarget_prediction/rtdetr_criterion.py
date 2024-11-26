@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.distributed
 import torch.nn.functional as F 
 import torchvision
+import copy
 
 from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from ...methods.dist_utils import get_world_size, is_dist_available_and_initialized
@@ -192,12 +193,19 @@ class RTDETRCriterion(nn.Module):
         indices = self.matcher(outputs_without_aux, targets)['indices']
 
         predictions = []
+        corresponding_gt_labels = []
+        indices_ini = copy.deepcopy(indices)
         for indexInBatch in range(outputs["pred_boxes"].shape[0]):
             predictions_0 = {
                 "bboxes": outputs["pred_boxes"].detach().cpu()[indexInBatch, indices[indexInBatch][0]],
                 "classes": torch.argmax(outputs["pred_logits"].detach().cpu()[indexInBatch, indices[indexInBatch][0]], dim=1),
-            }            
+            }
+            corresponding_gt_labels_0 = {
+                "bboxes": targets[indexInBatch]["boxes"][indices[indexInBatch][-1]],
+                "classes": targets[indexInBatch]["labels"][indices[indexInBatch][-1]]
+            }
             predictions.append(predictions_0)
+            corresponding_gt_labels.append(corresponding_gt_labels_0)
 
         # Compute all the requested losses
         losses = {}
@@ -243,7 +251,7 @@ class RTDETRCriterion(nn.Module):
                     l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
-        return losses, predictions
+        return losses, predictions, corresponding_gt_labels, indices_ini
 
     @staticmethod
     def get_cdn_matched_indices(dn_meta, targets):
