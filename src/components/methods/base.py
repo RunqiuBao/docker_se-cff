@@ -9,7 +9,6 @@ import torchvision
 from tqdm import tqdm
 from collections import OrderedDict
 
-from utils.metrics import AverageMeter, EndPointError, NPixelError, RootMeanSquareError
 from utils import visualizer
 from ..methods.visz_utils import DrawResultBboxesAndKeyptsOnStereoEventFrame, RenderImageWithBboxes
 from .log_utils import GetLogDict
@@ -31,20 +30,26 @@ def train(
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-
     for indexBatch in range(len(data_loader)):
+        starttime = time.time()
         batch_data = batch_to_cuda(next(data_iter))
+        # print("loading one batch data time cost: {} sec.".format(time.time() - starttime))
 
         # print("max disp: {}".format(batch_data["gt_labels"]["disparity"].max()))
         if hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp:
             mask = batch_data["gt_labels"]["disparity"] > 0
             if not mask.any():
                 continue
+        
+        if "bboxes" not in batch_data["gt_labels"]["objdet"][0]:
+            print("Error: the batch data do not contain GT for bboxes.")
+            continue
 
         for key, suboptimizer in optimizer.items():
             suboptimizer.zero_grad()
 
         global_step_info = dict(epoch=epoch, indexBatch=indexBatch, lengthDataLoader=len(data_loader))
+        
         if scaler is not None:                        
             with torch.autocast(device_type="cuda", cache_enabled=True):
                 pred, lossDict = model(
@@ -72,6 +77,7 @@ def train(
 
             scaler.update()
         else:
+            starttime = time.time()
             pred, lossDict = model(
                 left_event=batch_data["event"]["left"],
                 right_event=batch_data["event"]["right"],
@@ -79,9 +85,11 @@ def train(
                 batch_img_metas=batch_data["image_metadata"],
                 global_step_info=global_step_info
             )
+            # print("model one forward time cost: {} sec.".format(time.time() - starttime))
             loss = 0.
             for key, value in lossDict.items():
                 loss += value
+                    
                 if key in log_dict:
                     log_dict[key].update(lossDict[key].item(), data_loader.batch_size)
             loss.backward()
@@ -124,15 +132,22 @@ def valid(model, data_loader, ema=None, is_distributed=False, world_size=1, logg
         pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader)):
+        starttime = time.time()
         batch_data = batch_to_cuda(next(data_iter))
+        # print("loading one batch data time cost: {} sec.".format(time.time() - starttime))
 
         if hasattr(model, 'is_freeze_disp') and not model.is_freeze_disp:
             mask = batch_data["gt_labels"]["disparity"] > 0
             if not mask.any():
                 continue
 
+        if "bboxes" not in batch_data["gt_labels"]["objdet"][0]:
+            print("Error: the batch data do not contain GT for bboxes.")
+            continue
+
         global_step_info = dict(epoch=epoch, indexBatch=indexBatch, lengthDataLoader=len(data_loader))
 
+        starttime = time.time()
         pred, lossDict = model(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
@@ -140,6 +155,7 @@ def valid(model, data_loader, ema=None, is_distributed=False, world_size=1, logg
             batch_img_metas=batch_data["image_metadata"],
             global_step_info=global_step_info
         )
+        # print("model one forward time cost: {} sec.".format(time.time() - starttime))
 
         loss = 0.
         for key, value in lossDict.items():
@@ -148,6 +164,7 @@ def valid(model, data_loader, ema=None, is_distributed=False, world_size=1, logg
                 log_dict[key].update(lossDict[key].item(), data_loader.batch_size)
 
         log_dict["BestIndex"].update(loss.item(), data_loader.batch_size)
+        log_dict["Loss"].update(loss.item(), data_loader.batch_size)
         if hasattr(model, 'is_freeze_disp') and not model.is_freeze_disp:
             log_dict["EPE"].update(pred['disparity'], batch_data["disparity"], mask)
             log_dict["1PE"].update(pred['disparity'], batch_data["disparity"], mask)
@@ -173,9 +190,37 @@ def test(
     model,
     data_loader,
     sequence_name,
-    save_root
+    save_root,
+    is_save_onnx = False
 ):
     model.eval()
+    model.module.SetTest()
+
+    if is_save_onnx:
+        # only save the model to onnx format and quit test
+        import importlib
+        oneInputs = batch_to_cuda(next(iter(data_loader)))
+        module = importlib.import_module(f"{model.module.__module__}")
+        OnnxStyleNetworkClass = getattr(module, "OnnxStyleNetwork")
+        onnxStyleModel = OnnxStyleNetworkClass(model.module)
+        device = oneInputs["event"]["left"].device
+        torch.onnx.export(
+            onnxStyleModel,
+            (
+                oneInputs["event"]["left"],
+                oneInputs["event"]["right"],
+                torch.tensor(oneInputs["image_metadata"]["h_cam"], dtype=torch.int, device=device),
+                torch.tensor(oneInputs["image_metadata"]["w_cam"], dtype=torch.int, device=device)
+            ),
+            os.path.join(save_root, "{}.onnx".format(model.module.__class__.__name__).lower()),
+            export_params=True,
+            opset_version=16,
+            do_constant_folding=True,
+            input_names=["left_event", "right_event", "h_cam", "w_cam"],
+            output_names=["output_objdet", "output_facets", "output_facets_right", "output_concentrate", "output_disparity"]
+        )
+        print("==================================== finished onnx model ({}) export! ====================================".format(OnnxStyleNetworkClass.__name__))
+        return
 
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
@@ -186,8 +231,7 @@ def test(
             left_event=batch_data["event"]["left"],
             right_event=batch_data["event"]["right"],
             gt_labels=None,
-            batch_img_metas=batch_data["image_metadata"],
-            is_train=False
+            batch_img_metas=batch_data["image_metadata"]
         )
         print("one infer time: {}".format(time.time() - starttime))
         
@@ -212,6 +256,13 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
                 batch_data[key] = _batch_to_cuda(batch_data[key], dtype=dtype)
         elif isinstance(batch_data, torch.Tensor):
             batch_data = batch_data.to(dtype).cuda()
+        elif isinstance(batch_data, numpy.ndarray):
+            batch_data = torch.from_numpy(batch_data).to(dtype).cuda()
+        elif isinstance(batch_data, list):
+            for ii, oneElement in enumerate(batch_data):
+                batch_data[ii] = _batch_to_cuda(oneElement, dtype)
+        elif batch_data is None:
+            batch_data = batch_data
         else:
             raise NotImplementedError
 
@@ -231,22 +282,9 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
         batch_data["disparity"] = batch_data["disparity"].to(dtype).cuda()
 
     if "gt_labels" in batch_data:
-        for side in ["left", "right"]:
-            for i in range(len(batch_data["gt_labels"]['objdet'][side])):
-                for key in batch_data["gt_labels"]['objdet'][side][i].keys():   
-                    if isinstance(batch_data["gt_labels"]["objdet"][side][i][key], torch.Tensor):             
-                        batch_data["gt_labels"]["objdet"][side][i][key] = batch_data["gt_labels"]["objdet"][side][i][key].cuda()    
-                    elif isinstance(batch_data["gt_labels"]["objdet"][side][i][key], dict):
-                        for subkey in batch_data["gt_labels"]["objdet"][side][i][key]:
-                            batch_data["gt_labels"]["objdet"][side][i][key][subkey] = batch_data["gt_labels"]["objdet"][side][i][key][subkey].cuda()
-                    elif isinstance(batch_data["gt_labels"]["objdet"][side][i][key], list):
-                        for ii in range(len(batch_data["gt_labels"]["objdet"][side][i][key])):
-                            batch_data["gt_labels"]["objdet"][side][i][key][ii] = batch_data["gt_labels"]["objdet"][side][i][key][ii].cuda()
-
-                # batch_data["gt_labels"]["objdet"][i]["bboxes"] = batch_data["gt_labels"]["objdet"][i]["bboxes"].to(dtype).cuda()
-                # batch_data["gt_labels"]["objdet"][i]["labels"] = batch_data["gt_labels"]["objdet"][i]["labels"].to(dtype).cuda()
-                # batch_data["gt_labels"]["objdet"][i]["keypt1_masks"] = batch_data["gt_labels"]["objdet"][i]["keypt1_masks"].to(dtype).cuda()
-                # batch_data["gt_labels"]["objdet"][i]["keypt2_masks"] = batch_data["gt_labels"]["objdet"][i]["keypt2_masks"].to(dtype).cuda()
+        batch_data["gt_labels"]['objdet'] = _batch_to_cuda(batch_data["gt_labels"]['objdet'], dtype)
+        if "disparity" in batch_data["gt_labels"]:
+            batch_data["gt_labels"]["disparity"] = _batch_to_cuda(batch_data["gt_labels"]['disparity'], dtype)
 
     return batch_data
 
@@ -290,34 +328,46 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     os.makedirs(path_concentrate_left_folder, exist_ok=True)
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
     imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
+    
     for indexInBatch, detection in enumerate(pred['objdet']):
         left_bboxes = detection[:, 1:5].cpu().numpy()
         left_bboxes[:, [0, 2]] *= imgWidth
         left_bboxes[:, [1, 3]] *= imgHeight
-        tl_x = left_bboxes[:, 0] - left_bboxes[:, 2] / 2
-        tl_y = left_bboxes[:, 1] - left_bboxes[:, 3] / 2
-        br_x = left_bboxes[:, 0] + left_bboxes[:, 2] / 2
-        br_y = left_bboxes[:, 1] + left_bboxes[:, 3] / 2
+        tl_x = numpy.clip(left_bboxes[:, 0] - left_bboxes[:, 2] / 2, 0, imgWidth)
+        tl_y = numpy.clip(left_bboxes[:, 1] - left_bboxes[:, 3] / 2, 0, imgHeight)
+        br_x = numpy.clip(left_bboxes[:, 0] + left_bboxes[:, 2] / 2, 0, imgWidth)
+        br_y = numpy.clip(left_bboxes[:, 1] + left_bboxes[:, 3] / 2, 0, imgHeight)
         left_bboxes = numpy.stack([tl_x, tl_y, br_x, br_y], axis=1)
         right_bboxes = detection[:, [5, 7]].cpu().numpy() * imgWidth
-        tl_x_r = right_bboxes[:, 0] - right_bboxes[:, 1] / 2
-        br_x_r = right_bboxes[:, 0] + right_bboxes[:, 1] / 2
+        tl_x_r = numpy.clip(right_bboxes[:, 0] - right_bboxes[:, 1] / 2, 0, imgWidth)
+        br_x_r = numpy.clip(right_bboxes[:, 0] + right_bboxes[:, 1] / 2, 0, imgWidth)
         right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
         sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
         classes = detection[:, 0].cpu().numpy().astype('int')
         confidences = detection[:, -4].cpu().numpy()
         stereo_confidences = detection[:, -3].cpu().numpy()
-        keypts1 = detection[:, -8:-6].cpu().numpy()
-        keypts2 = detection[:, -6:-4].cpu().numpy()        
-        visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
-            pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
-            pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
-            sbboxes,
-            classes,
-            confidences,
-            keypts1,
-            keypts2,
-            stereo_confidences=stereo_confidences)
+        if detection.shape[-1] > 11:
+            keypts1 = detection[:, -8:-6].cpu().numpy()
+            keypts2 = detection[:, -6:-4].cpu().numpy()        
+            visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
+                pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
+                pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
+                sbboxes,
+                classes,
+                confidences,
+                keypts1,
+                keypts2,
+                stereo_confidences=stereo_confidences)
+        elif "objdet_facets" in pred:
+            # draw facet masks on the result
+            visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
+                pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
+                pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
+                sbboxes,
+                classes,
+                confidences,
+                stereo_confidences=stereo_confidences,
+                facets=pred["objdet_facets"][indexInBatch])
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)

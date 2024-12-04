@@ -69,7 +69,7 @@ class EventPickTargetPredictionNetwork(nn.Module):
             self.loss_functor_pickableregion = torch.nn.SmoothL1Loss(reduction="mean")
         self.logger = logger
 
-    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: Dict=None, batch_img_metas: Dict=None, global_step_info: Dict=None, is_train: bool=True):
+    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: Dict=None, batch_img_metas: Dict=None, global_step_info: Dict=None):
         results = {}
         list_event_sharp = []
         starttime = time.time()
@@ -85,11 +85,11 @@ class EventPickTargetPredictionNetwork(nn.Module):
                 bboxes_xyxy[..., [0, 2]] *= batch_img_metas['w']
                 bboxes_xyxy[..., [1, 3]] *= batch_img_metas['h']            
                 results[side + "_segMaps"] = self._predict_pickable_region(sharp_repr, bboxes_xyxy)
-        if not is_train:
+        if not self.training:
             print("bbox detection time cost: {} sec.".format(time.time() - starttime))
 
         loss_final = None
-        if is_train:
+        if self.training:
             self.loss_functor.train()
         else:
             self.loss_functor.eval()

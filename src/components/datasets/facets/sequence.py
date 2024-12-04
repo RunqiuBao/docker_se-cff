@@ -82,17 +82,17 @@ class SequenceDataset(torch.utils.data.Dataset):
             isLoadCOCOFormat=isLoadCOCOFormat
         )
 
-        # # Disparity Dataset
-        # disparity_module = getattr(disparity, "base")
-        # img_metadata = {
-        #     # 'h': self.event_dataset.event_h,
-        #     # 'w': self.event_dataset.event_w,
-        #     "h": crop_height,
-        #     "w": crop_width
-        # }
-        # self.disparity_dataset = disparity_module.DisparityDataset(
-        #     img_metadata=img_metadata
-        # )
+        # Disparity Dataset
+        disparity_module = getattr(disparity, "base")
+        img_metadata = {
+            # 'h': self.event_dataset.event_h,
+            # 'w': self.event_dataset.event_w,
+            "h": crop_height,
+            "w": crop_width
+        }
+        self.disparity_dataset = disparity_module.DisparityDataset(
+            img_metadata=img_metadata
+        )
 
         # self.timestamps = self.timestamps[[idx for idx in range(0, len(self.timestamps), sampling_ratio)]]  # Bug: timestamp_to_index will be wrong.
 
@@ -104,6 +104,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 transformsList.append(
                     transforms.RandomHorizontalFlip(
                         event_module=event_module,
+                        disparity_module=disparity_module,
                         objdet_module=objdet_module,
                         img_height=crop_height,
                         img_width=crop_width,
@@ -116,20 +117,16 @@ class SequenceDataset(torch.utils.data.Dataset):
                     event_module=event_module,
                     no_event_value=self.event_dataset.NO_VALUE,
                     objdet_module=objdet_module,
-                    no_objdet_value=self.objdet_dataset.NO_VALUE
+                    no_objdet_value=self.objdet_dataset.NO_VALUE,
+                    disparity_module=disparity_module,
+                    no_disparity_value=self.disparity_dataset.NO_VALUE,
                 )
             )
             transformsList.append(
                 transforms.ToTensor(
                     event_module=event_module,
+                    disparity_module=disparity_module,
                     objdet_module=objdet_module,
-                )
-            )
-            transformsList.append(
-                transforms.ConvertBboxes(
-                    img_height=crop_height,
-                    img_width=crop_width,
-                    objdet_module=objdet_module
                 )
             )
             self.transforms = transforms.Compose(transformsList)
@@ -142,16 +139,14 @@ class SequenceDataset(torch.utils.data.Dataset):
                         img_width=crop_width,
                         no_event_value=self.event_dataset.NO_VALUE,
                         objdet_module=objdet_module,
-                        no_objdet_value=self.objdet_dataset.NO_VALUE
+                        no_objdet_value=self.objdet_dataset.NO_VALUE,
+                        disparity_module=disparity_module,
+                        no_disparity_value=self.disparity_dataset.NO_VALUE
                     ),
                     transforms.ToTensor(
                         event_module=event_module,
+                        disparity_module=disparity_module,
                         objdet_module=objdet_module,
-                    ),
-                    transforms.ConvertBboxes(
-                        img_height=crop_height,
-                        img_width=crop_width,
-                        objdet_module=objdet_module
                     )
                 ]
             )
@@ -178,12 +173,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         # objdet
         domain = "objdet"
         if domain in batch[0].keys():
-            output[domain] = {}
-            output[domain]["left"] = self.objdet_dataset.collate_fn(
-                [oneInstance[domain]["left"] for oneInstance in batch]
-            )
-            output[domain]["right"] = self.objdet_dataset.collate_fn(
-                [oneInstance[domain]["right"] for oneInstance in batch]
+            output[domain] = self.objdet_dataset.collate_fn(
+                [oneInstance[domain] for oneInstance in batch]
             )
 
         # Others
@@ -234,7 +225,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         data = {}
         event_data = self.event_dataset[(idx, self.timestamps[idx])]
         objdet_data = self.objdet_dataset[idx]
-        disparity_data = None  #self.disparity_dataset[(idx, objdet_data)]
+        disparity_data = self.disparity_dataset[(idx, objdet_data)]
 
         data["file_index"] = idx
         data["end_timestamp"] = self.timestamps[idx]

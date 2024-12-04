@@ -9,6 +9,7 @@ DATASET:
       crop_height: 480
       crop_width: 672
       randomhorizontalflip: False
+      isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
         PARAMS:
@@ -24,6 +25,7 @@ DATASET:
       crop_height: 480
       crop_width: 672
       randomhorizontalflip: False
+      isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
         PARAMS:
@@ -39,6 +41,7 @@ DATASET:
       crop_height: 480
       crop_width: 672
       randomhorizontalflip: False
+      isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
         PARAMS:
@@ -113,7 +116,7 @@ MODEL:
       PARAMS:
         min_bbox_size: 5
         # detection
-        num_classes: 1
+        num_classes: 4
         in_channels: 128
         feat_channels: 256
         num_stacked_convs: 2
@@ -133,13 +136,23 @@ MODEL:
         right_roi_feat_size: 7
         r_iou_threshold: 0.4
         candidates_k: 8
-        # keypt prediction
-        keypts_feat_size: 14
-        keypt_in_channels: 3
-        keypt_feat_channels: 512
-        is_train_keypt: True
+        keypt_pred_cfg:
+          is_enable: False
+          PARAMS:
+            # keypt prediction
+            keypts_feat_size: 14
+            keypt_in_channels: 3
+            keypt_feat_channels: 512
+            is_train_keypt: False
+        facet_pred_cfg:
+          is_enable: True
+          PARAMS:
+            facet_feat_size: 14
+            facet_in_channels: 3
+            facet_feat_channels: 512
+            is_train_facet: False
         # inference params
-        lconfidence_threshold: 0.80
+        lconfidence_threshold: 0.010
         rscore_threshold: 0.9
         final_iou_threshold: 0.2
     losses_cfg:

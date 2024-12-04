@@ -19,6 +19,9 @@ from utils.metrics import SummationMeter, Metric
 
 
 class DLManager:
+    scaler = None
+    ema = None
+
     def __init__(self, args, cfg=None):
         self.args = args
         self.cfg = cfg
@@ -42,8 +45,9 @@ class DLManager:
 
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
-        self.scaler = _prepare_scaler(self.cfg.LEARNING_CONFIG)  # for amp training
-        self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.model)
+        if "LEARNING_CONFIG" in self.cfg:
+            self.scaler = _prepare_scaler(self.cfg.LEARNING_CONFIG)  # for amp training
+            self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.model)
 
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
@@ -128,7 +132,7 @@ class DLManager:
                 optimizer=self.optimizer,
                 scaler=self.scaler,
                 ema=self.ema,
-                clip_max_norm=self.cfg.LEARNING_CONFIG.clip_max_norm,
+                clip_max_norm=self.cfg.LEARNING_CONFIG.clip_max_norm if self.scaler is not None else None,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
                 epoch=epoch
@@ -165,11 +169,11 @@ class DLManager:
                     time_checker,
                     valid_log_dict,
                     "valid",
-                    isSaveBest=valid_log_dict["BestIndex"].avg < smallestValidEPE,
+                    isSaveBest=valid_log_dict["Loss"].avg < smallestValidEPE,
                 )
 
-            if valid_log_dict["BestIndex"].avg < smallestValidEPE:
-                smallestValidEPE = valid_log_dict["BestIndex"].avg
+            if valid_log_dict["Loss"].avg < smallestValidEPE:
+                smallestValidEPE = valid_log_dict["Loss"].avg
 
             self.current_epoch += 1
 
@@ -188,7 +192,8 @@ class DLManager:
                 model=self.model,
                 data_loader=sequence_dataloader,
                 sequence_name=sequence_name,  # Note: for saving debug images
-                save_root=self.args.save_root
+                save_root=self.args.save_root,
+                is_save_onnx=self.args.is_save_onnx
             )
 
     def save(self, name):
@@ -291,29 +296,66 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None
 
 def _prepare_optimizer(optimizer_cfg, model):
     name = optimizer_cfg.NAME
-    params = get_optim_params(optimizer_cfg.PARAMS, model)
-    module_kwargs = {
-        "params": params,
-        "lr": optimizer_cfg.PARAMS.lr,
-        "betas": optimizer_cfg.PARAMS.betas,
-        "weight_decay": optimizer_cfg.PARAMS.weight_decay
-    }
+    if "KEYPT_PARAMS" in optimizer_cfg:
+        # keypt prediction network
+        parameters = optimizer_cfg.PARAMS
+        learning_rate = parameters.lr
 
-    optimizer = getattr(optim, name)(**module_kwargs)
-    return {
-        'optimizer': optimizer,
-    }
+        params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
+        params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
+        params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
+
+        optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
+        optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
+
+        return {
+            'optimizer': optimizer,
+            'optimizer_keypt': optimizer_keypt
+        }
+    elif "NETWORK_TYPE" in optimizer_cfg and optimizer_cfg.NETWORK_TYPE == "DETR":
+        params = get_optim_params(optimizer_cfg.PARAMS, model)
+        module_kwargs = {
+            "params": params,
+            "lr": optimizer_cfg.PARAMS.lr,
+            "betas": optimizer_cfg.PARAMS.betas,
+            "weight_decay": optimizer_cfg.PARAMS.weight_decay
+        }
+        optimizer = getattr(optim, name)(**module_kwargs)
+        return {
+            'optimizer': optimizer,
+        }
+    else:
+        raise NotImplementedError
 
 
 def _prepare_scheduler(scheduler_cfg, optimizer):
-    name = scheduler_cfg.PARAMS.lr_scheduler.type
-    parameters = scheduler_cfg.PARAMS.lr_scheduler.params
+    if scheduler_cfg.get("NETWORK_TYPE", None) == "DETR":
+        name = scheduler_cfg.PARAMS.lr_scheduler.type
+        parameters = scheduler_cfg.PARAMS.lr_scheduler.params
 
-    scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
+        scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
 
-    return {
-        'scheduler': scheduler
-    }
+        return {
+            'scheduler': scheduler
+        }
+    elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
+        name = scheduler_cfg.NAME
+        parameters = scheduler_cfg.PARAMS
+
+        if name == "CosineAnnealingWarmupRestarts":
+            from utils.scheduler import CosineAnnealingWarmupRestarts
+
+            scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
+        else:
+            scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
+
+        # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
+        scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
+
+        return {
+            'scheduler': scheduler,
+            'scheduler_keypt': scheduler_keypt
+        }
 
 
 def _prepare_scaler(learning_cfg):

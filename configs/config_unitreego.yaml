@@ -134,10 +134,21 @@ MODEL:
         r_iou_threshold: 0.4
         candidates_k: 8
         # keypt prediction
-        keypts_feat_size: 14
-        keypt_in_channels: 3
-        keypt_feat_channels: 512
-        is_train_keypt: True
+        keypt_pred_cfg:
+          is_enable: True
+          PARAMS:
+            # keypt prediction
+            keypts_feat_size: 14
+            keypt_in_channels: 3
+            keypt_feat_channels: 512
+            is_train_keypt: False
+        facet_pred_cfg:
+          is_enable: False
+          PARAMS:
+            facet_feat_size: 14
+            facet_in_channels: 3
+            facet_feat_channels: 512
+            is_train_facet: False
         # inference params
         lconfidence_threshold: 0.80
         rscore_threshold: 0.9

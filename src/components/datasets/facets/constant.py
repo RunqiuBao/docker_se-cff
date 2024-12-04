@@ -1,7 +1,7 @@
 DATA_SPLIT = {
     "train": ["train/seq0"],
     "valid": ["valid/seq0"],
-    "test": ["test/seq0", "test/seq1"],  #"test/seq1", "test/seq2", "test/seq3", "test/seq4", "test/seq5", "test/seq6", "test/seq7"
+    "test": ["test/seq0"],  #"test/seq1", "test/seq2", "test/seq3", "test/seq4", "test/seq5", "test/seq6", "test/seq7"
     "none": [],
 }
 

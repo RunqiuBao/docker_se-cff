@@ -86,7 +86,7 @@ class EventDataset(torch.utils.data.Dataset):
             right_events = right_events.reshape(
                 constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
-            event_data = {"left": right_events, "right": left_events}  # Note: hack for switching left, right.
+            event_data = {"left": left_events, "right": right_events}
         else:
             event_data = self._pre_load_event_data(timestamp=timestamp)
             event_data = self._post_load_event_data(event_data)

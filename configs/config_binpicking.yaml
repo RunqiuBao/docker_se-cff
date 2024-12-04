@@ -146,6 +146,7 @@ MODEL:
           alpha: 0.25
           gamma: 2.0
 OPTIMIZER:
+  NETWORK_TYPE: DETR
   NAME: AdamW
   PARAMS:
     params: 
@@ -170,6 +171,7 @@ LEARNING_CONFIG:
       decay: 0.9999
       warmups: 2000
 SCHEDULER:
+  NETWORK_TYPE: DETR
   PARAMS:
     lr_scheduler:
       type: MultiStepLR

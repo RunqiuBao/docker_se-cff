@@ -7,6 +7,27 @@ from torch import Tensor
 import copy
 import cv2
 
+
+def convert_tensor_to_numpy(inputs):
+    if isinstance(inputs, dict):
+        outputs = {}
+        for key, value in inputs.items():
+            outputs[key] = convert_tensor_to_numpy(value)
+        return outputs
+    elif isinstance(inputs, list):
+        outputs = []
+        for oneinput in inputs:
+            outputs.append(convert_tensor_to_numpy(oneinput))
+        return outputs
+    elif isinstance(inputs, torch.Tensor):
+        if inputs.device.type == "cuda":
+            inputs = inputs.cpu()
+        inputs = inputs.numpy()
+        return inputs
+    else:
+        raise NotImplementedError
+
+
 def freeze_module_grads(module: Union[nn.Module, nn.ModuleList]):
     """Freeze the gradients of a module or modules in a module list."""
     if isinstance(module, nn.ModuleList):

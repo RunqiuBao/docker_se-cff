@@ -3,7 +3,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torchvision.ops import roi_align
-from typing import Sequence, Tuple, List, Dict, Union
+from typing import Sequence, Tuple, List, Dict, Union, Optional
 import math
 import numpy
 import time
@@ -23,25 +23,37 @@ from . import losses
 
 
 class Cylinder5DDetectionHead(nn.Module):
+    _config = None
+
 
     def __init__(self, net_cfg: Dict, loss_cfg: Dict, is_distributed: bool, logger=None):
         super().__init__()
         self._config = net_cfg
         self.logger = logger
         self.strides = [8, 16, 32]
-        self.keypts_roi_visz = {
+        self.feat_roi_visz = {
             '1': None,
             '2': None
         }
-        self.keypts_featmap_visz = {
+        self.feat_output_visz = {
             '1': None,
             '2': None
         }
+        self.loss_keypt1 = None
+        self.loss_keypt2 = None
+        self.loss_facet = None
+        self.keypt1_predictor = None
+        self.keypt2_predictor = None
+        self.facet_predictor = None
 
         self._init_layers()
         self._init_weights()
 
-        if self._config['is_train_keypt']:
+        if (
+            self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']
+        ) or (
+            self._config['facet_pred_cfg']['is_enable'] and self._config['facet_pred_cfg']['PARAMS']['is_train_facet']
+        ):
             freeze_module_grads(self._multi_level_cls_convs)
             freeze_module_grads(self._multi_level_reg_convs)
             freeze_module_grads(self._multi_level_conv_cls)
@@ -49,6 +61,10 @@ class Cylinder5DDetectionHead(nn.Module):
             freeze_module_grads(self._multi_level_conv_obj)
             freeze_module_grads(self.right_bbox_refiner)
             freeze_module_grads(self.right_bbox_refiner_scorer)
+        else:
+            for subnet in [self.facet_predictor, self.keypt2_predictor, self.keypt1_predictor]:
+                if subnet is not None:
+                    freeze_module_grads(subnet)
 
         # objdet tools
         self.assigner = TASK_UTILS.build({'type': 'SimOTAAssigner', 'center_radius': 2.5})
@@ -61,11 +77,15 @@ class Cylinder5DDetectionHead(nn.Module):
                 'featmap_strides': self.strides
             }
         )
-        self.keypts_bbox_roi_extractor = MODELS.build(
+        self.bbox_roi_extractor_forfeature = MODELS.build(
             {
                 'type': 'SingleRoIExtractor',
-                'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['keypts_feat_size'], 'sampling_ratio': 0},
-                'out_channels': self._config['keypt_in_channels'],
+                'roi_layer': {
+                    'type': 'RoIAlign',
+                    'output_size': self._config['keypt_pred_cfg']['PARAMS']['keypts_feat_size'] if self._config['keypt_pred_cfg']['is_enable'] else self._config['facet_pred_cfg']['PARAMS']['facet_feat_size'],
+                    'sampling_ratio': 0
+                },
+                'out_channels': self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'] if self._config['keypt_pred_cfg']['is_enable'] else self._config['facet_pred_cfg']['PARAMS']['facet_in_channels'],
                 'featmap_strides': [1]
             }
         )
@@ -94,8 +114,11 @@ class Cylinder5DDetectionHead(nn.Module):
                                          'reduction': 'sum',
                                          'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
-        self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
-        self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        if self._config['keypt_pred_cfg']['is_enable']:
+            self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+            self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
+        elif self._config['facet_pred_cfg']['is_enable']:
+            self.loss_facet = torch.nn.SmoothL1Loss(reduction='mean')
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
 
@@ -122,16 +145,23 @@ class Cylinder5DDetectionHead(nn.Module):
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
-        self.keypt1_predictor = self._build_keypts_convs(
-            in_channels=self._config["keypt_in_channels"],
-            feat_channels=self._config["keypt_feat_channels"],
-            num_classes=self._config["num_classes"],
-        )
-        self.keypt2_predictor = self._build_keypts_convs(
-            in_channels=self._config["keypt_in_channels"],
-            feat_channels=self._config["keypt_feat_channels"],
-            num_classes=self._config["num_classes"],
-        )
+        if self._config['keypt_pred_cfg']['is_enable']:
+            self.keypt1_predictor = self._build_featmap_convs(
+                in_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'],
+                feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
+                num_classes=self._config["num_classes"],
+            )
+            self.keypt2_predictor = self._build_featmap_convs(
+                in_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'],
+                feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
+                num_classes=self._config["num_classes"],
+            )
+        elif self._config['facet_pred_cfg']['is_enable']:
+            self.facet_predictor = self._build_featmap_convs(
+                in_channels=self._config['facet_pred_cfg']['PARAMS']['facet_in_channels'],
+                feat_channels=self._config['facet_pred_cfg']['PARAMS']['facet_feat_channels'],
+                num_classes=self._config['num_classes'],
+            )
         # ========== multi level convs init ==========
         self._multi_level_cls_convs = nn.ModuleList()
         self._multi_level_reg_convs = nn.ModuleList()
@@ -197,8 +227,17 @@ class Cylinder5DDetectionHead(nn.Module):
                         mode="fan_in",
                         nonlinearity="leaky_relu"
                     )
-        for subnet in [self.keypt1_predictor, self.keypt2_predictor]:
-            for m in subnet.modules():
+        if self.keypt1_predictor is not None:
+            for subnet in [self.keypt1_predictor, self.keypt2_predictor]:
+                for m in subnet.modules():
+                    if m is None:
+                        continue
+                    elif hasattr(m, 'weight') and hasattr(m, 'bias'):
+                        nn.init.kaiming_normal_(
+                            m.weight, mode='fan_out', nonlinearity='relu')
+                        nn.init.constant_(m.bias, 0)
+        elif self.facet_predictor is not None:
+            for m in self.facet_predictor.modules():
                 if m is None:
                     continue
                 elif hasattr(m, 'weight') and hasattr(m, 'bias'):
@@ -215,7 +254,7 @@ class Cylinder5DDetectionHead(nn.Module):
         # self.right_bbox_refiner_scorer_output.bias.data.fill_(bias_init)
 
     @staticmethod
-    def _build_keypts_convs(in_channels: int, feat_channels: int, num_classes: int):
+    def _build_featmap_convs(in_channels: int, feat_channels: int, num_classes: int):
         """
         refer to mask-rcnn mask-prediction head.
         """
@@ -304,7 +343,8 @@ class Cylinder5DDetectionHead(nn.Module):
         self,
         left_feature: List[Tensor],
         right_feature: List[Tensor],
-        keypt_left_feat: List[Tensor],
+        sharp_left_feat: List[Tensor],
+        sharp_right_feat: List[Tensor],
         disparity_prior: Tensor,
         batch_img_metas: Dict,
         gt_labels: List[Dict] = None,
@@ -317,6 +357,8 @@ class Cylinder5DDetectionHead(nn.Module):
         Returns:
             Tuple[List]: A tuple of multi-level classification scores, bbox predictions, keypts predcitions, objectnesses.
         """
+        batch_positive_detections = []
+        loss_dict_final = {}
         cls_scores, bboxes, objectnesses = [], [], []
         starttime = time.time()
         for indexLevel in range(len(left_feature)):
@@ -350,121 +392,159 @@ class Cylinder5DDetectionHead(nn.Module):
             )
             torch.cuda.synchronize()
 
-        # # ======== For debug left side ========
-        # num_imgs = disparity_prior.shape[0]
-        # batch_positive_detections = []
-        # for indexImg in range(num_imgs):
-        #     batch_positive_detections.append({
-        #         'bboxes': batch_selected_boxes[indexImg],
-        #         'classes': batch_selected_classes[indexImg],
-        #         'confidences': batch_selected_confidences[indexImg]
-        #     })
-
-        # select top candidates for stereo bbox regression.
-        starttime = time.time()
-        preds_items_multilevels_detachcopy = DetachCopyNested([cls_scores, bboxes, objectnesses])
-        (
-            cls_scores_selected,  # shape [B, 100, num_class]
-            bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
-            objectness_selected,  # Note: shape is [B, 100,].
-            priors_selected  # shape [B, 100, 4]
-        ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)   
-        print("time sub2: {}".format(time.time() - starttime))     
-
-        # return shape [B, 100, 6]
-        starttime = time.time()
-        sbboxes, refined_right_bboxes, refined_right_scores = self.forward_stereo_det(
-            right_feature,
-            bboxes_selected,
-            disparity_prior,
-            batch_img_metas,
-            self._config['bbox_expand_factor']
-        )
-        print("time sub3: {}".format(time.time() - starttime))
-        torch.cuda.synchronize()
-
-        starttime = time.time()
-        keypt1_pred = self.forward_keypt_det(
-            keypt_left_feat,
-            bboxes_selected.detach(),
-            self.keypt1_predictor,
-            keypt_id='1'
-        )
-        keypt2_pred = self.forward_keypt_det(
-            keypt_left_feat,
-            bboxes_selected.detach(),
-            self.keypt2_predictor,
-            keypt_id='2',
-        )
-        print("time sub4: {}".format(time.time() - starttime))
-        torch.cuda.synchronize()
-
-        loss_dict_final = None
-        batch_positive_detections = []
-        if gt_labels is not None:
-            # get loss path
-            loss_dict_final, pos_masks, sbboxes = self.loss_by_stereobboxdet(
-                priors_selected,
-                cls_scores_selected,
-                sbboxes,
-                refined_right_bboxes,
-                refined_right_scores,
-                objectness_selected,
-                keypt1_pred,
-                keypt2_pred,
-                gt_labels,
-                batch_img_metas
-            )
-            torch.cuda.synchronize()
+            # # # ======== For debug left side ========
+            # num_imgs = disparity_prior.shape[0]
+            # for indexImg in range(num_imgs):
+            #     batch_positive_detections.append({
+            #         'bboxes': batch_selected_boxes[indexImg],
+            #         'classes': batch_selected_classes[indexImg],
+            #         'confidences': batch_selected_confidences[indexImg]
+            #     })
+            # # # ======== For debug left side ========
 
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
                 loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
                 loss_dict_final['loss_obj'] = loss_dict_bboxdet['loss_obj']
 
-            num_imgs = disparity_prior.shape[0]
-            pos_masks = pos_masks.reshape(num_imgs, -1)
-            if pos_masks.sum() > 0:
-                for indexImg in range(num_imgs):
-                    classes = torch.argmax(cls_scores_selected[indexImg][pos_masks[indexImg]].detach(), dim=-1)
-                    featmap_size = keypt1_pred.shape[-1]
-                    keypt1s = torch.gather(keypt1_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
-                    keypt2s = torch.gather(keypt2_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
-                    num_pos = keypt1s.shape[0]
-                    indices_keypt1s = torch.argmax(keypt1s.view(num_pos, -1), dim=-1)
-                    indices_keypt1s = torch.stack([indices_keypt1s % featmap_size, indices_keypt1s // featmap_size], dim=-1)
-                    indices_keypt2s = torch.argmax(keypt2s.view(num_pos, -1), dim=-1)
-                    indices_keypt2s = torch.stack([indices_keypt2s % featmap_size, indices_keypt2s // featmap_size], dim=-1)
+        if True:
+            # select top candidates for stereo bbox regression.
+            starttime = time.time()
+            preds_items_multilevels_detachcopy = DetachCopyNested([cls_scores, bboxes, objectnesses])
+            (
+                cls_scores_selected,  # shape [B, 100, num_class]
+                bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
+                objectness_selected,  # Note: shape is [B, 100,].
+                priors_selected  # shape [B, 100, 4]
+            ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)   
+            print("time sub2: {}".format(time.time() - starttime))     
 
-                    batch_positive_detections.append({
-                        'sbboxes': sbboxes[indexImg][pos_masks[indexImg]],
-                        'classes': classes,
-                        'confidences': torch.max(cls_scores_selected[indexImg][pos_masks[indexImg]].detach() , dim=-1)[0] * objectness_selected[indexImg][pos_masks[indexImg]].detach(),
-                        'keypt1s': indices_keypt1s.to(torch.float) / featmap_size,
-                        'keypt2s': indices_keypt2s.to(torch.float) / featmap_size
-                    })
+            # return shape [B, 100, 6]
+            starttime = time.time()
+            sbboxes, refined_right_bboxes, refined_right_scores = self.forward_stereo_det(
+                right_feature,
+                bboxes_selected,
+                disparity_prior,
+                batch_img_metas,
+                self._config['bbox_expand_factor']
+            )
+            print("time sub3: {}".format(time.time() - starttime))
+            torch.cuda.synchronize()
 
-            if self._config['is_train_keypt']:
-                active_losses = ["loss_keypt1", "loss_keypt2"]
+            starttime = time.time()
+            keypt1_pred = keypt2_pred = facet_pred = None
+            if self.keypt1_predictor is not None:
+                keypt1_pred = self.forward_featuremap_det(
+                    sharp_left_feat,
+                    bboxes_selected.detach(),
+                    self.keypt1_predictor,
+                    feature_id='1'
+                )
+                keypt2_pred = self.forward_featuremap_det(
+                    sharp_left_feat,
+                    bboxes_selected.detach(),
+                    self.keypt2_predictor,
+                    feature_id='2',
+                )
+            elif self.facet_predictor is not None:
+                facet_pred = self.forward_featuremap_det(
+                    sharp_left_feat,
+                    bboxes_selected.detach(),
+                    self.facet_predictor,
+                    feature_id="facet"
+                    
+                )
+            print("time sub4: {}".format(time.time() - starttime))
+            torch.cuda.synchronize()
+
+            if gt_labels is not None:
+                # get loss path
+                loss_dict_stereo, pos_masks, sbboxes = self.loss_by_stereobboxdet(
+                    priors_selected,
+                    cls_scores_selected,
+                    sbboxes,
+                    refined_right_bboxes,
+                    refined_right_scores,
+                    objectness_selected,
+                    keypt1_pred,
+                    keypt2_pred,
+                    facet_pred,
+                    gt_labels,
+                    batch_img_metas
+                )
+                torch.cuda.synchronize()
+                loss_dict_final.update(loss_dict_stereo)
+                
+                num_imgs = disparity_prior.shape[0]
+                pos_masks = pos_masks.reshape(num_imgs, -1)
+                # prepare prediction results for visz.
+                if pos_masks.sum() > 0:
+                    for indexImg in range(num_imgs):
+                        classes = torch.argmax(cls_scores_selected[indexImg][pos_masks[indexImg]].detach(), dim=-1)
+                        batch_positive_detections.append({
+                            'sbboxes': sbboxes[indexImg][pos_masks[indexImg]].detach(),
+                            'classes': classes,
+                            'confidences': torch.max(cls_scores_selected[indexImg][pos_masks[indexImg]] , dim=-1)[0] * objectness_selected[indexImg][pos_masks[indexImg]].detach()
+                        })
+                        
+                        if keypt1_pred is not None:
+                            featmap_size = keypt1_pred.shape[-1]
+                            keypt1s = torch.gather(keypt1_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
+                            keypt2s = torch.gather(keypt2_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
+                            num_pos = keypt1s.shape[0]
+                            indices_keypt1s = torch.argmax(keypt1s.view(num_pos, -1), dim=-1)
+                            indices_keypt1s = torch.stack([indices_keypt1s % featmap_size, indices_keypt1s // featmap_size], dim=-1)
+                            indices_keypt2s = torch.argmax(keypt2s.view(num_pos, -1), dim=-1)
+                            indices_keypt2s = torch.stack([indices_keypt2s % featmap_size, indices_keypt2s // featmap_size], dim=-1)
+                            batch_positive_detections[-1]['keypt1s'] = (indices_keypt1s.to(torch.float) / featmap_size).detach()
+                            batch_positive_detections[-1]['keypt2s'] = (indices_keypt2s.to(torch.float) / featmap_size).detach()
+                        if facet_pred is not None:
+                            featmap_size = facet_pred.shape[-1]
+                            facets = torch.gather(facet_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
+                            batch_positive_detections[-1]['facets'] = facets.detach()        
+                # clean non-active losses.
+                active_losses = loss_dict_final.keys()
+                if self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']:
+                    active_losses = ["loss_keypt1", "loss_keypt2"]
+                elif self._config['facet_pred_cfg']['is_enable'] and self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
+                    active_losses = ["loss_facet"]
                 for key, value in loss_dict_final.items():
                     if key not in active_losses:
                         loss_dict_final[key] *= 0
-        else:
-            # inference code
-            starttime = time.time()
-            batch_positive_detections = self.FormatPredictionResult(
-                bboxes_selected,
-                cls_scores_selected,
-                objectness_selected,
-                refined_right_bboxes,
-                refined_right_scores,
-                keypt1_pred,
-                keypt2_pred,
-                batch_img_metas
-            )
-            print("time sub5: {}".format(time.time() - starttime))
-
-        torch.distributed.barrier()
+            else:
+                # select stereo right bboxes
+                num_imgs, topk = bboxes_selected.shape[:2]
+                refined_right_bboxes_pred, stereo_confidences = self.compute_right_bboxes(
+                    refined_right_bboxes,
+                    refined_right_scores,
+                    num_imgs,
+                    topk
+                )
+                # predict feature map within the right bboxes
+                facet_pred_right = self.forward_featuremap_det(
+                    sharp_right_feat,
+                    refined_right_bboxes_pred.detach(),
+                    self.facet_predictor,
+                    feature_id="facet"
+                )
+                # inference code
+                starttime = time.time()
+                batch_positive_detections = self.FormatPredictionResult(
+                    bboxes_selected,
+                    cls_scores_selected,
+                    objectness_selected,
+                    refined_right_bboxes_pred,
+                    stereo_confidences,
+                    keypt1_pred,
+                    keypt2_pred,
+                    facet_pred,
+                    facet_pred_right,
+                    batch_img_metas
+                )
+                print("time sub5: {}".format(time.time() - starttime))
+        
+        # # Note: turn on this if stuck happens.
+        # torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
     
     @torch.no_grad()
@@ -684,7 +764,7 @@ class Cylinder5DDetectionHead(nn.Module):
         # _bboxes_pred[..., 3] += dhboxes / 2
 
         batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(_bboxes_pred.device)
-        print("time sub sub1: {}".format(time.time() - starttime))
+        # print("time sub sub1: {}".format(time.time() - starttime))
 
         starttime = time.time()
         # extract right bbox roi feature
@@ -707,7 +787,7 @@ class Cylinder5DDetectionHead(nn.Module):
             roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
             roi_feat_sample /= roi_feat_sample.max()
             self.logger.add_image("roi_feat_sample", roi_feat_sample)
-        print("time sub sub2: {}".format(time.time() - starttime))
+        # print("time sub sub2: {}".format(time.time() - starttime))
 
         starttime = time.time()
         batch_size = bboxes_pred.shape[0]
@@ -716,16 +796,16 @@ class Cylinder5DDetectionHead(nn.Module):
         sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1)
         right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
         refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
-        print("time sub sub3: {}".format(time.time() - starttime))
+        # print("time sub sub3: {}".format(time.time() - starttime))
 
         return sbboxes_pred, refined_right_bboxes, right_scores_refine.view(batch_size, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2)
 
-    def forward_keypt_det(
+    def forward_featuremap_det(
         self,
         left_feat: List[Tensor],
         bbox_pred: Tensor,
-        keypt_predictor: nn.Sequential,
-        keypt_id: str
+        featuremap_predictor: nn.Sequential,
+        feature_id: str
     ) -> Tensor:
         """
         bbox_pred is top 100 bbox predictions from forward_objdet_single. Same as mask-rcnn.
@@ -741,11 +821,11 @@ class Cylinder5DDetectionHead(nn.Module):
         batch_number = torch.arange(bbox_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(bbox_pred.device)
         rois = bbox_pred.reshape(-1, 4)
         bnum_rois = torch.cat([batch_number, rois], dim=1)
-        roi_feats = self.keypts_bbox_roi_extractor(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
-        keypts_feat = keypt_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
+        roi_feats = self.bbox_roi_extractor_forfeature(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
+        output_feat = featuremap_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
         if self.logger is not None:
-            self.keypts_roi_visz[keypt_id] = roi_feats.detach()
-            self.keypts_featmap_visz[keypt_id] = keypts_feat.detach()
+            self.feat_roi_visz[feature_id] = roi_feats.detach()
+            self.feat_output_visz[feature_id] = output_feat.detach()
 
         # TODO: put this part to prediction?
         # map_size = keypts_feat.shape[-1]
@@ -762,8 +842,28 @@ class Cylinder5DDetectionHead(nn.Module):
 
         batch_size, num_bboxes = bbox_pred.shape[:2]
         num_classes = self._config['num_classes']
-        featmap_size = keypts_feat.shape[-1]
-        return keypts_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
+        featmap_size = output_feat.shape[-1]
+        return output_feat.view(batch_size, num_bboxes, num_classes, featmap_size, featmap_size).sigmoid()
+    
+    @torch.no_grad()
+    def compute_right_bboxes(
+        self,
+        right_bboxes_pred: Tensor,
+        right_scores: Tensor,
+        num_imgs: int,
+        topk: int
+    ):
+        """
+        Returns:
+            refined_right_bboxes_pred:  (b, topk, 4) shape bboxes predictions.
+            stereo_confidences:  (b, topk) confidences for each bbox prediction.
+        """
+        max_right_scores = torch.max(right_scores.detach().sigmoid().squeeze(dim=-1), dim=-1)  # similarly applied sigmoid in loss_by_stereo
+        stereo_confidences = max_right_scores[0]  # (b, topk)
+        # advanced indexing
+        device = right_bboxes_pred.device
+        refined_right_bboxes_pred = right_bboxes_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), max_right_scores[1]]
+        return refined_right_bboxes_pred, stereo_confidences
     
     @torch.no_grad()
     def FormatPredictionResult(
@@ -771,10 +871,12 @@ class Cylinder5DDetectionHead(nn.Module):
         left_bboxes_pred: Tensor,
         left_cls_scores: Tensor,
         left_objectnesses: Tensor,
-        right_bboxes_pred: Tensor,
-        right_scores: Tensor,
-        keypt1_pred: Tensor,
-        keypt2_pred: Tensor,
+        refined_right_bboxes_pred: Tensor,
+        stereo_confidences: Tensor,
+        keypt1_pred: Optional[Tensor],
+        keypt2_pred: Optional[Tensor],
+        facet_pred: Optional[Tensor],
+        facet_pred_right: Optional[Tensor],
         batch_img_metas: Dict
     ):
         """
@@ -782,10 +884,12 @@ class Cylinder5DDetectionHead(nn.Module):
             left_bboxes_pred: (b, topk, 4) shape, (tl_x, tl_y, br_x, br_y) format bbox, all in global scale.
             left_cls_scores: (b, topk, 1) shape,
             left_objectnesses: (b, topk) shape,
-            right_bboxes_pred: (b, topk, ker_h * ker_w, 4). (tl_x_r, tl_y_r, br_x_r, br_y_r) format, refined right bboxes. all in global scale.
-            right_scores: (b, topk, ker_h * ker_w, 1)
+            refined_right_bboxes_pred: (b, topk, ker_h * ker_w, 4). (tl_x_r, tl_y_r, br_x_r, br_y_r) format, refined right bboxes. all in global scale.
+            stereo_confidences: (b, topk, ker_h * ker_w, 1)
             keypt1_pred: (b, topk, num_classes, ker_h_keypt, ker_w_keypt)
             keypt2_pred: (b, topk, num_classes, ker_h_keypt, ker_w_keypt),
+            facet_pred: (b, topk, num_classes, ker_h_keypt, ker_w_keypt)
+            facet_pred_right: (b, topk, num_classes, ker_h_keypts, ker_w_keypt)
             batch_img_metas: include 'h', 'w', 'h_cam', 'w_cam' keys.
 
         Returns:
@@ -804,49 +908,52 @@ class Cylinder5DDetectionHead(nn.Module):
         # 1
         # 1
         num_imgs, topk = left_bboxes_pred.shape[:2]
-        ker_h_keypt, ker_w_keypt = keypt1_pred.shape[-2:]
 
         max_cls_scores = torch.max(left_cls_scores.detach(), dim=-1)
         clsIds = max_cls_scores[1]  # (b, topk)
         object_confidences = max_cls_scores[0] * left_objectnesses.detach()  # (b, topk)
-        max_right_scores = torch.max(right_scores.detach().sigmoid().squeeze(dim=-1), dim=-1)  # similarly applied sigmoid in loss_by_stereo
-        stereo_confidences = max_right_scores[0]  # (b, topk)
-        # advanced indexing
-        device = right_bboxes_pred.device
-        refined_right_bboxes_pred = right_bboxes_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), max_right_scores[1]]
-        keypts_pred = []
-        keypts_scores = []
-        for keypt_pred in [keypt1_pred, keypt2_pred]:
-            device = keypt_pred.device
-            keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
-            if self._config.get("keypt_by_centroid", False):
-                quantile_thres = torch.quantile(keypt_pred_classified.view(num_imgs, topk, -1), self._config.get("keypt_quantile_threshold", 1.0), dim=-1)
-                ptarea_masks = keypt_pred_classified > quantile_thres.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ker_h_keypt, ker_w_keypt)
-                # FIXME: nonzero ope need a for loop
-                list_centerx, list_centery = [], []
-                for mask_oneroi in ptarea_masks.view(-1, ker_h_keypt, ker_w_keypt):
-                    true_indices = torch.nonzero(mask_oneroi, as_tuple=False)
-                    centerarea = true_indices.float().mean(dim=0)
-                    list_centerx.append(centerarea[1])
-                    list_centery.append(centerarea[0])
-                keypt_pred_classified_bestx = torch.tensor(list_centerx, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_w_keypt
-                keypt_pred_classified_besty = torch.tensor(list_centery, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_h_keypt
-            else:
-                max_keypt = torch.max(keypt_pred_classified.view(num_imgs, topk, -1), dim=-1)
-                keypt_pred_classified_bestx = (max_keypt[1] % ker_w_keypt) / ker_w_keypt
-                keypt_pred_classified_besty = (max_keypt[1] // ker_w_keypt) / ker_h_keypt
-            keypt_pred_classified = torch.stack([keypt_pred_classified_bestx, keypt_pred_classified_besty], dim=-1)
-            keypts_pred.append(keypt_pred_classified)
-            keypts_scores.append(
-                torch.max(keypt_pred.view(num_imgs, topk, -1), dim=-1)[0]
-            )
+
+        device = left_bboxes_pred.device
+        if keypt1_pred is not None:
+            ker_h_keypt, ker_w_keypt = keypt1_pred.shape[-2:]
+            keypts_pred = []
+            keypts_scores = []
+            for keypt_pred in [keypt1_pred, keypt2_pred]:
+                device = keypt_pred.device
+                keypt_pred_classified = keypt_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
+                if self._config.get("keypt_by_centroid", False):
+                    quantile_thres = torch.quantile(keypt_pred_classified.view(num_imgs, topk, -1), self._config.get("keypt_quantile_threshold", 1.0), dim=-1)
+                    ptarea_masks = keypt_pred_classified > quantile_thres.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ker_h_keypt, ker_w_keypt)
+                    # FIXME: nonzero ope need a for loop
+                    list_centerx, list_centery = [], []
+                    for mask_oneroi in ptarea_masks.view(-1, ker_h_keypt, ker_w_keypt):
+                        true_indices = torch.nonzero(mask_oneroi, as_tuple=False)
+                        centerarea = true_indices.float().mean(dim=0)
+                        list_centerx.append(centerarea[1])
+                        list_centery.append(centerarea[0])
+                    keypt_pred_classified_bestx = torch.tensor(list_centerx, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_w_keypt
+                    keypt_pred_classified_besty = torch.tensor(list_centery, dtype=keypt_pred_classified.dtype, device=keypt_pred_classified.device).view(num_imgs, topk) / ker_h_keypt
+                else:
+                    max_keypt = torch.max(keypt_pred_classified.view(num_imgs, topk, -1), dim=-1)
+                    keypt_pred_classified_bestx = (max_keypt[1] % ker_w_keypt) / ker_w_keypt
+                    keypt_pred_classified_besty = (max_keypt[1] // ker_w_keypt) / ker_h_keypt
+                keypt_pred_classified = torch.stack([keypt_pred_classified_bestx, keypt_pred_classified_besty], dim=-1)
+                keypts_pred.append(keypt_pred_classified)
+                keypts_scores.append(
+                    torch.max(keypt_pred.view(num_imgs, topk, -1), dim=-1)[0]
+                )
+        if facet_pred is not None:
+            device = facet_pred.device
+            facet_pred_classified = facet_pred.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
+            facet_pred_right_classified = facet_pred_right.detach()[torch.arange(num_imgs, device=device), torch.arange(topk, device=device), clsIds]
 
         detectionsBatch = []
-        for indexImg in range(num_imgs):            
+        for indexImg in range(num_imgs):
             maskGood = torch.logical_and(object_confidences[indexImg] > self._config['lconfidence_threshold'], stereo_confidences[indexImg] > self._config['rscore_threshold'])
             clsIds_selected = clsIds[indexImg][maskGood]
             left_bboxes_selected = left_bboxes_pred[indexImg][maskGood]
             right_bboxes_selected = refined_right_bboxes_pred[indexImg][maskGood]
+            
             # nms final round
             if left_bboxes_selected.shape[0] > 0:
                 keep_idxs = batched_nms(
@@ -869,25 +976,49 @@ class Cylinder5DDetectionHead(nn.Module):
 
             left_bboxes_selected = self.encode_bboxes(left_bboxes_selected, batch_img_metas['w_cam'], batch_img_metas['h_cam'])
             right_bboxes_selected = self.encode_bboxes(right_bboxes_selected, batch_img_metas['w_cam'], batch_img_metas['h_cam'])            
-            keypt1_selected = keypts_pred[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
-            keypt2_selected = keypts_pred[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
 
             object_confidence_selected = object_confidences[indexImg][maskGood][keep_idxs][r_keep_idxs]
             stereo_confidence_selected = stereo_confidences[indexImg][maskGood][keep_idxs][r_keep_idxs]
-            keypt1_score = keypts_scores[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
-            keypt2_score = keypts_scores[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
-            detection = torch.cat([
-                clsIds_selected.unsqueeze(-1)[keep_idxs][r_keep_idxs],
-                left_bboxes_selected,
-                right_bboxes_selected,
-                keypt1_selected,
-                keypt2_selected,
-                object_confidence_selected.unsqueeze(-1),
-                stereo_confidence_selected.unsqueeze(-1),
-                keypt1_score.unsqueeze(-1),
-                keypt2_score.unsqueeze(-1)
-            ], dim=-1)
-            detectionsBatch.append(detection)
+            
+            if keypt1_pred is not None:
+                keypt1_selected = keypts_pred[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
+                keypt2_selected = keypts_pred[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
+                keypt1_score = keypts_scores[0][indexImg][maskGood][keep_idxs][r_keep_idxs]
+                keypt2_score = keypts_scores[1][indexImg][maskGood][keep_idxs][r_keep_idxs]
+                detection = torch.cat([
+                    clsIds_selected.unsqueeze(-1)[keep_idxs][r_keep_idxs],
+                    left_bboxes_selected,
+                    right_bboxes_selected,
+                    keypt1_selected,
+                    keypt2_selected,
+                    object_confidence_selected.unsqueeze(-1),
+                    stereo_confidence_selected.unsqueeze(-1),
+                    keypt1_score.unsqueeze(-1),
+                    keypt2_score.unsqueeze(-1)
+                ], dim=-1)
+                detectionsBatch.append(detection)
+            elif facet_pred is not None:                
+                detection = {
+                    "detection": torch.cat([
+                        clsIds_selected.unsqueeze(-1)[keep_idxs][r_keep_idxs],
+                        left_bboxes_selected,
+                        right_bboxes_selected,
+                        object_confidence_selected.unsqueeze(-1),
+                        stereo_confidence_selected.unsqueeze(-1)
+                    ], dim=-1),
+                    "facets": facet_pred_classified[indexImg][maskGood][keep_idxs][r_keep_idxs],
+                    "facets_right": facet_pred_right_classified[indexImg][maskGood][keep_idxs][r_keep_idxs]
+                }
+                detectionsBatch.append(detection)
+            else:
+                detection = torch.cat([
+                    clsIds_selected.unsqueeze(-1)[keep_idxs][r_keep_idxs],
+                    left_bboxes_selected,
+                    right_bboxes_selected,
+                    object_confidence_selected.unsqueeze(-1),
+                    stereo_confidence_selected.unsqueeze(-1)
+                ], dim=-1)
+                detectionsBatch.append(detection)
 
         return detectionsBatch
 
@@ -914,8 +1045,9 @@ class Cylinder5DDetectionHead(nn.Module):
         right_bboxes: Tensor,
         right_scores: Tensor,
         objectness: Tensor,
-        keypt1_pred: Tensor,
-        keypt2_pred: Tensor,
+        keypt1_pred: Optional[Tensor],
+        keypt2_pred: Optional[Tensor],
+        facet_pred: Optional[Tensor],
         batch_gt_labels: Dict,
         batch_img_metas: Dict
     ):
@@ -931,7 +1063,7 @@ class Cylinder5DDetectionHead(nn.Module):
             objectness: shape [B, 100].
             keypt1_pred: [B, 100, num_class, ker_h, ker_w]
             keypt2_pred: [B, 100, num_class, ker_h, ker_w]
-            batch_gt_labels: include 'bboxes', 'labels', 'keypt1_masks', 'keypt2_masks' keys.
+            batch_gt_labels: include 'bboxes', 'labels', 'keypt1_masks', 'keypt2_masks' (or 'leftmasks') keys.
             batch_img_metas: include 'h' and 'w' keys.
 
         Returns:
@@ -962,7 +1094,7 @@ class Cylinder5DDetectionHead(nn.Module):
             obj_targets.append(obj_target)
             bbox_targets.append(bbox_target)
             indices_bbox_targets.append(indices_bbox_target)
-            num_pos_per_img.append(num_pos_one)
+            num_pos_per_img.append(num_pos_one)            
 
         num_pos = torch.tensor(
             sum(num_pos_per_img),
@@ -974,7 +1106,7 @@ class Cylinder5DDetectionHead(nn.Module):
         cls_targets = torch.cat(cls_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
         bbox_targets = torch.cat(bbox_targets, 0)
-        indices_bbox_targets = torch.cat(indices_bbox_targets, 0)        
+        indices_bbox_targets = torch.cat(indices_bbox_targets, 0)
 
         if num_pos > 0:
             rbboxes_targets = torch.cat([
@@ -1017,76 +1149,219 @@ class Cylinder5DDetectionHead(nn.Module):
             selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
             bboxes[pos_masks] = selected_sbboxes
             bboxes = bboxes.view(batch_size, num_priors, 6)
-            # keypoints
-            loss_keypts = []
-            classSelection = torch.argmax(cls_scores, dim=2)
-            featmap_size = keypt1_pred.shape[-1]
-            mask_target_visz = {}
-            mask_preds_visz = {}
-            for keypt_pred, lossfunc_keypt, indexKeypt in zip([keypt1_pred, keypt2_pred], [self.loss_keypt1, self.loss_keypt2], [1, 2]):
-                num_batch, num_priors = keypt_pred.shape[:2]
-                pos_bboxes_preds_list, pos_assigned_gt_indices_list, keypt_masks_list = [], [], []
-                for indexImg in range(num_batch):
-                    # collect targets in each img.
-                    indices_bbox_targets_oneimg = indices_bbox_targets[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :].to(torch.int).squeeze(-1)
-                    pos_assigned_gt_indices_list.append(indices_bbox_targets_oneimg)
-                    pos_bboxes_pred_oneimg = selected_sbboxes[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :4].detach()
-                    pos_bboxes_preds_list.append(pos_bboxes_pred_oneimg)
-                    # select masks for keypoint
-                    keypt_key = "keypt2_masks" if indexKeypt == 2 else "keypt1_masks"
-                    keypt_masks_oneimg = batch_gt_labels[indexImg][keypt_key]
-                    keypt_masks_list.append(BitmapMasks(keypt_masks_oneimg.cpu().numpy(), height=batch_img_metas['h'], width=batch_img_metas['w']))                          
-                mask_targets = mask_target(
-                    pos_bboxes_preds_list,
-                    pos_assigned_gt_indices_list,
-                    keypt_masks_list,
-                    Config({"mask_size": featmap_size, 'soft_mask_target': True})
-                )
-                pos_class_labels = classSelection.view(-1)[pos_masks]
-                keypt_mask_preds = keypt_pred.view(-1, self._config["num_classes"], featmap_size, featmap_size)[pos_masks]
-                keypt_mask_preds = keypt_mask_preds[torch.arange(0, keypt_mask_preds.shape[0]), pos_class_labels.to(torch.int)]
 
-                loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets))
-                if self.logger is not None:
-                    mask_target_visz[str(indexKeypt)] = mask_targets
-                    mask_preds_visz[str(indexKeypt)] = keypt_mask_preds
-
-            if self.logger is not None:
-                for key in ['1', '2']:
-                    keypt_feat = mask_preds_visz[key][0].detach().cpu()
-                    keypt_feat = keypt_feat - keypt_feat.min()
-                    keypt_feat *= 255 / keypt_feat.max()
-                    keypt_feat = F.interpolate(keypt_feat.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
-                    self.logger.add_image("keypt_feat_{}_sample".format(key), keypt_feat.to(torch.uint8).squeeze())
-                    keypt_target = mask_target_visz[key][0].detach().cpu()
-                    keypt_target = keypt_target - keypt_target.min()
-                    keypt_target *= 255 / keypt_target.max()
-                    keypt_target = F.interpolate(keypt_target.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
-                    self.logger.add_image("keypt_target_{}_sample".format(key), keypt_target.to(torch.uint8).squeeze())
-                    keypt_roi = self.keypts_roi_visz[key][pos_masks][0].mean(dim=0).detach().cpu()
-                    keypt_roi = keypt_roi - keypt_roi.min()
-                    keypt_roi *= 255 / keypt_roi.max()
-                    keypt_roi = F.interpolate(keypt_roi.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
-                    self.logger.add_image("keypt_roi_{}_sample".format(key), keypt_roi.to(torch.uint8).squeeze())
+            if self.loss_keypt1 is not None:
+                assert self.loss_keypt2 is not None
+                loss_keypts = self._compute_keypt_loss(cls_scores, keypt1_pred, keypt2_pred, indices_bbox_targets, num_pos_per_img, selected_sbboxes, pos_masks, batch_gt_labels, batch_img_metas)
+            elif self.loss_facet is not None:                      
+                loss_facet = self._compute_featmap_loss(cls_scores, facet_pred, self.loss_facet, indices_bbox_targets, num_pos_per_img, selected_sbboxes, pos_masks, "leftmasks", batch_gt_labels, batch_img_metas)
+            else:
+                raise NotImplementedError            
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298
-            loss_keypts = [
-                keypt1_pred.sum() * 0,
-                keypt2_pred.sum() * 0
-            ]
+            if self.loss_keypt1 is not None:
+                loss_keypts = [
+                    keypt1_pred.sum() * 0,
+                    keypt2_pred.sum() * 0
+                ]
+            elif self.loss_facet is not None:
+                loss_facet = facet_pred.sum() * 0
             loss_rbbox = right_bboxes.sum() * 0
             loss_rscore = right_scores.sum() * 0
         
         loss_dict = {
             'loss_rbbox': loss_rbbox,
-            'loss_rscore': loss_rscore,
-            'loss_keypt1': loss_keypts[0],
-            'loss_keypt2': loss_keypts[1]
+            'loss_rscore': loss_rscore
         }
+        if self.loss_keypt1 is not None:
+            loss_dict['loss_keypt1'] = loss_keypts[0]
+            loss_dict['loss_keypt2'] = loss_keypts[1]
+        elif self.loss_facet is not None:            
+            loss_dict['loss_facet'] = loss_facet * 10  # Note: raw loss around 0.1, multiply by factor 10 
         torch.cuda.synchronize()
-
+        
         return  loss_dict, pos_masks.reshape(num_imgs, -1), bboxes
+    
+    def _compute_featmap_loss(
+        self,
+        cls_scores: Tensor,
+        featmap_pred: Tensor,
+        lossfunc,
+        indices_bbox_targets: Tensor,
+        num_pos_per_img: list,
+        selected_sbboxes: Tensor,
+        pos_masks: Tensor,
+        key_gtmasks: str,
+        batch_gt_labels: Dict,
+        batch_img_metas: Dict
+    ):
+        """
+        Compute loss for featmap prediction.
+
+        Args:
+            cls_scores: shape (B, 100, num_class).
+            featmap_pred: [B, 100, num_class, ker_h, ker_w]
+            indices_bbox_targts: target selection results from _get_targets_*
+            num_pos_per_img: number of positive gt target in each image.
+            selected_sbboxes: [N, 6] sbboxes that are selected for gts.
+            pos_masks: [B*100,] binary mask for the positive (selected) predictions.
+            batch_gt_labels: include 'bboxes', 'labels', 'keypt1_masks', 'keypt2_masks' keys.
+            batch_img_metas: include 'h' and 'w' keys.
+
+        Returns:
+            loss_featmap: Tensor.
+        """
+        classSelection = torch.argmax(cls_scores, dim=2)
+        featmap_size = featmap_pred.shape[-1]
+
+        num_batch, num_priors = featmap_pred.shape[:2]
+        pos_bboxes_preds_list, pos_assigned_gt_indices_list, gt_list = [], [], []
+        list_indices_gt_isfacet = []
+        for indexImg in range(num_batch):
+            # collect targets in each img.
+            indices_bbox_targets_oneimg = indices_bbox_targets[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :].to(torch.int).squeeze(-1)
+            pos_bboxes_pred_oneimg = selected_sbboxes[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :4].detach()
+            
+            indices_gt_isfacet = torch.where(batch_gt_labels[indexImg]['labels'][indices_bbox_targets_oneimg] == 1.0)
+            list_indices_gt_isfacet.append(indices_gt_isfacet)  # Note: record to select predictions as well.
+            pos_bboxes_preds_list.append(pos_bboxes_pred_oneimg[indices_gt_isfacet])            
+            pos_assigned_gt_indices_list.append(indices_bbox_targets_oneimg[indices_gt_isfacet])
+            # select gt feature map
+            featmasks_oneimg = batch_gt_labels[indexImg][key_gtmasks]
+            # try:
+            #     featmasks_oneimg = [featmasks_oneimg[indexIsFacet] for indexIsFacet in indices_gt_isfacet[0].cpu().numpy().tolist()]
+            # except:
+            #     from IPython import embed; print('pjiojiojioj!'); embed()
+
+            gt_list.append(BitmapMasks(torch.stack(featmasks_oneimg, dim=0).cpu().numpy(), height=batch_img_metas['h'], width=batch_img_metas['w']))                          
+        
+        mask_targets = mask_target(
+            pos_bboxes_preds_list,
+            pos_assigned_gt_indices_list,
+            gt_list,
+            Config({"mask_size": featmap_size, 'soft_mask_target': True})
+        )
+        
+        featmap_preds_select = []
+        pos_masks_batched = pos_masks.view(num_batch, -1)
+        classSelection_batched = classSelection.view(num_batch, -1)
+        for indexImg in range(num_batch):
+            featmap_pred_select = featmap_pred[indexImg][pos_masks_batched[indexImg]]
+            featmap_pred_select = featmap_pred_select[list_indices_gt_isfacet[indexImg]]
+            pos_class_labels = classSelection_batched[indexImg][pos_masks_batched[indexImg]][list_indices_gt_isfacet[indexImg]]
+            featmap_pred_select = featmap_pred_select[torch.arange(0, featmap_pred_select.shape[0]), pos_class_labels.to(torch.int)]
+            featmap_preds_select.append(featmap_pred_select)        
+        
+        loss_feat = lossfunc(torch.cat(featmap_preds_select, dim=0), mask_targets)
+
+        if self.logger is not None and not torch.isnan(loss_feat).item():
+            onefeatmap = featmap_preds_select[0][0].detach().cpu()
+            onefeatmap -= onefeatmap.min()
+            onefeatmap *= 255 / onefeatmap.max()
+            onefeatmap = F.interpolate(onefeatmap.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+            self.logger.add_image("facet_prediction_sample", onefeatmap.to(torch.uint8).squeeze())
+            featmap_target = mask_targets[0].detach().cpu()
+            featmap_target -= featmap_target.min()
+            featmap_target *= 255 / featmap_target.max()
+            featmap_target = F.interpolate(featmap_target.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+            self.logger.add_image("facet_target_sample", featmap_target.to(torch.uint8).squeeze())
+            facet_bbox_roi = self.feat_roi_visz["facet"][pos_masks][0].mean(dim=0).detach().cpu()
+            facet_bbox_roi -= facet_bbox_roi.min()
+            facet_bbox_roi *= 255 / facet_bbox_roi.max()
+            facet_bbox_roi = F.interpolate(facet_bbox_roi.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+            self.logger.add_image("facet_bbox_roi_sample", facet_bbox_roi.to(torch.uint8).squeeze())
+        
+        if not self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
+            if numpy.isnan(loss_feat.item()):
+                loss_feat = torch.nan_to_num(loss_feat, nan=0.0)
+            else:
+                loss_feat *= 0
+        return loss_feat
+    
+    def _compute_keypt_loss(
+        self,
+        cls_scores: Tensor,
+        keypt1_pred: Tensor,
+        keypt2_pred: Tensor,
+        indices_bbox_targets: Tensor,
+        num_pos_per_img: list,
+        selected_sbboxes: Tensor,
+        pos_masks: Tensor,
+        batch_gt_labels: Dict,
+        batch_img_metas: Dict
+    ):
+        """
+        Compute loss for keypoints prediction. keypoints include keypt1 and keypt2.
+
+        Args:
+            cls_scores: shape (B, 100, num_class).
+            keypt1_pred: [B, 100, num_class, ker_h, ker_w]
+            keypt2_pred: [B, 100, num_class, ker_h, ker_w]
+            indices_bbox_targts: target selection results from _get_targets_*
+            num_pos_per_img: number of positive gt target in each image.
+            selected_sbboxes: [N, 6] sbboxes that are selected for gts.
+            pos_masks: [B*100,] binary mask for the positive (selected) predictions.
+            batch_gt_labels: include 'bboxes', 'labels', 'keypt1_masks', 'keypt2_masks' keys.
+            batch_img_metas: include 'h' and 'w' keys.
+
+        Returns:
+            loss_keypts: list, [loss_keypt1, loss_keypt2].
+        """
+        # keypoints
+        loss_keypts = []
+        classSelection = torch.argmax(cls_scores, dim=2)
+        featmap_size = keypt1_pred.shape[-1]
+        mask_target_visz = {}
+        mask_preds_visz = {}
+        for keypt_pred, lossfunc_keypt, indexKeypt in zip([keypt1_pred, keypt2_pred], [self.loss_keypt1, self.loss_keypt2], [1, 2]):
+            num_batch, num_priors = keypt_pred.shape[:2]
+            pos_bboxes_preds_list, pos_assigned_gt_indices_list, keypt_masks_list = [], [], []
+            for indexImg in range(num_batch):
+                # collect targets in each img.
+                indices_bbox_targets_oneimg = indices_bbox_targets[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :].to(torch.int).squeeze(-1)
+                pos_assigned_gt_indices_list.append(indices_bbox_targets_oneimg)
+                pos_bboxes_pred_oneimg = selected_sbboxes[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :4].detach()
+                pos_bboxes_preds_list.append(pos_bboxes_pred_oneimg)
+                # select masks for keypoint
+                keypt_key = "keypt2_masks" if indexKeypt == 2 else "keypt1_masks"
+                keypt_masks_oneimg = batch_gt_labels[indexImg][keypt_key]                
+                keypt_masks_list.append(BitmapMasks(keypt_masks_oneimg.cpu().numpy(), height=batch_img_metas['h'], width=batch_img_metas['w']))                          
+            
+            mask_targets = mask_target(
+                pos_bboxes_preds_list,
+                pos_assigned_gt_indices_list,
+                keypt_masks_list,
+                Config({"mask_size": featmap_size, 'soft_mask_target': True})
+            )
+            pos_class_labels = classSelection.view(-1)[pos_masks]
+            keypt_mask_preds = keypt_pred.view(-1, self._config["num_classes"], featmap_size, featmap_size)[pos_masks]
+            keypt_mask_preds = keypt_mask_preds[torch.arange(0, keypt_mask_preds.shape[0]), pos_class_labels.to(torch.int)]
+
+            loss_keypts.append(lossfunc_keypt(keypt_mask_preds, mask_targets))
+            if self.logger is not None:
+                mask_target_visz[str(indexKeypt)] = mask_targets
+                mask_preds_visz[str(indexKeypt)] = keypt_mask_preds
+
+        if self.logger is not None:
+            for key in ['1', '2']:
+                keypt_feat = mask_preds_visz[key][0].detach().cpu()
+                keypt_feat = keypt_feat - keypt_feat.min()
+                keypt_feat *= 255 / keypt_feat.max()
+                keypt_feat = F.interpolate(keypt_feat.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+                self.logger.add_image("keypt_feat_{}_sample".format(key), keypt_feat.to(torch.uint8).squeeze())
+                keypt_target = mask_target_visz[key][0].detach().cpu()
+                keypt_target = keypt_target - keypt_target.min()
+                keypt_target *= 255 / keypt_target.max()
+                keypt_target = F.interpolate(keypt_target.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+                self.logger.add_image("keypt_target_{}_sample".format(key), keypt_target.to(torch.uint8).squeeze())
+                keypt_roi = self.feat_roi_visz[key][pos_masks][0].mean(dim=0).detach().cpu()
+                keypt_roi = keypt_roi - keypt_roi.min()
+                keypt_roi *= 255 / keypt_roi.max()
+                keypt_roi = F.interpolate(keypt_roi.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
+                self.logger.add_image("keypt_roi_{}_sample".format(key), keypt_roi.to(torch.uint8).squeeze())
+        
+        return loss_keypts
 
     def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
         """
@@ -1229,6 +1504,7 @@ class Cylinder5DDetectionHead(nn.Module):
         indices_bbox_target = sampling_result.pos_bboxes_indices
         pos_mask = torch.zeros_like(objectness).to(torch.bool)
         pos_mask[pos_inds] = True
+        
         return (pos_mask, cls_target, obj_target, bbox_target, indices_bbox_target, num_pos_per_img)
 
     def loss_by_bboxdet(
@@ -1333,7 +1609,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 flatten_bboxes[index_img][pos_masks[index_img]].detach()
             )
             batch_selected_classes.append(
-                flatten_cls_preds[index_img][pos_masks[index_img]].detach()
+                torch.argmax(flatten_cls_preds[index_img][pos_masks[index_img]].detach(), dim=1)
             )
             batch_selected_confidences.append(
                 torch.max(flatten_cls_preds[index_img][pos_masks[index_img]], dim=-1)[0].detach() * flatten_objectness[index_img][pos_masks[index_img]].detach()
@@ -1370,6 +1646,7 @@ class Cylinder5DDetectionHead(nn.Module):
             scores=scores.sqrt_(),
             priors=offset_priors
         )
+        
         gt_instances = InstanceData(
             bboxes=gt_labels['bboxes'][:, :4],
             labels=gt_labels['labels']

@@ -185,18 +185,10 @@ class SequenceDataset(torch.utils.data.Dataset):
             "w_cam": self.event_dataset.event_w
         }
         output["event"]["left"] = (
-            output["event"]["left"]
-            .permute(0, 2, 3, 1)
-            .unsqueeze(1)
-            .unsqueeze(4)
-            .to(torch.float32)
+            output["event"]["left"].to(torch.float32)
         )
         output["event"]["right"] = (
-            output["event"]["right"]
-            .permute(0, 2, 3, 1)
-            .unsqueeze(1)
-            .unsqueeze(4)
-            .to(torch.float32)
+            output["event"]["right"].to(torch.float32)
         )
         if 'disparity' in output and 'objdet' in output:
             output["gt_labels"] = {

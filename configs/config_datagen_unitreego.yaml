@@ -133,10 +133,14 @@ MODEL:
         right_roi_feat_size: 7
         iou_threshold: 0.4
         candidates_k: 8
-        # keypt prediction
-        keypts_feat_size: 14
-        keypt_in_channels: 3
-        keypt_feat_channels: 512
+        keypt_pred_cfg:
+          is_enable: False
+          PARAMS:
+            # keypt prediction
+            keypts_feat_size: 14
+            keypt_in_channels: 3
+            keypt_feat_channels: 512
+            is_train_keypt: False
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

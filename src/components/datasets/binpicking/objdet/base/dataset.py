@@ -73,7 +73,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     segMaps[side].append(target['segmentation'][numpy.newaxis, ...].astype('float'))
                 labels_data = {
                     side: {
-                        "boxes": numpy.concatenate(boxes[side], axis=0),
+                        "boxes": numpy.concatenate(boxes[side], axis=0),  # Note: in coco xywh format is [x_min, y_min, w, h]
                         "labels": numpy.array(labels[side]),
                         "image_id": numpy.array(image_ids[side]),
                         "area": numpy.array(areas[side]),

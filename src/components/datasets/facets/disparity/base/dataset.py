@@ -66,7 +66,7 @@ def make_disparity(objdet_data, metadata, no_value):
         For other areas, set to no_value.
     """
     disparity = np.full((metadata["h"], metadata["w"]), no_value, dtype="float32")
-    for bbox in objdet_data["bboxes"]:
+    for bbox in objdet_data.get("bboxes", []):
         oneInstanceMask = np.zeros_like(disparity, dtype="uint8")
         rectangle = np.array(
             [[bbox[0], bbox[1]], [bbox[0], bbox[3]], [bbox[2], bbox[3]], [bbox[2], bbox[1]]], dtype="int"
