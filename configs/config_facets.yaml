@@ -114,6 +114,7 @@ MODEL:
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
+        freeze_leftobjdet: True
         min_bbox_size: 5
         # detection
         num_classes: 4
@@ -121,7 +122,7 @@ MODEL:
         feat_channels: 256
         num_stacked_convs: 2
         num_topk_candidates: 30
-        bbox_expand_factor: 1.6
+        bbox_expand_factor: 1.0
         strides: [8, 16, 32]
         norm_cfg:
           type: BN
@@ -147,14 +148,15 @@ MODEL:
         facet_pred_cfg:
           is_enable: True
           PARAMS:
+            enlarge_roi_factor: 2.0
             facet_feat_size: 14
             facet_in_channels: 3
             facet_feat_channels: 512
-            is_train_facet: False
+            is_train_facet: True
         # inference params
-        lconfidence_threshold: 0.010
+        lconfidence_threshold: 0.15
         rscore_threshold: 0.9
-        final_iou_threshold: 0.2
+        final_iou_threshold: 0.05
     losses_cfg:
       objdet_loss_cfg:
         NAME: ObjdetLoss

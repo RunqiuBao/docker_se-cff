@@ -8,6 +8,7 @@ import math
 import numpy
 import time
 import copy
+import torch.profiler
 
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
 from mmdet.models.task_modules.samplers import PseudoSampler
@@ -48,6 +49,13 @@ class Cylinder5DDetectionHead(nn.Module):
 
         self._init_layers()
         self._init_weights()
+
+        if self._config['freeze_leftobjdet']:
+            freeze_module_grads(self._multi_level_cls_convs)
+            freeze_module_grads(self._multi_level_reg_convs)
+            freeze_module_grads(self._multi_level_conv_cls)
+            freeze_module_grads(self._multi_level_conv_reg)
+            freeze_module_grads(self._multi_level_conv_obj)
 
         if (
             self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']
@@ -114,10 +122,10 @@ class Cylinder5DDetectionHead(nn.Module):
                                          'reduction': 'sum',
                                          'loss_weight': 1.0})
         # Need to consider keypts in loss_bbox as well.
-        if self._config['keypt_pred_cfg']['is_enable']:
+        if self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']:
             self.loss_keypt1 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
             self.loss_keypt2 = torch.nn.SmoothL1Loss(reduction='mean') #MODELS.build({'type': 'CrossEntropyLoss', 'use_mask': True, 'loss_weight': 1.0})
-        elif self._config['facet_pred_cfg']['is_enable']:
+        elif self._config['facet_pred_cfg']['is_enable'] and self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
             self.loss_facet = torch.nn.SmoothL1Loss(reduction='mean')
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
@@ -145,7 +153,7 @@ class Cylinder5DDetectionHead(nn.Module):
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
-        if self._config['keypt_pred_cfg']['is_enable']:
+        if self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']:
             self.keypt1_predictor = self._build_featmap_convs(
                 in_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'],
                 feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
@@ -156,7 +164,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
                 num_classes=self._config["num_classes"],
             )
-        elif self._config['facet_pred_cfg']['is_enable']:
+        elif self._config['facet_pred_cfg']['is_enable'] and self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
             self.facet_predictor = self._build_featmap_convs(
                 in_channels=self._config['facet_pred_cfg']['PARAMS']['facet_in_channels'],
                 feat_channels=self._config['facet_pred_cfg']['PARAMS']['facet_feat_channels'],
@@ -374,10 +382,12 @@ class Cylinder5DDetectionHead(nn.Module):
             cls_scores.append(cls_scores_one)
             bboxes.append(bboxes_one)
             objectnesses.append(objectnesses_one)
-        print("time sub1: {}".format(time.time() - starttime))
-        torch.cuda.synchronize()
+            
+        # print("time sub1: {}".format(time.time() - starttime))
+        # torch.cuda.synchronize()
 
         if gt_labels is not None:
+            starttime = time.time()
             (
                 loss_dict_bboxdet,
                 batch_selected_boxes,
@@ -390,24 +400,26 @@ class Cylinder5DDetectionHead(nn.Module):
                 gt_labels,
                 batch_img_metas
             )
+            # print("time sub1.5: {}".format(time.time() - starttime))
             torch.cuda.synchronize()
 
-            # # # ======== For debug left side ========
-            # num_imgs = disparity_prior.shape[0]
-            # for indexImg in range(num_imgs):
-            #     batch_positive_detections.append({
-            #         'bboxes': batch_selected_boxes[indexImg],
-            #         'classes': batch_selected_classes[indexImg],
-            #         'confidences': batch_selected_confidences[indexImg]
-            #     })
-            # # # ======== For debug left side ========
+            if not self._config["freeze_leftobjdet"]:
+                # # ======== For debug left side ========
+                num_imgs = disparity_prior.shape[0]
+                for indexImg in range(num_imgs):
+                    batch_positive_detections.append({
+                        'bboxes': batch_selected_boxes[indexImg],
+                        'classes': batch_selected_classes[indexImg],
+                        'confidences': batch_selected_confidences[indexImg]
+                    })
+                # # ======== For debug left side ========
 
             if loss_dict_bboxdet is not None:
                 loss_dict_final['loss_cls'] = loss_dict_bboxdet['loss_cls']
                 loss_dict_final['loss_bbox'] = loss_dict_bboxdet['loss_bbox']
                 loss_dict_final['loss_obj'] = loss_dict_bboxdet['loss_obj']
 
-        if True:
+        if self._config["freeze_leftobjdet"]:
             # select top candidates for stereo bbox regression.
             starttime = time.time()
             preds_items_multilevels_detachcopy = DetachCopyNested([cls_scores, bboxes, objectnesses])
@@ -416,8 +428,8 @@ class Cylinder5DDetectionHead(nn.Module):
                 bboxes_selected,  # shape is [B, 100, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
                 objectness_selected,  # Note: shape is [B, 100,].
                 priors_selected  # shape [B, 100, 4]
-            ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)   
-            print("time sub2: {}".format(time.time() - starttime))     
+            ) = self.SelectTopkCandidates(*preds_items_multilevels_detachcopy, img_metas=batch_img_metas)
+            # print("time sub2: {}".format(time.time() - starttime))
 
             # return shape [B, 100, 6]
             starttime = time.time()
@@ -428,37 +440,38 @@ class Cylinder5DDetectionHead(nn.Module):
                 batch_img_metas,
                 self._config['bbox_expand_factor']
             )
-            print("time sub3: {}".format(time.time() - starttime))
-            torch.cuda.synchronize()
+            # print("time sub3: {}".format(time.time() - starttime))
+            # torch.cuda.synchronize()
 
             starttime = time.time()
             keypt1_pred = keypt2_pred = facet_pred = None
             if self.keypt1_predictor is not None:
                 keypt1_pred = self.forward_featuremap_det(
                     sharp_left_feat,
-                    bboxes_selected.detach(),
+                    bboxes_selected.clone().detach(),
                     self.keypt1_predictor,
                     feature_id='1'
                 )
                 keypt2_pred = self.forward_featuremap_det(
                     sharp_left_feat,
-                    bboxes_selected.detach(),
+                    bboxes_selected.clone().detach(),
                     self.keypt2_predictor,
                     feature_id='2',
                 )
             elif self.facet_predictor is not None:
                 facet_pred = self.forward_featuremap_det(
                     sharp_left_feat,
-                    bboxes_selected.detach(),
+                    bboxes_selected.detach().clone(),
                     self.facet_predictor,
                     feature_id="facet"
-                    
                 )
-            print("time sub4: {}".format(time.time() - starttime))
             torch.cuda.synchronize()
-
+            # if not self.training:                
+                # print("time sub4: {}".format(time.time() - starttime))
+            
             if gt_labels is not None:
                 # get loss path
+                starttime = time.time()
                 loss_dict_stereo, pos_masks, sbboxes = self.loss_by_stereobboxdet(
                     priors_selected,
                     cls_scores_selected,
@@ -472,13 +485,15 @@ class Cylinder5DDetectionHead(nn.Module):
                     gt_labels,
                     batch_img_metas
                 )
-                torch.cuda.synchronize()
+                # print("time sub4.5: {}".format(time.time() - starttime))
+                # torch.cuda.synchronize()
                 loss_dict_final.update(loss_dict_stereo)
-                
+
                 num_imgs = disparity_prior.shape[0]
                 pos_masks = pos_masks.reshape(num_imgs, -1)
                 # prepare prediction results for visz.
                 if pos_masks.sum() > 0:
+                    # starttime = time.time()
                     for indexImg in range(num_imgs):
                         classes = torch.argmax(cls_scores_selected[indexImg][pos_masks[indexImg]].detach(), dim=-1)
                         batch_positive_detections.append({
@@ -501,8 +516,11 @@ class Cylinder5DDetectionHead(nn.Module):
                         if facet_pred is not None:
                             featmap_size = facet_pred.shape[-1]
                             facets = torch.gather(facet_pred[indexImg][pos_masks[indexImg]].detach(), 1, classes.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, featmap_size, featmap_size)).squeeze()
-                            batch_positive_detections[-1]['facets'] = facets.detach()        
+                            batch_positive_detections[-1]['facets'] = facets.detach()
+                    # print("time sub5: {}".format(time.time() - starttime))
+
                 # clean non-active losses.
+                # starttime = time.time()
                 active_losses = loss_dict_final.keys()
                 if self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']:
                     active_losses = ["loss_keypt1", "loss_keypt2"]
@@ -511,6 +529,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 for key, value in loss_dict_final.items():
                     if key not in active_losses:
                         loss_dict_final[key] *= 0
+                # print("time sub5.5: {}".format(time.time() - starttime))                
             else:
                 # select stereo right bboxes
                 num_imgs, topk = bboxes_selected.shape[:2]
@@ -521,12 +540,14 @@ class Cylinder5DDetectionHead(nn.Module):
                     topk
                 )
                 # predict feature map within the right bboxes
-                facet_pred_right = self.forward_featuremap_det(
-                    sharp_right_feat,
-                    refined_right_bboxes_pred.detach(),
-                    self.facet_predictor,
-                    feature_id="facet"
-                )
+                facet_pred_right = None
+                if self.facet_predictor is not None:
+                    facet_pred_right = self.forward_featuremap_det(
+                        sharp_right_feat,
+                        refined_right_bboxes_pred.detach().clone(),
+                        self.facet_predictor,
+                        feature_id="facet"
+                    )
                 # inference code
                 starttime = time.time()
                 batch_positive_detections = self.FormatPredictionResult(
@@ -541,10 +562,10 @@ class Cylinder5DDetectionHead(nn.Module):
                     facet_pred_right,
                     batch_img_metas
                 )
-                print("time sub5: {}".format(time.time() - starttime))
+                # print("time sub5: {}".format(time.time() - starttime))
         
         # # Note: turn on this if stuck happens.
-        # torch.distributed.barrier()
+        torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
     
     @torch.no_grad()
@@ -570,6 +591,11 @@ class Cylinder5DDetectionHead(nn.Module):
                 objectness_one,
                 img_metas=img_metas
             )
+            if self._config['freeze_leftobjdet']:
+                # Note: clamp tensor will only make the clampped pixels not differential.
+                # Note: prevent stereo detection stuck
+                bboxes_one[:, [0, 2]] = bboxes_one[:, [0, 2]].clamp(min=0, max=img_metas["w"])
+                bboxes_one[:, [1, 3]] = bboxes_one[:, [1, 3]].clamp(min=0, max=img_metas["h"])            
             bboxes_selected.append(bboxes_one.unsqueeze(0))
             cls_scores_selected.append(cls_scores_one.unsqueeze(0))
             objectness_selected.append(objectness_one.squeeze(-1).unsqueeze(0))
@@ -745,7 +771,7 @@ class Cylinder5DDetectionHead(nn.Module):
             sbboxes_pred: shape [B, 100, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
             refined_right_bboxes: shape [B, 100, ker_h * ker_w, 4]. Corresponding refined right bboxes.
             right_scores_refine: shape [B, 100, ker_h * ker_w, 1]. Corresponding scores.
-        """
+        """        
         if self.logger is not None:
             right_feat_sample = right_feat[0][0, 0, :, :].detach().cpu()
             right_feat_sample = right_feat_sample - right_feat_sample.min()
@@ -764,7 +790,7 @@ class Cylinder5DDetectionHead(nn.Module):
         # _bboxes_pred[..., 3] += dhboxes / 2
 
         batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(_bboxes_pred.device)
-        # print("time sub sub1: {}".format(time.time() - starttime))
+        # print("----- time sub sub1: {}".format(time.time() - starttime))
 
         starttime = time.time()
         # extract right bbox roi feature
@@ -777,26 +803,29 @@ class Cylinder5DDetectionHead(nn.Module):
         _bboxes_pred[..., 0] -= bbox_disps  # warp to more left side.
         _bboxes_pred[..., 2] -= bbox_disps
         rois_right = _bboxes_pred.reshape(-1, 4)
-        rois_right = torch.cat((batch_number, rois_right), dim=1)
+        rois_right = torch.cat((batch_number, rois_right), dim=1)        
         right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.        
         right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
         right_scores_refine = self.right_bbox_refiner_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
         logits, ker_h, ker_w = right_boxes_refine.shape[-3:]
-        if self.logger is not None:
-            roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
-            roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
-            roi_feat_sample /= roi_feat_sample.max()
-            self.logger.add_image("roi_feat_sample", roi_feat_sample)
-        # print("time sub sub2: {}".format(time.time() - starttime))
+        # print("----- time sub sub2: {}".format(time.time() - starttime))
+
+        # starttime = time.time()
+        # if self.logger is not None:
+        #     roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
+        #     roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
+        #     roi_feat_sample /= roi_feat_sample.max()
+        #     self.logger.add_image("roi_feat_sample", roi_feat_sample)
+        # print("----- time sub sub2.5: {}".format(time.time() - starttime))
 
         starttime = time.time()
         batch_size = bboxes_pred.shape[0]
         x_tl_r = _bboxes_pred[..., 0].view(batch_size, -1).unsqueeze(-1)
         x_br_r = _bboxes_pred[..., 2].view(batch_size, -1).unsqueeze(-1)
-        sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1)
+        sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1).contiguous()
         right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
         refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
-        # print("time sub sub3: {}".format(time.time() - starttime))
+        # print("----- time sub sub3: {}".format(time.time() - starttime))        
 
         return sbboxes_pred, refined_right_bboxes, right_scores_refine.view(batch_size, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2)
 
@@ -819,7 +848,17 @@ class Cylinder5DDetectionHead(nn.Module):
             keypts_pred: (b, 100, num_classes, 2) tensor. Predicted keypoint bias (normalized) to the bbox top left corner.
         """
         batch_number = torch.arange(bbox_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(bbox_pred.device)
-        rois = bbox_pred.reshape(-1, 4)
+        with torch.no_grad():
+            rois = bbox_pred.reshape(-1, 4)
+            enlarge_factor = self._config["facet_pred_cfg"]["PARAMS"]["enlarge_roi_factor"]
+            rois_w = (rois[:, 2] - rois[:, 0]) * enlarge_factor
+            rois_h = (rois[:, 3] - rois[:, 1]) * enlarge_factor
+            rois_centerX = (rois[:, 2] + rois[:, 0]) / 2
+            rois_centerY = (rois[:, 3] + rois[:, 1]) / 2
+            rois[:, 0] = rois_centerX - rois_w / 2
+            rois[:, 1] = rois_centerY - rois_h / 2
+            rois[:, 2] = rois_centerX + rois_w / 2
+            rois[:, 3] = rois_centerY + rois_h / 2
         bnum_rois = torch.cat([batch_number, rois], dim=1)
         roi_feats = self.bbox_roi_extractor_forfeature(left_feat, bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
         output_feat = featuremap_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
@@ -1007,7 +1046,8 @@ class Cylinder5DDetectionHead(nn.Module):
                         stereo_confidence_selected.unsqueeze(-1)
                     ], dim=-1),
                     "facets": facet_pred_classified[indexImg][maskGood][keep_idxs][r_keep_idxs],
-                    "facets_right": facet_pred_right_classified[indexImg][maskGood][keep_idxs][r_keep_idxs]
+                    "facets_right": facet_pred_right_classified[indexImg][maskGood][keep_idxs][r_keep_idxs],
+                    "enlarge_facet_factor": self._config["facet_pred_cfg"]["PARAMS"]["enlarge_roi_factor"]
                 }
                 detectionsBatch.append(detection)
             else:
@@ -1069,9 +1109,9 @@ class Cylinder5DDetectionHead(nn.Module):
         Returns:
             loss_dict: ...
             pos_masks: positive mask for the batch data.
-        """        
+        """
+        starttime = time.time()
         num_imgs = priors.shape[0]
-
         pos_masks, cls_targets, obj_targets, bbox_targets, indices_bbox_targets, num_pos_per_img = [], [], [], [], [], []
         for indexInBatch in range(len(batch_gt_labels)):
             (
@@ -1094,7 +1134,8 @@ class Cylinder5DDetectionHead(nn.Module):
             obj_targets.append(obj_target)
             bbox_targets.append(bbox_target)
             indices_bbox_targets.append(indices_bbox_target)
-            num_pos_per_img.append(num_pos_one)            
+            num_pos_per_img.append(num_pos_one)
+        # print("----- time sub sub loss stereo: {}".format(time.time() - starttime))
 
         num_pos = torch.tensor(
             sum(num_pos_per_img),
@@ -1107,8 +1148,9 @@ class Cylinder5DDetectionHead(nn.Module):
         obj_targets = torch.cat(obj_targets, 0)
         bbox_targets = torch.cat(bbox_targets, 0)
         indices_bbox_targets = torch.cat(indices_bbox_targets, 0)
-
+        
         if num_pos > 0:
+            starttime = time.time()
             rbboxes_targets = torch.cat([
                 bbox_targets[:, 4].unsqueeze(-1),
                 bbox_targets[:, 1].unsqueeze(-1),
@@ -1149,14 +1191,15 @@ class Cylinder5DDetectionHead(nn.Module):
             selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
             bboxes[pos_masks] = selected_sbboxes
             bboxes = bboxes.view(batch_size, num_priors, 6)
+            # print("----- time sub sub2 loss stereo: {}".format(time.time() - starttime))
 
+            starttime = time.time()
             if self.loss_keypt1 is not None:
                 assert self.loss_keypt2 is not None
                 loss_keypts = self._compute_keypt_loss(cls_scores, keypt1_pred, keypt2_pred, indices_bbox_targets, num_pos_per_img, selected_sbboxes, pos_masks, batch_gt_labels, batch_img_metas)
             elif self.loss_facet is not None:                      
                 loss_facet = self._compute_featmap_loss(cls_scores, facet_pred, self.loss_facet, indices_bbox_targets, num_pos_per_img, selected_sbboxes, pos_masks, "leftmasks", batch_gt_labels, batch_img_metas)
-            else:
-                raise NotImplementedError            
+            # print("----- time sub sub3 loss stereo: {}".format(time.time() - starttime))
         else:
             # if no gt, then not update
             # see https://github.com/open-mmlab/mmdetection/issues/7298
@@ -1221,8 +1264,17 @@ class Cylinder5DDetectionHead(nn.Module):
         for indexImg in range(num_batch):
             # collect targets in each img.
             indices_bbox_targets_oneimg = indices_bbox_targets[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :].to(torch.int).squeeze(-1)
-            pos_bboxes_pred_oneimg = selected_sbboxes[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :4].detach()
-            
+            with torch.no_grad():
+                pos_bboxes_pred_oneimg = selected_sbboxes[sum(num_pos_per_img[:indexImg]):sum(num_pos_per_img[:indexImg + 1]), :4].detach()
+                enlarge_factor = self._config["facet_pred_cfg"]["PARAMS"]["enlarge_roi_factor"]
+                rois_w = (pos_bboxes_pred_oneimg[:, 2] - pos_bboxes_pred_oneimg[:, 0]) * enlarge_factor
+                rois_h = (pos_bboxes_pred_oneimg[:, 3] - pos_bboxes_pred_oneimg[:, 1]) * enlarge_factor
+                rois_centerX = (pos_bboxes_pred_oneimg[:, 2] + pos_bboxes_pred_oneimg[:, 0]) / 2
+                rois_centerY = (pos_bboxes_pred_oneimg[:, 3] + pos_bboxes_pred_oneimg[:, 1]) / 2
+                pos_bboxes_pred_oneimg[:, 0] = rois_centerX - rois_w / 2
+                pos_bboxes_pred_oneimg[:, 1] = rois_centerY - rois_h / 2
+                pos_bboxes_pred_oneimg[:, 2] = rois_centerX + rois_w / 2
+                pos_bboxes_pred_oneimg[:, 3] = rois_centerY + rois_h / 2
             indices_gt_isfacet = torch.where(batch_gt_labels[indexImg]['labels'][indices_bbox_targets_oneimg] == 1.0)
             list_indices_gt_isfacet.append(indices_gt_isfacet)  # Note: record to select predictions as well.
             pos_bboxes_preds_list.append(pos_bboxes_pred_oneimg[indices_gt_isfacet])            
@@ -1235,7 +1287,7 @@ class Cylinder5DDetectionHead(nn.Module):
             #     from IPython import embed; print('pjiojiojioj!'); embed()
 
             gt_list.append(BitmapMasks(torch.stack(featmasks_oneimg, dim=0).cpu().numpy(), height=batch_img_metas['h'], width=batch_img_metas['w']))                          
-        
+
         mask_targets = mask_target(
             pos_bboxes_preds_list,
             pos_assigned_gt_indices_list,
@@ -1470,6 +1522,7 @@ class Cylinder5DDetectionHead(nn.Module):
         # but use center priors without offset to regress bboxes
         offset_priors = torch.cat([priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
         scores = cls_scores.sigmoid() * objectness.unsqueeze(1).sigmoid()
+
         pred_instances = InstanceData(
             bboxes=bboxes[:, :4],
             scores=scores.sqrt_(),
@@ -1480,18 +1533,35 @@ class Cylinder5DDetectionHead(nn.Module):
             labels=gt_labels['labels'],
             sbboxes=gt_labels['bboxes'][:, :]
         )
+
+        starttime = time.time()
         # use SimOTA dynamic assigner, same as yolox
         assign_result = self.assigner.assign(
             pred_instances=pred_instances,
             gt_instances=gt_instances
         )
+        # with torch.profiler.profile(
+        #     activities=[
+        #         torch.profiler.ProfilerActivity.CPU,
+        #         torch.profiler.ProfilerActivity.CUDA],
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log')
+        # ) as prof:
+        #     assign_result = self.assigner.assign(
+        #         pred_instances=pred_instances,
+        #         gt_instances=gt_instances
+        #     )
+        # if not self.training:
+        #     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
         # use a pesudo sampler to get all results. just for using mmdet util's api.
+        starttime = time.time()
         sampling_result = self.sampler.sample(
             assign_result,
             pred_instances,
             gt_instances
         )
+        # print("----- pesudo sampler: {}".format(time.time() - starttime))
+
         pos_inds = sampling_result.pos_inds
         num_pos_per_img = pos_inds.size(0)
 

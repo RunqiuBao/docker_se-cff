@@ -5,9 +5,9 @@ set -x
 cuda_idx='0,1,2,3'
 
 config_path=/root/code/docker_pytorch_trainnn/configs/config_facets.yaml
-data_root=/root/data/office_in_RACE/object_detection/
+data_root=/root/data/planer_seovs/object_detection/
 save_root=/root/code/docker_pytorch_trainnn/experiments/facets/ 
 num_workers=4
 NUM_PROC=1
 
-CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} --resume_cpt /root/code/docker_pytorch_trainnn/weights_objdet_office/best.pth --is_save_onnx --only_resume_weight #--only_test # --only_resume_weight_from concentration_net
+CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} --resume_cpt /root/code/docker_pytorch_trainnn/weights_objdet_facet/best.pth --only_resume_weight #--only_test  #--is_save_onnx # --only_resume_weight_from concentration_net

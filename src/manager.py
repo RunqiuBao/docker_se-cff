@@ -77,7 +77,7 @@ class DLManager:
                 self.scheduler['scheduler'].load_state_dict(checkpoint["scheduler"])
                 self.args.start_epoch = checkpoint["epoch"] + 1
                 self.current_epoch = self.args.start_epoch
-                print("resumed old training states.")
+                print("resumed old training states.")                                
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME
@@ -126,6 +126,7 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
+            
             train_log_dict = self.method.train(
                 model=self.model,
                 data_loader=train_loader,

@@ -89,7 +89,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     x_center = left_targets[indexTarget]["bbox"][0] + left_targets[indexTarget]["bbox"][2] / 2
                     y_center = left_targets[indexTarget]["bbox"][1] + left_targets[indexTarget]["bbox"][3] / 2
                     x_center_r = right_targets[indexTarget]["bbox"][0] + right_targets[indexTarget]["bbox"][2] / 2
-                    enlarge_factor = 1.2
+                    enlarge_factor = 1.0
                     w_l = left_targets[indexTarget]["bbox"][2] * enlarge_factor
                     h_l = left_targets[indexTarget]["bbox"][3] * enlarge_factor
                     w_r = right_targets[indexTarget]["bbox"][2] * enlarge_factor

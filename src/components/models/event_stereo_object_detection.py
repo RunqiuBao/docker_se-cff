@@ -173,27 +173,27 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                         rightimage_views[0]
                     )
 
-                    gt_objects_preds = []
-                    for gt_objects in gt_labels["objdet"]:
-                        gt_objects_preds.append({
-                            "sbboxes": gt_objects["bboxes"][:, :6].cpu(),
-                            "classes": gt_objects["labels"].cpu(),
-                            "confidences": torch.ones((gt_objects["labels"].shape[0],), dtype=gt_objects["labels"].dtype, device='cpu')
-                        })
-                    leftimage_withGT_views, rightimage_withGT_views = multi_apply(
-                        RenderImageWithBboxesAndKeypts,
-                        left_event_sharp.detach().squeeze(1).cpu().numpy(),
-                        right_event_sharp.detach().squeeze(1).cpu().numpy(),
-                        gt_objects_preds
-                    )
-                    self.logger.add_image(
-                        "left sharp with GT bboxes",
-                        leftimage_withGT_views[0]
-                    )
-                    self.logger.add_image(
-                        "right sharp with GT bboxes",
-                        rightimage_withGT_views[0]
-                    )
+                    # gt_objects_preds = []
+                    # for gt_objects in gt_labels["objdet"]:
+                    #     gt_objects_preds.append({
+                    #         "sbboxes": gt_objects["bboxes"][:, :6].cpu(),
+                    #         "classes": gt_objects["labels"].cpu(),
+                    #         "confidences": torch.ones((gt_objects["labels"].shape[0],), dtype=gt_objects["labels"].dtype, device='cpu')
+                    #     })
+                    # leftimage_withGT_views, rightimage_withGT_views = multi_apply(
+                    #     RenderImageWithBboxesAndKeypts,
+                    #     left_event_sharp.detach().squeeze(1).cpu().numpy(),
+                    #     right_event_sharp.detach().squeeze(1).cpu().numpy(),
+                    #     gt_objects_preds
+                    # )
+                    # self.logger.add_image(
+                    #     "left sharp with GT bboxes",
+                    #     leftimage_withGT_views[0]
+                    # )
+                    # self.logger.add_image(
+                    #     "right sharp with GT bboxes",
+                    #     rightimage_withGT_views[0]
+                    # )
                 else:
                     leftimage_views = []
                     num_imgs = left_event.shape[0]
@@ -218,13 +218,14 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             #     preds_final['objdet'] = [pred.detach().cpu() for pred in object_preds]
             elif isinstance(object_preds[0], dict):
                 preds_final['objdet_facets'] = [detection.pop('facets').detach().cpu() for detection in object_preds]
-                preds_final['objdet_facets_right'] = [detection.pop('facets_right').detach().cpu() for detection in object_preds]                
+                preds_final['objdet_facets_right'] = [detection.pop('facets_right').detach().cpu() for detection in object_preds]
+                preds_final['enlarge_facet_factor'] = [detection.pop('enlarge_facet_factor') for detection in object_preds]
                 preds_final['objdet'] = [detection.pop('detection').detach().cpu() for detection in object_preds]
-            preds_final['disparity'] = pred_disparity_pyramid[-1].detach().cpu()
             preds_final['concentrate'] = {
                 'left': left_event_sharp.detach().cpu(),
                 'right': right_event_sharp.detach().cpu()
             }
+        preds_final['disparity'] = pred_disparity_pyramid[-1].detach().cpu()
 
         torch.cuda.synchronize()
 
@@ -251,7 +252,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                     "disparity gt",
                     disparity_gt
                 )
-        
         return preds_final, loss_final
 
     def get_params_group(self, learning_rate, keypt_lr=None):

@@ -101,10 +101,10 @@ def train(
 
         log_dict["Loss"].update(loss.item(), data_loader.batch_size)
         if hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp:
-            log_dict["EPE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["1PE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["2PE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["RMSE"].update(pred['disparity'], batch_data["disparity"], mask)
+            log_dict["EPE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["1PE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["2PE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["RMSE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
         else:
             for key, value in lossDict.items():
                 log_dict[key].update(value, data_loader.batch_size)
@@ -166,10 +166,10 @@ def valid(model, data_loader, ema=None, is_distributed=False, world_size=1, logg
         log_dict["BestIndex"].update(loss.item(), data_loader.batch_size)
         log_dict["Loss"].update(loss.item(), data_loader.batch_size)
         if hasattr(model, 'is_freeze_disp') and not model.is_freeze_disp:
-            log_dict["EPE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["1PE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["2PE"].update(pred['disparity'], batch_data["disparity"], mask)
-            log_dict["RMSE"].update(pred['disparity'], batch_data["disparity"], mask)
+            log_dict["EPE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["1PE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["2PE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["RMSE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
         else:
             for key, value in lossDict.items():
                 log_dict[key].update(value, data_loader.batch_size)
@@ -328,7 +328,6 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     os.makedirs(path_concentrate_left_folder, exist_ok=True)
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
     imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
-    
     for indexInBatch, detection in enumerate(pred['objdet']):
         left_bboxes = detection[:, 1:5].cpu().numpy()
         left_bboxes[:, [0, 2]] *= imgWidth
@@ -367,7 +366,10 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
                 classes,
                 confidences,
                 stereo_confidences=stereo_confidences,
-                facets=pred["objdet_facets"][indexInBatch])
+                facets=pred["objdet_facets"][indexInBatch],
+                facets_right=pred["objdet_facets_right"][indexInBatch],
+                enlarge_facet_factor=pred["enlarge_facet_factor"][indexInBatch],
+                indexBatch=indexBatch)
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)
