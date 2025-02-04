@@ -44,9 +44,12 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         return len(self._cocoDataset)
 
     def __getitem__(self, indexFrame):
-        labels_data = self._cocoDataset[indexFrame][1]
-        # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))
-        labels_data = self.FormatLabels(labels_data, indexFrame)
+        try:
+            labels_data = self._cocoDataset[indexFrame][1]
+            # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))
+            labels_data = self.FormatLabels(labels_data, indexFrame)
+        except:
+            return None
 
         return labels_data
 

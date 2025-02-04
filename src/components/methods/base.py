@@ -328,6 +328,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     os.makedirs(path_concentrate_left_folder, exist_ok=True)
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
     imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
+    facets_info_batch = []
     for indexInBatch, detection in enumerate(pred['objdet']):
         left_bboxes = detection[:, 1:5].cpu().numpy()
         left_bboxes[:, [0, 2]] *= imgWidth
@@ -359,6 +360,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
                 stereo_confidences=stereo_confidences)
         elif "objdet_facets" in pred:
             # draw facet masks on the result
+            facets_info = []
             visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
                 pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
                 pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
@@ -369,7 +371,9 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
                 facets=pred["objdet_facets"][indexInBatch],
                 facets_right=pred["objdet_facets_right"][indexInBatch],
                 enlarge_facet_factor=pred["enlarge_facet_factor"][indexInBatch],
-                indexBatch=indexBatch)
+                indexBatch=indexBatch,
+                facets_info=facets_info)
+            facets_info_batch.append(facets_info)
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)
@@ -381,6 +385,31 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
         cv2.imwrite(os.path.join(path_concentrate_left_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), left_concentrated)
         cv2.imwrite(os.path.join(path_concentrate_right_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), right_concentrated)
+
+    # save facets_info in txt, frame by frame.
+    if len(facets_info_batch) > 0:
+        path_facets_results_folder = os.path.join(save_root, "inference", "facets", sequence_name)
+        path_tsfile = os.path.join(save_root, "inference", "facets", sequence_name, "timestamps.txt")
+        os.makedirs(path_facets_results_folder, exist_ok=True)
+        ts_openmode = "a" if os.path.isfile(path_tsfile) else "w"
+        with open(path_tsfile, ts_openmode) as tsfile:
+            tsfile.write(str(timestamp) + "\n")
+        facetresults_openmode = "w"
+        batch_size = len(facets_info_batch)
+        for indexInBatch, facets_info in enumerate(facets_info_batch):
+            with open(os.path.join(path_facets_results_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".txt"), facetresults_openmode) as facetresults_file:
+                for indexDet in range(len(facets_info)):
+                    if len(facets_info[indexDet])  == 0:
+                        continue
+                    corners_left = facets_info[indexDet]["corners_left"].squeeze()
+                    index_topleft_corner = numpy.argsort(corners_left[:, 1])[:2][numpy.argmin(corners_left[numpy.argsort(corners_left[:, 1])[:2]][:, 0])]
+                    corners_left = numpy.concatenate([corners_left[index_topleft_corner:, :], corners_left[:index_topleft_corner, :]], axis=0)
+                    corners_right = facets_info[indexDet]["corners_right"].squeeze()
+                    index_topleft_corner = numpy.argsort(corners_right[:, 1])[:2][numpy.argmin(corners_right[numpy.argsort(corners_right[:, 1])[:2]][:, 0])]
+                    corners_right = numpy.concatenate([corners_right[index_topleft_corner:, :], corners_right[:index_topleft_corner, :]], axis=0)
+                    confidence = facets_info[indexDet]["confidence"]
+                    oneDet = str(facets_info[indexDet]["classindex"]) + " " + numpy.array2string(corners_left.astype('float').ravel(order='C'), separator=" ", max_line_width=numpy.inf, formatter={'float_kind':lambda x: "%.1f" % x})[1:-1] + " " + numpy.array2string(corners_right.astype("float").ravel(order='C'), separator=" ", max_line_width=numpy.inf, formatter={'float_kind':lambda x: "%.1f" % x})[1:-1] + " " + f"{confidence:.4f}"
+                    facetresults_file.write(oneDet + "\n")
     return
 
 

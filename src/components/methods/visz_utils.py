@@ -6,6 +6,119 @@ import cv2
 import torch
 from torch import Tensor
 import numpy
+import sympy
+
+
+def appx_obb(segMap):
+    """
+    Fit a oriented bounding box
+    """
+    featContours = cv2.findContours(segMap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    largest_area = 0
+    for contour in featContours:
+        area = cv2.contourArea(contour)
+        if area > largest_area:
+            featContour = contour
+            largest_area = area
+    if largest_area == 0:
+        print("Error finding contours. featContours: {}".format(featContours))
+        return None
+    # Compute the minimum area rectangle
+    rect = cv2.minAreaRect(featContour)  # rect contains (center, (width, height), angle)
+    box = cv2.boxPoints(rect)  # Get the 4 corner points of the rectangle
+    box = numpy.int0(box)  # Convert to integer coordinates
+    # convert to contour format
+    box = numpy.array([[pp] for pp in box.tolist()])
+    return box
+
+
+def appx_polygon(segMap):
+    """
+    Fit a polygon around a mask area
+    """
+    featContours = cv2.findContours(segMap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    largest_area = 0
+    for contour in featContours:
+        area = cv2.contourArea(contour)
+        if area > largest_area:
+            featContour = contour
+            largest_area = area
+    if largest_area == 0:
+        print("Error finding contours. featContours: {}".format(featContours))
+        return None
+    # print("arcLength: {}".format(cv2.arcLength(featContour, True)))
+    epsilon = 0.05 * cv2.arcLength(featContour, True)
+    approx = cv2.approxPolyDP(featContour, epsilon, True)
+    # print("approx: {}".format(approx))
+    return approx
+
+
+def appx_best_fit_ngon(mask_cv2_gray, n: int = 4) -> list[(int, int)]:
+    """
+    Fit a quadrilateral around a mask area
+    """
+    # convex hull of the input mask
+    contours, _ = cv2.findContours(
+        mask_cv2_gray, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    )
+    hull = cv2.convexHull(contours[0])
+    hull = numpy.array(hull).reshape((len(hull), 2))
+
+    # to sympy land
+    hull = [sympy.Point(*pt) for pt in hull]
+
+    # run until we cut down to n vertices
+    while len(hull) > n:
+        best_candidate = None
+
+        # for all edges in hull ( <edge_idx_1>, <edge_idx_2> ) ->
+        for edge_idx_1 in range(len(hull)):
+            edge_idx_2 = (edge_idx_1 + 1) % len(hull)
+
+            adj_idx_1 = (edge_idx_1 - 1) % len(hull)
+            adj_idx_2 = (edge_idx_1 + 2) % len(hull)
+
+            edge_pt_1 = sympy.Point(*hull[edge_idx_1])
+            edge_pt_2 = sympy.Point(*hull[edge_idx_2])
+            adj_pt_1 = sympy.Point(*hull[adj_idx_1])
+            adj_pt_2 = sympy.Point(*hull[adj_idx_2])
+
+            subpoly = sympy.Polygon(adj_pt_1, edge_pt_1, edge_pt_2, adj_pt_2)
+            angle1 = subpoly.angles[edge_pt_1]
+            angle2 = subpoly.angles[edge_pt_2]
+
+            # we need to first make sure that the sum of the interior angles the edge
+            # makes with the two adjacent edges is more than 180°
+            if sympy.N(angle1 + angle2) <= sympy.pi:
+                continue
+
+            # find the new vertex if we delete this edge
+            adj_edge_1 = sympy.Line(adj_pt_1, edge_pt_1)
+            adj_edge_2 = sympy.Line(edge_pt_2, adj_pt_2)
+            intersect = adj_edge_1.intersection(adj_edge_2)[0]
+
+            # the area of the triangle we'll be adding
+            area = sympy.N(sympy.Triangle(edge_pt_1, intersect, edge_pt_2).area)
+            # should be the lowest
+            if best_candidate and best_candidate[1] < area:
+                continue
+
+            # delete the edge and add the intersection of adjacent edges to the hull
+            better_hull = list(hull)
+            better_hull[edge_idx_1] = intersect
+            del better_hull[edge_idx_2]
+            best_candidate = (better_hull, area)
+
+        if not best_candidate:
+            raise ValueError("Could not find the best fit n-gon!")
+
+        hull = best_candidate[0]
+
+    # back to python land
+    hull = [(int(x), int(y)) for x, y in hull]
+    # convert to cv2 contour format
+    hull = numpy.array([[list(pp)] for pp in hull])
+    return hull
 
 
 def LimitBboxWithInImage(bbox: numpy.ndarray, imageHeight: int, imageWidth: int):
@@ -77,42 +190,34 @@ def draw_corners_on_view(top_left, bottom_right, featmap, viewImg, enlarge_featm
     segMap = draw_featmap_on_view(top_left, bottom_right, featmap, segMap, enlarge_featmap_factor)
     # smoothing
     kernel = numpy.ones((5, 5), dtype="uint8")
-    segMap = cv2.erode(segMap, kernel, iterations = 1)
+    segMap = cv2.erode(segMap, kernel, iterations = 2)
     cv2.imwrite("/root/code/docker_pytorch_trainnn/experiments/facets/inference/det_visz/" + str(indexImg).zfill(6) + "_{}_{}.png".format(indexDet, side), segMap)
-    featContours = cv2.findContours(segMap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-    largest_area = 0
-    for contour in featContours:
-        area = cv2.contourArea(contour)
-        if area > largest_area:
-            featContour = contour
-            largest_area = area
-    if largest_area == 0:
-        print("Error finding contours. featContours: {}".format(featContours))
-        return viewImg
-    print("arcLength: {}".format(cv2.arcLength(featContour, True)))
-    epsilon = 0.01 * cv2.arcLength(featContour, True)
-    approx = cv2.approxPolyDP(featContour, epsilon, True)
-    print("approx: {}".format(approx))
-    # for point in approx:
-    #     cv2.circle(viewImg, (point[0][0], point[0][1]), radius=4, color=(0, 255, 0), thickness=2)
+    # fit a quadrilateral around a mask area
+    featContour = appx_obb(segMap)
+    # featContour = appx_best_fit_ngon(segMap)
+    if featContour is None:
+        return viewImg, None
+    for point in featContour:
+        cv2.circle(viewImg, (point[0][0], point[0][1]), radius=4, color=(255, 0, 255), thickness=-1)
     # if len(approx) == 4:
-    cv2.polylines(viewImg, [featContour], isClosed=True, color=(0, 255, 0), thickness=2)
-    return viewImg
+    # cv2.polylines(viewImg, [featContour], isClosed=True, color=(0, 255, 0), thickness=2)
+    return viewImg, featContour
 
 
 def DrawResultBboxesAndKeyptsOnStereoEventFrame(
-        left_event_sharp,
-        right_event_sharp,
-        sbboxes,
-        classes,
-        confidences,
-        keypts1=None,
-        keypts2=None,
-        facets=None,
-        facets_right=None,
-        enlarge_facet_factor=None,
-        stereo_confidences=None,
-        indexBatch=None
+    left_event_sharp,
+    right_event_sharp,
+    sbboxes,
+    classes,
+    confidences,
+    keypts1=None,
+    keypts2=None,
+    facets=None,
+    facets_right=None,
+    enlarge_facet_factor=None,
+    stereo_confidences=None,
+    indexBatch=None,
+    facets_info = None
 ):
     if keypts1 is not None and keypts1.ndim == 1:
         keypts1 = keypts1.unsqueeze(0)
@@ -154,7 +259,14 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
             # instances_facets = draw_featmap_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor)
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_GRAY2BGR)
-            instances_facets = draw_corners_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor, ii, indexBatch, "left")
+            instances_facets_backup = copy.deepcopy(instances_facets)
+            instances_facets, corners_left = draw_corners_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor, ii, indexBatch, "left")
+            facet_info = {
+                "corners_left": corners_left,
+                "sbbox": bbox,
+                "classindex": classindex,
+                "confidence": confidence + stereo_confidences[ii].item() * 0.5
+            }
 
         top_left = (int(bbox[4]), int(bbox[1]))
         top_right = (int(bbox[5]), int(bbox[1]))
@@ -175,7 +287,51 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_BGR2GRAY)
             # instances_facets_right = draw_featmap_on_view(top_left, bottom_right, facets_right[ii], instances_facets_right, enlarge_facet_factor)
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_GRAY2BGR)
-            instances_facets_right = draw_corners_on_view(top_left, bottom_right, facets[ii], instances_facets_right, enlarge_facet_factor, ii, indexBatch, "right")
+            instances_facets_right_backup = copy.deepcopy(instances_facets_right)
+            instances_facets_right, corners_right = draw_corners_on_view(top_left, bottom_right, facets[ii], instances_facets_right, enlarge_facet_factor, ii, indexBatch, "right")
+            facet_info["corners_right"] = corners_right
+            if facet_info["corners_right"] is None or facet_info["corners_left"] is None:
+                facets_info.append({})
+                continue
+            # # filter bad detections here
+            margin_to_border = 20
+            if ((facet_info["corners_left"][..., 0] < 20).any() or (facet_info["corners_left"][..., 0] > (imageWidth - margin_to_border)).any() or (facet_info["corners_left"][..., 1] < 20).any() or (facet_info["corners_left"][..., 1] > (imageHeight - margin_to_border)).any()
+                or (facet_info["corners_right"][..., 0] < 20).any() or (facet_info["corners_right"][..., 0] > (imageWidth - margin_to_border)).any() or (facet_info["corners_right"][..., 1] < 20).any() or (facet_info["corners_right"][..., 1] > (imageHeight - margin_to_border)).any()
+                or (classindex != 1)):
+                instances_facets = instances_facets_backup
+                instances_facets_right = instances_facets_right_backup
+                facets_info.append({})
+                continue
+            left_oh = numpy.linalg.norm(facet_info["corners_left"][0, :] - facet_info["corners_left"][1, :])
+            left_ow = numpy.linalg.norm(facet_info["corners_left"][2, :] - facet_info["corners_left"][1, :])
+            right_oh = numpy.linalg.norm(facet_info["corners_right"][0, :] - facet_info["corners_right"][1, :])
+            right_ow = numpy.linalg.norm(facet_info["corners_right"][2, :] - facet_info["corners_right"][1, :])
+            error_ratio = 0.1
+            error_ratio_tri = 0.05
+            if (abs(left_oh - right_oh) / left_oh > error_ratio) or (abs(left_ow - right_ow) / left_ow > error_ratio):
+                # stereo too much error, reject
+                instances_facets = instances_facets_backup
+                instances_facets_right = instances_facets_right_backup
+                facets_info.append({})
+                continue
+            # actively adjust
+            if (abs(left_oh - right_oh) / left_oh > error_ratio_tri):
+                # force right side to align with left side
+                h0_middle_right = (facet_info["corners_right"][0, :] + facet_info["corners_right"][1, :]) / 2
+                h1_middle_right = (facet_info["corners_right"][3, :] + facet_info["corners_right"][2, :]) / 2
+                facet_info["corners_right"][0, :] = (facet_info["corners_right"][0, :] - h0_middle_right) * left_oh / right_oh + h0_middle_right
+                facet_info["corners_right"][1, :] = (facet_info["corners_right"][1, :] - h0_middle_right) * left_oh / right_oh + h0_middle_right
+                facet_info["corners_right"][2, :] = (facet_info["corners_right"][2, :] - h1_middle_right) * left_oh / right_oh + h1_middle_right
+                facet_info["corners_right"][3, :] = (facet_info["corners_right"][3, :] - h1_middle_right) * left_oh / right_oh + h1_middle_right
+            if (abs(left_ow - right_ow) / left_ow > error_ratio_tri):
+                w0_middle_right = (facet_info["corners_right"][2, :] + facet_info["corners_right"][1, :]) / 2
+                w1_middle_right = (facet_info["corners_right"][0, :] + facet_info["corners_right"][3, :]) / 2
+                facet_info["corners_right"][1, :] = (facet_info["corners_right"][1, :] - w0_middle_right) * left_ow / right_ow + w0_middle_right
+                facet_info["corners_right"][2, :] = (facet_info["corners_right"][2, :] - w0_middle_right) * left_ow / right_ow + w0_middle_right
+                facet_info["corners_right"][3, :] = (facet_info["corners_right"][3, :] - w1_middle_right) * left_ow / right_ow + w1_middle_right
+                facet_info["corners_right"][0, :] = (facet_info["corners_right"][0, :] - w1_middle_right) * left_ow / right_ow + w1_middle_right
+            facets_info.append(facet_info)
+
     if facets is not None:
         left_event_sharp = cv2.addWeighted(left_event_sharp, 0.5, (255 - instances_facets), 0.5, 0)
     if facets_right is not None:

@@ -565,7 +565,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 # print("time sub5: {}".format(time.time() - starttime))
         
         # # Note: turn on this if stuck happens.
-        torch.distributed.barrier()
+        # torch.distributed.barrier()
         return batch_positive_detections, loss_dict_final
     
     @torch.no_grad()
@@ -1323,12 +1323,12 @@ class Cylinder5DDetectionHead(nn.Module):
             facet_bbox_roi *= 255 / facet_bbox_roi.max()
             facet_bbox_roi = F.interpolate(facet_bbox_roi.unsqueeze(0).unsqueeze(0), size=(720, 720), mode='bilinear', align_corners=False)
             self.logger.add_image("facet_bbox_roi_sample", facet_bbox_roi.to(torch.uint8).squeeze())
-        
+
+        if numpy.isnan(loss_feat.item()):
+            # usually no detection found.
+            loss_feat = torch.nan_to_num(loss_feat, nan=0.0)        
         if not self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
-            if numpy.isnan(loss_feat.item()):
-                loss_feat = torch.nan_to_num(loss_feat, nan=0.0)
-            else:
-                loss_feat *= 0
+            loss_feat *= 0
         return loss_feat
     
     def _compute_keypt_loss(

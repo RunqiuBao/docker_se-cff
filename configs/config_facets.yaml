@@ -148,13 +148,13 @@ MODEL:
         facet_pred_cfg:
           is_enable: True
           PARAMS:
-            enlarge_roi_factor: 2.0
-            facet_feat_size: 14
-            facet_in_channels: 3
+            enlarge_roi_factor: 1.5
+            facet_feat_size: 28
+            facet_in_channels: 10
             facet_feat_channels: 512
             is_train_facet: True
         # inference params
-        lconfidence_threshold: 0.15
+        lconfidence_threshold: 0.1
         rscore_threshold: 0.9
         final_iou_threshold: 0.05
     losses_cfg:

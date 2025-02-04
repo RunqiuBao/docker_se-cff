@@ -148,8 +148,8 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             object_preds, loss_final = self._object_detection_head(
                 left_feature,
                 right_feature,
-                [left_event_sharp.repeat(1, 3, 1, 1)],
-                [right_event_sharp.repeat(1, 3, 1, 1)],
+                [left_event],
+                [right_event],
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
                 gt_labels["objdet"] if gt_labels is not None and len(gt_labels) != 0 else None
