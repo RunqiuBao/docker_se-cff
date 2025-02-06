@@ -153,7 +153,7 @@ class Cylinder5DDetectionHead(nn.Module):
         )
 
         # Note: two keypoints needed. One at object center, one at object top center.
-        if self._config['keypt_pred_cfg']['is_enable'] and self._config['keypt_pred_cfg']['PARAMS']['is_train_keypt']:
+        if self._config['keypt_pred_cfg']['is_enable']:
             self.keypt1_predictor = self._build_featmap_convs(
                 in_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'],
                 feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
@@ -164,7 +164,7 @@ class Cylinder5DDetectionHead(nn.Module):
                 feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],
                 num_classes=self._config["num_classes"],
             )
-        elif self._config['facet_pred_cfg']['is_enable'] and self._config['facet_pred_cfg']['PARAMS']['is_train_facet']:
+        elif self._config['facet_pred_cfg']['is_enable']:
             self.facet_predictor = self._build_featmap_convs(
                 in_channels=self._config['facet_pred_cfg']['PARAMS']['facet_in_channels'],
                 feat_channels=self._config['facet_pred_cfg']['PARAMS']['facet_feat_channels'],

@@ -214,8 +214,8 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         if self.is_test:
             if len(object_preds) == 0:
                 preds_final['objdet'] = object_preds
-            # elif isinstance(object_preds[0], torch.Tensor):
-            #     preds_final['objdet'] = [pred.detach().cpu() for pred in object_preds]
+            elif isinstance(object_preds[0], torch.Tensor):
+                preds_final['objdet'] = [pred.detach().cpu() for pred in object_preds]
             elif isinstance(object_preds[0], dict):
                 preds_final['objdet_facets'] = [detection.pop('facets').detach().cpu() for detection in object_preds]
                 preds_final['objdet_facets_right'] = [detection.pop('facets_right').detach().cpu() for detection in object_preds]
@@ -252,6 +252,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
                     "disparity gt",
                     disparity_gt
                 )
+
         return preds_final, loss_final
 
     def get_params_group(self, learning_rate, keypt_lr=None):

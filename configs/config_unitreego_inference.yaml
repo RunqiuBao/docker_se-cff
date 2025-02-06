@@ -12,7 +12,7 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -27,7 +27,7 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -42,7 +42,7 @@ DATASET:
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -111,6 +111,7 @@ MODEL:
         refine_channels: 1
     object_detection_head_cfg:
       PARAMS:
+        freeze_leftobjdet: True
         min_bbox_size: 5
         # detection
         num_classes: 1
@@ -134,10 +135,22 @@ MODEL:
         r_iou_threshold: 0.4
         candidates_k: 8
         # keypt prediction
-        keypts_feat_size: 14
-        keypt_in_channels: 3
-        keypt_feat_channels: 512
-        is_train_keypt: True
+        keypt_pred_cfg:
+          is_enable: True
+          PARAMS:
+            # keypt prediction
+            keypts_feat_size: 14
+            keypt_in_channels: 10
+            keypt_feat_channels: 512
+            is_train_keypt: False
+        facet_pred_cfg:
+          is_enable: False
+          PARAMS:
+            enlarge_roi_factor: 1.5
+            facet_feat_size: 28
+            facet_in_channels: 10
+            facet_feat_channels: 512
+            is_train_facet: False
         # inference params
         lconfidence_threshold: 0.80
         rscore_threshold: 0.9
