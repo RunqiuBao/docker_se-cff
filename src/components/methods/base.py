@@ -99,6 +99,7 @@ def train(
         if ema is not None:
             ema.update(model)
 
+        log_dict["BestIndex"].update(loss.item(), data_loader.batch_size)
         log_dict["Loss"].update(loss.item(), data_loader.batch_size)
         if hasattr(model.module, 'is_freeze_disp') and not model.module.is_freeze_disp:
             log_dict["EPE"].update(pred['disparity'], batch_data["disparity"].cpu(), mask.cpu())
