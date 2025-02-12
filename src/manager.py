@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 import torch.distributed as dist
 import copy
 import re
+from typing import Optional
 
 from components import models
 from components import datasets
@@ -36,7 +37,7 @@ class DLManager:
         assert cfg is not None
         self.cfg = cfg
 
-        self.model = _prepare_model(
+        self.models = _prepare_models(
             self.cfg.MODEL,
             is_distributed=self.args.is_distributed,
             local_rank=self.args.local_rank if self.args.is_distributed else None,
@@ -46,8 +47,9 @@ class DLManager:
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
         if "LEARNING_CONFIG" in self.cfg:
+            # techniques to boost training performance
             self.scaler = _prepare_scaler(self.cfg.LEARNING_CONFIG)  # for amp training
-            self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.model)
+            self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.models)
 
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
@@ -57,18 +59,19 @@ class DLManager:
                     "loading checkpoint {} ...".format(self.args.resume_cpt)
                 )
             # FIXME: adding 'module.' to each key in model state dict
-            model_statedict = self.model.state_dict()
-            for key, value in checkpoint["model"].items():
-                if self.args.only_resume_weight_from is not None:
-                    if self.args.only_resume_weight_from not in key:
-                        continue
-                # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
-                #     continue
-                if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
-                    model_statedict["module." + key] = value
-                else:
-                    print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
-            self.model.load_state_dict(model_statedict)
+            for key, model in self.models.items():
+                model_statedict = model.state_dict()
+                for key, value in checkpoint["models"][key].items():
+                    if self.args.only_resume_weight_from is not None:
+                        if self.args.only_resume_weight_from not in key:
+                            continue
+                    # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
+                    #     continue
+                    if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
+                        model_statedict["module." + key] = value
+                    else:
+                        print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
+                self.models[key].load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 self.optimizer['optimizer'].load_state_dict(checkpoint["optimizer"])
                 if 'optimizer_keypt' in checkpoint:
@@ -128,7 +131,7 @@ class DLManager:
                 train_loader.sampler.set_epoch(epoch)
             
             train_log_dict = self.method.train(
-                model=self.model,
+                model=self.models,
                 data_loader=train_loader,
                 optimizer=self.optimizer,
                 scaler=self.scaler,
@@ -208,11 +211,12 @@ class DLManager:
         self.model.module.load_state_dict(checkpoint["model"])
 
     def _make_checkpoint(self):
+        models_checkpoint = {key: model.module.state_dict() for key, model in self.models.items()}
         checkpoint = {
             "epoch": self.current_epoch,
             "args": self.args,
             "cfg": self.cfg,
-            "model": self.model.module.state_dict(),
+            "models": models_checkpoint,
             "optimizer": self.optimizer['optimizer'].state_dict(),
             "scheduler": self.scheduler['scheduler'].state_dict(),
         }
@@ -295,68 +299,93 @@ def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None
     return model
 
 
-def _prepare_optimizer(optimizer_cfg, model):
-    name = optimizer_cfg.NAME
-    if "KEYPT_PARAMS" in optimizer_cfg:
-        # keypt prediction network
-        parameters = optimizer_cfg.PARAMS
-        learning_rate = parameters.lr
+def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = False, local_rank: Optional[int] = None, logger=None):
+    models = {}
+    for key, model_cfg in models_cfg.items():
+        name = model_cfg.NAME
+        parameters = model_cfg.PARAMS
+        loss_cfg = losses_cfg[key]
 
-        params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
-        params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
-        params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
+        model = getattr(model, name)(parameters, loss_cfg, logger=logger, is_distributed=is_distributed)
 
-        optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
-        optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
-
-        return {
-            'optimizer': optimizer,
-            'optimizer_keypt': optimizer_keypt
-        }
-    elif "NETWORK_TYPE" in optimizer_cfg and optimizer_cfg.NETWORK_TYPE == "DETR":
-        params = get_optim_params(optimizer_cfg.PARAMS, model)
-        module_kwargs = {
-            "params": params,
-            "lr": optimizer_cfg.PARAMS.lr,
-            "betas": optimizer_cfg.PARAMS.betas,
-            "weight_decay": optimizer_cfg.PARAMS.weight_decay
-        }
-        optimizer = getattr(optim, name)(**module_kwargs)
-        return {
-            'optimizer': optimizer,
-        }
-    else:
-        raise NotImplementedError
-
-
-def _prepare_scheduler(scheduler_cfg, optimizer):
-    if scheduler_cfg.get("NETWORK_TYPE", None) == "DETR":
-        name = scheduler_cfg.PARAMS.lr_scheduler.type
-        parameters = scheduler_cfg.PARAMS.lr_scheduler.params
-
-        scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
-
-        return {
-            'scheduler': scheduler
-        }
-    elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
-        name = scheduler_cfg.NAME
-        parameters = scheduler_cfg.PARAMS
-
-        if name == "CosineAnnealingWarmupRestarts":
-            from utils.scheduler import CosineAnnealingWarmupRestarts
-
-            scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
+        if is_distributed:
+            model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
+            model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
         else:
+            model = nn.DataParallel(model).cuda()
+        
+        models[key] = model
+    return models
+
+
+def _prepare_optimizer(optimizers_cfg: dict, model):
+    for key, optimizer_cfg in optimizers_cfg.items():
+        if not optimizer_cfg.is_enable:
+            continue
+        name = optimizer_cfg.NAME
+        if "NETWORK_TYPE" in optimizer_cfg and optimizer_cfg.NETWORK_TYPE == "DETR":
+            params = get_optim_params(optimizer_cfg.PARAMS, model)
+            module_kwargs = {
+                "params": params,
+                "lr": optimizer_cfg.PARAMS.lr,
+                "betas": optimizer_cfg.PARAMS.betas,
+                "weight_decay": optimizer_cfg.PARAMS.weight_decay
+            }
+            optimizer = getattr(optim, name)(**module_kwargs)
+            return {
+                'optimizer': optimizer,
+            }
+        else:
+            # keypt prediction network
+            parameters = optimizer_cfg.PARAMS
+            learning_rate = parameters.lr
+
+            params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
+            params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
+            params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
+
+            optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
+            optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
+
+            return {
+                'optimizer': optimizer,
+                'optimizer_keypt': optimizer_keypt
+            }
+
+
+def _prepare_scheduler(schedulers_cfg: dict, optimizer):
+    for key, scheduler_cfg in schedulers_cfg.items():
+        if not scheduler_cfg.is_enable:
+            continue
+        if scheduler_cfg.get("NETWORK_TYPE", None) == "DETR":
+            name = scheduler_cfg.PARAMS.lr_scheduler.type
+            parameters = scheduler_cfg.PARAMS.lr_scheduler.params
+
             scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
 
-        # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
-        scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
+            return {
+                'scheduler': scheduler
+            }
+        elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
+            name = scheduler_cfg.NAME
+            parameters = scheduler_cfg.PARAMS
 
-        return {
-            'scheduler': scheduler,
-            'scheduler_keypt': scheduler_keypt
-        }
+            if name == "CosineAnnealingWarmupRestarts":
+                from utils.scheduler import CosineAnnealingWarmupRestarts
+
+                scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
+            else:
+                scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
+
+            # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
+            scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
+
+            return {
+                'scheduler': scheduler,
+                'scheduler_keypt': scheduler_keypt
+            }
+        else:
+            raise NotImplementedError
 
 
 def _prepare_scaler(learning_cfg):
@@ -370,12 +399,15 @@ def _prepare_scaler(learning_cfg):
         return None
     
 
-def _prepare_ema(learning_cfg, model):
+def _prepare_ema(learning_cfg, models):
     """
     prepare ema for exponential moving average training
     """
+    ema = {}
     if learning_cfg.use_ema:
-        return methods.ema.ModelEMA(model, **learning_cfg.ema.params)
+        for key, model in models.items():
+            ema[key] = methods.ema.ModelEMA(model, **learning_cfg.ema.params)
+        return ema
     else:
         return None
 

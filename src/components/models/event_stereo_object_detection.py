@@ -9,8 +9,8 @@ import time
 
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
-from .objectdetection import Cylinder5DDetectionHead
-from .feature_extractor import FeatureExtractor2
+from .objectdetection import StereoEventDetectionHead
+
 
 
 from . import losses
@@ -41,10 +41,9 @@ class EventStereoObjectDetectionNetwork(nn.Module):
     def __init__(
         self,
         concentration_net_cfg: dict = None,
-        feature_extraction_net_cfg: dict = None,
         disp_head_cfg: dict = None,
         object_detection_head_cfg: dict = None,
-        losses_cfg: dict = None,  # Cylinder5DDetectionLoss, disparityLoss
+        losses_cfg: dict = None,  # StereoEventDetectionLoss, disparityLoss
         is_distributed: bool = False,
         is_test = False,
         logger=None,
@@ -62,14 +61,6 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         self._concentration_net = ConcentrationNet(**concentration_net_cfg.PARAMS)
         if self.is_freeze_disp:
             freeze_module_grads(self._concentration_net)
-        # =========== feature extractor ===========
-        self._feature_extraction_net = FeatureExtractor2(
-            net_cfg=feature_extraction_net_cfg.PARAMS
-        )
-        if not self.is_freeze_disp:
-            freeze_module_grads(self._feature_extraction_net)
-        if is_train_featmaponly:
-            freeze_module_grads(self._feature_extraction_net)
         # ============ stereo matching net ============
         self._disp_head = StereoMatchingNetwork(
             **disp_head_cfg.PARAMS, isInputFeature=False  # Note: an efficient feature extractor for object detection might not be good for stereo matching?
@@ -77,9 +68,9 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         if self.is_freeze_disp:
             freeze_module_grads(self._disp_head)
         # ============= object detection net =============
-        self._object_detection_head = Cylinder5DDetectionHead(
+        self._object_detection_head = StereoEventDetectionHead(
             net_cfg=object_detection_head_cfg.PARAMS,
-            loss_cfg=losses_cfg['objdet_loss_cfg'],
+            loss_cfg=losses_cfg,
             is_distributed=is_distributed,
             logger=logger
         )
@@ -99,7 +90,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
     def SetNotTest(self):
         self.is_test = False
 
-    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: dict = None, batch_img_metas: dict = None, **kwargs):
+    def forward(self, left_event: Tensor, right_event: Tensor, gt_labels: dict, batch_img_metas: dict = None, global_step_info: dict = None, **kwargs):
         """
         Args:
             left/right_event: (b c s t h w) tensor
@@ -128,31 +119,22 @@ class EventStereoObjectDetectionNetwork(nn.Module):
 
         loss_final = None
         if not self.is_freeze_disp and len(gt_labels) > 0:
-            try:
-                loss_final = self._disp_loss((
-                    pred_disparity_pyramid,
-                    gt_labels['disparity'],
-                    left_event_sharp,
-                    right_event_sharp
-                ))
-            except:
-                from IPython import embed; embed()
+            loss_final = self._disp_loss((
+                pred_disparity_pyramid,
+                gt_labels['disparity'],
+                left_event_sharp,
+                right_event_sharp
+            ))
 
         if self.is_freeze_disp or len(gt_labels) == 0:
             starttime = time.time()
-            left_feature = self._feature_extraction_net(left_event_sharp.repeat(1, 3, 1, 1))
-            right_feature = self._feature_extraction_net(right_event_sharp.repeat(1, 3, 1, 1))
-            # print("time3: {}".format(time.time() - starttime))
-
-            starttime = time.time()
             object_preds, loss_final = self._object_detection_head(
-                left_feature,
-                right_feature,
-                [left_event],
-                [right_event],
+                left_event,
+                right_event,
                 pred_disparity_pyramid[-1],  # use full size disparity prediction as prior to help stereo detection
                 batch_img_metas,
-                gt_labels["objdet"] if gt_labels is not None and len(gt_labels) != 0 else None
+                gt_labels["objdet"] if gt_labels is not None and len(gt_labels) != 0 else None,
+                global_step_info
             )
             # print("time4: {}".format(time.time() - starttime))
 
@@ -313,7 +295,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         left_event = torch.randn(*inputShape).to(device)
         right_event = torch.randn(*inputShape).to(device)
         model = model.to(device)
-        
-        flops, numParams = profile(model, inputs=(left_event, right_event, {}, {'h': inputShape[-2], 'w': inputShape[-1]}), verbose=False)
+        global_step_info = dict(epoch=0, indexBatch=0, lengthDataLoader=0)
+        flops, numParams = profile(model, inputs=(left_event, right_event, {}, {'h': inputShape[-2], 'w': inputShape[-1]}, global_step_info), verbose=False)
         return flops, numParams
 

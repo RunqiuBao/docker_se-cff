@@ -89,7 +89,6 @@ def train(
             loss = 0.
             for key, value in lossDict.items():
                 loss += value
-                    
                 if key in log_dict:
                     log_dict[key].update(lossDict[key].item(), data_loader.batch_size)
             loss.backward()

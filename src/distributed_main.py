@@ -6,6 +6,11 @@ import torch
 from manager import DLManager
 from utils.config import get_cfg
 
+import baodebug
+
+baodebug.debugutils.ConfigureRootLogger("info")  # config logger format
+
+
 print("baodebug: {}".format(os.environ["LOCAL_RANK"]))
 # Argument Parser
 parser = argparse.ArgumentParser()
