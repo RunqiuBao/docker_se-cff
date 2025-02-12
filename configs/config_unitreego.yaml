@@ -1,5 +1,5 @@
 TOTAL_EPOCH: 300
-METHOD: base
+METHOD: event_stereo_object_detection
 DATASET:
   TRAIN:
     NAME: unitreego
@@ -66,114 +66,188 @@ DATALOADER:
       shuffle: False
       drop_last: False
 MODEL:
-  NAME: EventStereoObjectDetectionNetwork
-  PARAMS:
-    concentration_net_cfg:
-      PARAMS:
-        in_channels: 10
-        attention_method: soft
-        base_channels: 32
-    feature_extraction_net_cfg:
-      PARAMS:
-        backbone:
-          type: CSPDarknet
-          deepen_factor: 0.33
-          widen_factor: 0.5
-          out_indices: [2, 3, 4]
-          use_depthwise: False
-          spp_kernal_sizes: [5, 9, 13]
-          norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
-        neck:
-          type: YOLOXPAFPN
-          in_channels: [128, 256, 512]
-          out_channels: 128
-          num_csp_blocks: 1
-          use_depthwise: False
-          upsample_cfg: 
-            scale_factor: 2
-            mode: nearest
-          norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
-    disp_head_cfg:
-      is_freeze: True
-      PARAMS:
-        in_channels: 1
-        max_disp: 168
-        refine_channels: 1
-    object_detection_head_cfg:
-      PARAMS:
-        min_bbox_size: 5
-        # detection
-        num_classes: 1
-        in_channels: 128
-        feat_channels: 256
-        num_stacked_convs: 2
-        num_topk_candidates: 30
-        bbox_expand_factor: 1.6
-        strides: [8, 16, 32]
-        norm_cfg:
-          type: BN
-          momentum: 0.03
-          eps: 0.001
-        act_cfg:
-          type: ReLU
-        # region proposal
-        nms_pre: 100
-        nms_iou_threshold: 0.5
-        # right bbox regression
-        right_roi_feat_size: 7
-        r_iou_threshold: 0.4
-        candidates_k: 8
-        # keypt prediction
-        keypt_pred_cfg:
-          is_enable: True
-          PARAMS:
-            # keypt prediction
-            keypts_feat_size: 14
-            keypt_in_channels: 3
-            keypt_feat_channels: 512
-            is_train_keypt: False
-        facet_pred_cfg:
-          is_enable: False
-          PARAMS:
-            facet_feat_size: 14
-            facet_in_channels: 3
-            facet_feat_channels: 512
-            is_train_facet: False
-        # inference params
-        lconfidence_threshold: 0.80
-        rscore_threshold: 0.9
-        final_iou_threshold: 0.2
-    losses_cfg:
-      objdet_loss_cfg:
-        NAME: ObjdetLoss
-      disp_loss_cfg:
-        NAME: DisparityLoss
-        ls_loss_weight: 1.0
-        warp_loss_weight: 100.0
-        use_warp_loss: False
+  concentration_net_cfg:
+    NAME: concentration_net
+    PARAMS:
+      in_channels: 10
+      attention_method: soft
+      base_channels: 32
+  disp_head_cfg:
+    NAME: disp_head
+    is_freeze: True
+    PARAMS:
+      in_channels: 1
+      max_disp: 168
+      refine_channels: 1
+  rtdetr_cfg:
+    NAME: rtdetr
+    is_freeze: True
+    PARAMS:
+      backbone:
+        network_class: PResNet
+        params:
+          in_channels: 10
+          depth: 101
+          variant: d
+          freeze_at: 0
+          return_idx: [1, 2, 3]
+          num_stages: 4
+          freeze_norm: True
+          pretrained: False
+      encoder:
+        network_class: HybridEncoder
+        params:
+          in_channels: [512, 1024, 2048]
+          feat_strides: [8, 16, 32]
+          # intra
+          hidden_dim: 384
+          dim_feedforward: 2048
+          use_encoder_idx: [2]
+          num_encoder_layers: 1
+          nhead: 8
+          dropout: 0.
+          enc_act: 'gelu'
+          # cross
+          expansion: 1.0
+          depth_mult: 1
+          act: 'silu'
+      decoder:
+        network_class: RTDETRTransformerv2
+        params:
+          feat_channels: [384, 384, 384]
+          feat_strides: [8, 16, 32]
+          hidden_dim: 256
+          num_levels: 3
+          num_layers: 6
+          num_queries: 10
+          num_denoising: 100
+          label_noise_ratio: 0.5
+          box_noise_scale: 1.0 # 1.0 0.4
+          eval_idx: -1
+          # NEW
+          num_points: [4, 4, 4] # [3,3,3] [2,2,2]
+          cross_attn_method: default # default, discrete
+          query_select_method: default # default, agnostic
+  stereo_detection_head_cfg:
+    NAME: stereo_detection_head
+    PARAMS:
+      freeze_leftobjdet: True
+      # detection
+      num_classes: 1
+      in_channels: 128
+      feat_channels: 256
+      num_stacked_convs: 2
+      bbox_expand_factor: 1.6
+      strides: [8, 16, 32]
+      norm_cfg:
+        type: BN
+        momentum: 0.03
+        eps: 0.001
+      act_cfg:
+        type: ReLU
+      # right bbox regression
+      right_roi_feat_size: 7
+      r_iou_threshold: 0.4
+      candidates_k: 8
+  featuremap_head_cfg:
+    NAME: featuremap_head
+    PARAMS:
+      # keypt prediction
+      keypt_pred_cfg:
+        is_enable: True
+        PARAMS:
+          # keypt prediction
+          keypts_feat_size: 14
+          keypt_in_channels: 3
+          keypt_feat_channels: 512
+          is_train_keypt: False
+      facet_pred_cfg:
+        is_enable: False
+        PARAMS:
+          facet_feat_size: 14
+          facet_in_channels: 3
+          facet_feat_channels: 512
+          is_train_facet: False
+  inference_cfg:
+    PARAMS:
+      # inference params
+      lconfidence_threshold: 0.80
+      rscore_threshold: 0.9
+      final_iou_threshold: 0.2
+LOSSES:
+  rtdetr_cfg:
+    weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2,}
+    losses: ['vfl', 'boxes', ]
+    alpha: 0.75
+    gamma: 2.0
+    matcher:
+      type: HungarianMatcher
+      weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+      alpha: 0.25
+      gamma: 2.0
+  disp_head_cfg:
+    NAME: DisparityLoss
+    ls_loss_weight: 1.0
+    warp_loss_weight: 100.0
+    use_warp_loss: False
 OPTIMIZER:
-  NAME: Adam
-  PARAMS:
-    lr: 0.0005
-    weight_decay: 0.0001
-  KEYPT_PARAMS:
-    lr: 0.0005
-    weight_decay: 0.0001
+  # one type of optimizer being enabled
+  optimizer0:
+    is_enable: False
+    NAME: Adam
+    PARAMS:
+      lr: 0.0005
+      weight_decay: 0.0001
+    KEYPT_PARAMS:
+      lr: 0.0005
+      weight_decay: 0.0001
+  optimizer1:
+    is_enable: True
+    NETWORK_TYPE: DETR
+    NAME: AdamW
+    PARAMS:
+      params: 
+        - 
+          params: '^(?=.*backbone)(?!.*norm|bn).*$'
+          lr: 0.000001
+        - 
+          params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$'
+          weight_decay: 0.
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.0001
+LEARNING_CONFIG:
+  clip_max_norm: 0.1
+  use_amp: True  # Automatic Mixed Precision
+  amp:
+    type: GradScaler
+  use_ema: True # Exponential Moving Average
+  ema:
+    type: 
+    params:
+      decay: 0.9999
+      warmups: 2000
 SCHEDULER:
-  NAME: CosineAnnealingWarmupRestarts
-  PARAMS:
-    cycle_mult: 1.0
-    first_cycle_steps: 100
-    gamma: 1.0
-    lr_ratio: 0.0001
-    warmup_steps: 3
+# one type of scheduler being enabled at a time
+  scheduler0:
+    is_enable: False
+    NAME: CosineAnnealingWarmupRestarts
+    PARAMS:
+      cycle_mult: 1.0
+      first_cycle_steps: 100
+      gamma: 1.0
+      lr_ratio: 0.0001
+      warmup_steps: 3
+  scheduler1:
+    is_enable: True
+    NAME: DETR_SCHEDULER
+    PARAMS:
+      lr_scheduler:
+        type: MultiStepLR
+        params:
+          milestones: [1000]
+          gamma: 0.1
+      lr_warmup_scheduler:
+        type: LinearWarmup
+        params:
+          warmup_duration: 2000
