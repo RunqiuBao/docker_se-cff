@@ -8,12 +8,11 @@ import copy
 import time
 import torch.nn.functional as F
 
-from .rtdetr import RTDETR
+from ..rtdetr.rtdetr import RTDETR
 from ..concentration import ConcentrationNet
-from .rtdetr_criterion import RTDETRCriterion
+from ..rtdetr.rtdetr_criterion import RTDETRCriterion
 from ..utils.misc import freeze_module_grads
-from .rtdetr_criterion import RTDETRCriterion
-from .matcher import HungarianMatcher
+from ..rtdetr.matcher import HungarianMatcher
 from mmdet.registry import MODELS
 from mmdet.structures.mask import mask_target, BitmapMasks
 from mmengine.config import Config
@@ -117,7 +116,7 @@ class EventPickTargetPredictionNetwork(nn.Module):
             if not self._skip_pickable_region:
                 loss_final["loss_pickable_region"] = sum(losses_pickable_region) * 100
 
-            if self.logger is not None and len(predictions_leftright) > 0:                
+            if self.logger is not None and len(predictions_leftright) > 0:
                 predictions_left = copy.deepcopy(predictions_leftright["left"])[0]
                 predictions_left["bboxes"] = torchvision.ops.box_convert(predictions_left["bboxes"], in_fmt="cxcywh", out_fmt="xyxy".lower())
                 predictions_left["bboxes"][:, [0, 2]] *= batch_img_metas['w']
