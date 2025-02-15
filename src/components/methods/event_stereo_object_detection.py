@@ -150,6 +150,8 @@ def train(
             {}
         )[0]
 
+        imageHeight, imageWidth = left_event_sharp.shape[-2:]
+
         # ---------- disp pred net ----------
         pred_disparity_pyramid, lossDictAll = _forward_one_batch(
             models["disp_head"],
@@ -181,6 +183,13 @@ def train(
                 scaler
             )
             right_feature, selected_leftdetections, corresponding_gt_labels, indices = artifacts
+            # convert to global bboxes in xyxy format
+            batch_left_bboxes = []
+            for one_left_bboxes in selected_leftdetections["pred_boxes"]:
+                one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes, in_fmt="cxcywh", out_fmt="xyxy".lower())
+                one_left_bboxes_xyxy[:, [0, 2]] *= imageWidth
+                one_left_bboxes_xyxy[:, [1, 3]] *= imageHeight
+                batch_left_bboxes.append(one_left_bboxes_xyxy)
 
             import inspect; from IPython import embed; print('in {}: {}()!'.format(__file__, inspect.currentframe().f_code.co_name)); embed()
 
