@@ -134,8 +134,8 @@ class StereoEventDetectionHead(nn.Module):
             act_type=self._config["act_cfg"]["type"]
         )
 
-        # Note: two keypoints needed. One at object center, one at object top center.
         if self._config['keypt_pred_cfg']['is_enable']:
+            # Note: two keypoints needed. One at object center, one at object top center.
             self.keypt1_predictor = self._build_featmap_convs(
                 in_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_in_channels'],
                 feat_channels=self._config['keypt_pred_cfg']['PARAMS']['keypt_feat_channels'],

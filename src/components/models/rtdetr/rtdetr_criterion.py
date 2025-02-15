@@ -29,7 +29,7 @@ class RTDETRCriterion(nn.Module):
     __share__ = ['num_classes', ]
     __inject__ = ['matcher', ]
 
-    def __init__(self, matcher, weight_dict, losses, alpha=0.2, gamma=2.0, eos_coef=1e-4, num_classes=80):
+    def __init__(self, matcher, weight_dict, losses, alpha=0.2, gamma=2.0, eos_coef=1e-4, num_classes=80, **kwargs):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -94,7 +94,7 @@ class RTDETRCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
 
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = torch.cat([t['bboxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
         ious = torch.diag(ious).detach()
 
@@ -138,7 +138,7 @@ class RTDETRCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = torch.cat([t['bboxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
         losses = {}
 
@@ -165,7 +165,7 @@ class RTDETRCriterion(nn.Module):
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             'labels': self.loss_labels,
-            'boxes': self.loss_boxes,
+            'bboxes': self.loss_boxes,
             'cardinality': self.loss_cardinality,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
@@ -201,7 +201,7 @@ class RTDETRCriterion(nn.Module):
                 "classes": torch.argmax(outputs["pred_logits"].detach().cpu()[indexInBatch, indices[indexInBatch][0]], dim=1),
             }
             corresponding_gt_labels_0 = {
-                "bboxes": targets[indexInBatch]["boxes"][indices[indexInBatch][-1]],
+                "bboxes": targets[indexInBatch]["bboxes"][indices[indexInBatch][-1]],
                 "classes": targets[indexInBatch]["labels"][indices[indexInBatch][-1]]
             }
             predictions.append(predictions_0)

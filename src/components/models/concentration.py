@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thop import profile
+
 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding, bias=False):
@@ -87,7 +89,10 @@ class DownBlock(nn.Module):
 
 
 class ConcentrationNet(nn.Module):
-    def __init__(self, in_channels, base_channels=32, attention_method="hard", **kwargs):
+    def __init__(self, network_cfg, loss_cfg, is_freeze, **kwargs):
+        self._config = network_cfg
+        self._config["is_freeze"] = is_freeze
+        in_channels, base_channels, attention_method = network_cfg["in_channels"], network_cfg["base_channels"], network_cfg["attention_method"]
         super(ConcentrationNet, self).__init__()
         self.attention_method = attention_method
         self.conv1 = ConvBlock(
@@ -124,7 +129,15 @@ class ConcentrationNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
+    @property
+    def is_freeze(self):
+        return self._config["is_freeze"]
+    
+    @property
+    def input_shape(self):
+        return (1, 10, 480, 672)
+
+    def predict(self, x):
         out = self.conv1(x)
         s1 = self.conv2(out)
         s2 = self.down1(s1)
@@ -153,3 +166,17 @@ class ConcentrationNet(nn.Module):
             raise NotImplementedError
 
         return new_x
+    
+    def forward(self, x, **kwargs):
+        preds = self.predict(x)
+        losses = None
+        artifacts = None
+        return preds, losses, artifacts
+    
+    @staticmethod
+    def ComputeCostProfile(model):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        input_tensor = torch.randn(*model.inputShape).to(device)
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=input_tensor, verbose=False)
+        return flops, numParams

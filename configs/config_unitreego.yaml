@@ -67,22 +67,40 @@ DATALOADER:
       drop_last: False
 MODEL:
   concentration_net_cfg:
-    NAME: concentration_net
+    DICTKEY: concentration_net
+    CLASSNAME: ConcentrationNet
+    is_freeze: True
     PARAMS:
       in_channels: 10
       attention_method: soft
       base_channels: 32
   disp_head_cfg:
-    NAME: disp_head
+    DICTKEY: disp_head
+    CLASSNAME: StereoMatchingNetwork
     is_freeze: True
     PARAMS:
       in_channels: 1
       max_disp: 168
       refine_channels: 1
+      num_downsample: 2
+      no_mdconv: False
+      feature_similarity: "correlation"
+      num_scales: 3
+      num_fusions: 6
+      deformable_groups: 2
+      mdconv_dilation: 2
+      no_intermediate_supervision: False
+      num_stage_blocks: 1
+      num_deform_blocks: 3
+      isInputFeature: False
   rtdetr_cfg:
-    NAME: rtdetr
-    is_freeze: True
+    DICTKEY: rtdetr
+    CLASSNAME: RTDETR
+    is_freeze: False
     PARAMS:
+      inference:
+        params:
+          lconfidence_threshold: 0.80
       backbone:
         network_class: PResNet
         params:
@@ -129,7 +147,9 @@ MODEL:
           cross_attn_method: default # default, discrete
           query_select_method: default # default, agnostic
   stereo_detection_head_cfg:
-    NAME: stereo_detection_head
+    DICTKEY: stereo_detection_head
+    CLASSNAME: StereoDetectionHead
+    is_freeze: False
     PARAMS:
       freeze_leftobjdet: True
       # detection
@@ -149,14 +169,20 @@ MODEL:
       right_roi_feat_size: 7
       r_iou_threshold: 0.4
       candidates_k: 8
+      # inference:
+      rscore_threshold: 0.9
   featuremap_head_cfg:
-    NAME: featuremap_head
+    DICTKEY: featuremap_head
+    CLASSNAME: FeaturemapHead
+    is_freeze: False
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
         is_enable: True
         PARAMS:
           # keypt prediction
+          enlarge_roi_factor: 1.5
+          num_classes: 1
           keypts_feat_size: 14
           keypt_in_channels: 3
           keypt_feat_channels: 512
@@ -164,41 +190,41 @@ MODEL:
       facet_pred_cfg:
         is_enable: False
         PARAMS:
+          enlarge_roi_factor: 1.5
+          num_classes: 1
           facet_feat_size: 14
           facet_in_channels: 3
           facet_feat_channels: 512
           is_train_facet: False
-  inference_cfg:
-    PARAMS:
-      # inference params
-      lconfidence_threshold: 0.80
-      rscore_threshold: 0.9
-      final_iou_threshold: 0.2
 LOSSES:
-  rtdetr_cfg:
-    weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2,}
-    losses: ['vfl', 'boxes', ]
-    alpha: 0.75
-    gamma: 2.0
-    matcher:
-      type: HungarianMatcher
-      weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
-      alpha: 0.25
-      gamma: 2.0
+  concentration_net_cfg:
+    noloss: True
   disp_head_cfg:
     NAME: DisparityLoss
     ls_loss_weight: 1.0
     warp_loss_weight: 100.0
     use_warp_loss: False
+  rtdetr_cfg:
+    weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2,}
+    losses: ['vfl', 'bboxes', ]
+    alpha: 0.75
+    gamma: 2.0
+    matcher_cfg:
+      params:
+        type: HungarianMatcher
+        weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+        alpha: 0.25
+        gamma: 2.0
+  stereo_detection_head_cfg:
+    noloss: True
+  featuremap_head_cfg:
+    noloss: True
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:
     is_enable: False
     NAME: Adam
     PARAMS:
-      lr: 0.0005
-      weight_decay: 0.0001
-    KEYPT_PARAMS:
       lr: 0.0005
       weight_decay: 0.0001
   optimizer1:

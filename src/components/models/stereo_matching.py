@@ -1,7 +1,10 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
+from typing import Optional
 
 from .refinement import StereoDRNetRefinement
+from . import losses
 
 from .feature_extractor import FeatureExtractor
 from .cost import CostVolumePyramid
@@ -13,22 +16,28 @@ class StereoMatchingNetwork(nn.Module):
 
     def __init__(
         self,
-        max_disp,
-        in_channels=3,
-        num_downsample=2,
-        no_mdconv=False,
-        feature_similarity="correlation",
-        num_scales=3,
-        num_fusions=6,
-        deformable_groups=2,
-        mdconv_dilation=2,
-        no_intermediate_supervision=False,
-        num_stage_blocks=1,
-        num_deform_blocks=3,
-        refine_channels=None,
-        isInputFeature=False,
+        network_cfg,
+        loss_cfg,
+        is_freeze,
         **kwargs
     ):
+        max_disp = network_cfg["max_disp"]
+        in_channels = network_cfg["in_channels"]
+        num_downsample = network_cfg["num_downsample"]
+        no_mdconv = network_cfg["no_mdconv"]
+        feature_similarity = network_cfg["feature_similarity"]
+        num_scales = network_cfg["num_scales"]
+        num_fusions = network_cfg["num_fusions"]
+        deformable_groups = network_cfg["deformable_groups"]
+        mdconv_dilation = network_cfg["mdconv_dilation"]
+        no_intermediate_supervision = network_cfg["no_intermediate_supervision"]
+        num_stage_blocks = network_cfg["num_stage_blocks"]
+        num_deform_blocks = network_cfg["num_deform_blocks"]
+        refine_channels = network_cfg["refine_channels"]
+        isInputFeature = network_cfg["isInputFeature"]
+        self._config = network_cfg
+        self._config["is_freeze"] = is_freeze
+
         super(StereoMatchingNetwork, self).__init__()
 
         refine_channels = in_channels if refine_channels is None else refine_channels
@@ -70,6 +79,17 @@ class StereoMatchingNetwork(nn.Module):
 
         self.refinement = refine_module_list
 
+        if not self.is_freeze:
+            self._disp_loss = getattr(losses, loss_cfg['NAME'])(
+                loss_cfg,
+                is_distributed=kwargs.is_distributed,
+                logger=kwargs.logger
+            )
+
+    @property
+    def is_freeze(self):
+        return self._config["is_freeze"]
+
     def disparity_refinement(self, left_img, right_img, disparity):
         disparity_pyramid = []
         for i in range(self.num_downsample):
@@ -97,7 +117,7 @@ class StereoMatchingNetwork(nn.Module):
 
         return disparity_pyramid
 
-    def forward(self, left_img, right_img):
+    def predict(self, left_img, right_img):
         if self.feature_extractor is not None:
             left_feature = self.feature_extractor(left_img)
             right_feature = self.feature_extractor(right_img)
@@ -114,3 +134,54 @@ class StereoMatchingNetwork(nn.Module):
         )
 
         return disparity_pyramid
+    
+    def forward(self, left_img, right_img, labels=None, **kwargs):
+        preds = self.predict(left_img, right_img)
+        losses = None
+        if labels is not None and not self.is_freeze:
+            losses = self.compute_loss(preds, labels, **kwargs)
+        artifacts = None
+        return preds, losses, artifacts
+
+    def compute_loss(self, preds: Optional[torch.Tensor], labels: Optional[torch.Tensor], **kwargs):
+        """
+        Compute loss
+        """
+        loss_final = self._disp_loss((
+            preds,
+            labels,
+            kwargs["left_event_sharp"],
+            kwargs["right_event_sharp"]
+        ))
+        return loss_final
+
+    def get_params_group(self, learning_rate):
+        def filter_specific_params(kv):
+            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]
+            for name in specific_layer_name:
+                if name in kv[0]:
+                    return True
+            return False
+
+        def filter_base_params(kv):
+            specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]
+            for name in specific_layer_name:
+                if name in kv[0]:
+                    return False
+            return True
+
+        specific_params = list(filter(filter_specific_params, self.named_parameters()))
+        base_params = list(filter(filter_base_params, self.named_parameters()))
+
+        specific_params = [
+            kv[1] for kv in specific_params
+        ]  # kv is a tuple (key, value)
+        base_params = [kv[1] for kv in base_params]
+
+        specific_lr = learning_rate * 0.1
+        params_group = [
+            {"params": base_params, "lr": learning_rate},
+            {"params": specific_params, "lr": specific_lr},
+        ]
+
+        return params_group

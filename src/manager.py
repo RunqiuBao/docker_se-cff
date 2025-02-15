@@ -11,12 +11,15 @@ import copy
 import re
 from typing import Optional
 
-from components import models
+from components import models as MODELCLASSES
 from components import datasets
 from components import methods
 
 from utils.logger import ExpLogger, TimeCheck
 from utils.metrics import SummationMeter, Metric
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class DLManager:
@@ -39,12 +42,13 @@ class DLManager:
 
         self.models = _prepare_models(
             self.cfg.MODEL,
+            self.cfg.LOSSES,
             is_distributed=self.args.is_distributed,
             local_rank=self.args.local_rank if self.args.is_distributed else None,
             logger=self.logger,
         )
 
-        self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.model)
+        self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.models)
         self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
         if "LEARNING_CONFIG" in self.cfg:
             # techniques to boost training performance
@@ -73,11 +77,10 @@ class DLManager:
                         print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
                 self.models[key].load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
-                self.optimizer['optimizer'].load_state_dict(checkpoint["optimizer"])
-                if 'optimizer_keypt' in checkpoint:
-                    self.optimizer['optimizer_keypt'].load_state_dict(checkpoint["optimizer_keypt"])
-                    self.scheduler['scheduler_keypt'].load_state_dict(checkpoint["scheduler_keypt"])
-                self.scheduler['scheduler'].load_state_dict(checkpoint["scheduler"])
+                for key, optimizer in self.optimizer.items():
+                    self.optimizer[key].load_state_dict(checkpoint["optimizer"][key])
+                for key, scheduler in self.scheduler.items():
+                    self.scheduler[key].load_state_dict(checkpoint["scheduler"][key])
                 self.args.start_epoch = checkpoint["epoch"] + 1
                 self.current_epoch = self.args.start_epoch
                 print("resumed old training states.")                                
@@ -108,19 +111,23 @@ class DLManager:
             is_distributed=self.args.is_distributed,
         )
 
-        # profiling the network
-        netWorkClass = getattr(models, self.cfg.MODEL.NAME)
-        profile_model = netWorkClass(**self.cfg.MODEL.PARAMS)
-        # torch.Size([4, 1, 360, 576, 1, 10])
-        flops, numParams = netWorkClass.ComputeCostProfile(
-            profile_model, next(iter(train_loader))["event"]["left"].shape
-        )
-        if self.args.is_master:
-            self.logger.write(
-                "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-                % (self.cfg.MODEL.NAME, float(flops / 10**9), float(numParams / 10**6))
-            )
-        del profile_model
+        # # profiling the network
+        # for key, model_cfg in self.cfg.MODEL.items():
+        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+        #     parameters = model_cfg.PARAMS
+        #     loss_cfg = self.cfg.LOSSES[key]
+        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+        #     # torch.Size([4, 1, 360, 576, 1, 10])
+        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+        #     if self.args.is_master:
+        #         self.logger.write(
+        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+        #         )
+        #     del profile_model
+
+        # freeze model gradients if static:
+        self.method.freeze_static_components(self.models)
 
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
@@ -131,7 +138,7 @@ class DLManager:
                 train_loader.sampler.set_epoch(epoch)
             
             train_log_dict = self.method.train(
-                model=self.models,
+                models=self.models,
                 data_loader=train_loader,
                 optimizer=self.optimizer,
                 scaler=self.scaler,
@@ -139,7 +146,8 @@ class DLManager:
                 clip_max_norm=self.cfg.LEARNING_CONFIG.clip_max_norm if self.scaler is not None else None,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
-                epoch=epoch
+                epoch=epoch,
+                tensorBoardLogger=self.logger
             )
 
             for key, scheduler in self.scheduler.items():
@@ -156,8 +164,9 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
+
             valid_log_dict = self.method.valid(
-                model=self.ema.module if self.ema else self.model.module,
+                models=[one_ema_model.module for one_ema_model in self.ema] if self.ema else [model.module for model in self.models],
                 data_loader=valid_loader,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
@@ -212,13 +221,15 @@ class DLManager:
 
     def _make_checkpoint(self):
         models_checkpoint = {key: model.module.state_dict() for key, model in self.models.items()}
+        optimizers_checkpoint = {key: optimizer.state_dict() for key, optimizer in self.optimizer.items()}
+        schedulers_checkpoint = {key: scheduler.state_dict() for key, scheduler in self.scheduler.items()}
         checkpoint = {
             "epoch": self.current_epoch,
             "args": self.args,
             "cfg": self.cfg,
             "models": models_checkpoint,
-            "optimizer": self.optimizer['optimizer'].state_dict(),
-            "scheduler": self.scheduler['scheduler'].state_dict(),
+            "optimizer": optimizers_checkpoint,
+            "scheduler": schedulers_checkpoint,
         }
 
         return checkpoint
@@ -239,8 +250,10 @@ class DLManager:
         self.logger.train()
         self.logger.save_args(self.args)
         self.logger.save_cfg(self.cfg)
-        self.logger.log_model(self.model)
-        self.logger.log_optimizer(self.optimizer)
+        for key, model in self.models.items():
+            logger.debug("# ---------------------------- model {} --------------------------------".format(model.__class__.__name__))
+            # self.logger.log_model(model)
+        # self.logger.log_optimizer(self.optimizer)
         self.logger.save_src(os.path.dirname(os.path.abspath(__file__)))
 
     def _log_after_epoch(
@@ -284,29 +297,14 @@ class DLManager:
                 )
 
 
-def _prepare_model(model_cfg, is_distributed=False, local_rank=None, logger=None):
-    name = model_cfg.NAME
-    parameters = model_cfg.PARAMS
-
-    model = getattr(models, name)(logger=logger, **parameters, is_distributed=is_distributed)
-
-    if is_distributed:
-        model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-    else:
-        model = nn.DataParallel(model).cuda()
-
-    return model
-
-
 def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = False, local_rank: Optional[int] = None, logger=None):
     models = {}
     for key, model_cfg in models_cfg.items():
-        name = model_cfg.NAME
+        classname = model_cfg.CLASSNAME
         parameters = model_cfg.PARAMS
         loss_cfg = losses_cfg[key]
 
-        model = getattr(model, name)(parameters, loss_cfg, logger=logger, is_distributed=is_distributed)
+        model = getattr(MODELCLASSES, classname)(parameters, loss_cfg, model_cfg["is_freeze"], logger=logger, is_distributed=is_distributed)
 
         if is_distributed:
             model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
@@ -314,78 +312,72 @@ def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = F
         else:
             model = nn.DataParallel(model).cuda()
         
-        models[key] = model
+        models[model_cfg.DICTKEY] = model
+
     return models
 
 
-def _prepare_optimizer(optimizers_cfg: dict, model):
+def _prepare_optimizer(optimizers_cfg: dict, models):
     for key, optimizer_cfg in optimizers_cfg.items():
         if not optimizer_cfg.is_enable:
             continue
         name = optimizer_cfg.NAME
-        if "NETWORK_TYPE" in optimizer_cfg and optimizer_cfg.NETWORK_TYPE == "DETR":
-            params = get_optim_params(optimizer_cfg.PARAMS, model)
-            module_kwargs = {
-                "params": params,
-                "lr": optimizer_cfg.PARAMS.lr,
-                "betas": optimizer_cfg.PARAMS.betas,
-                "weight_decay": optimizer_cfg.PARAMS.weight_decay
-            }
-            optimizer = getattr(optim, name)(**module_kwargs)
-            return {
-                'optimizer': optimizer,
-            }
-        else:
-            # keypt prediction network
-            parameters = optimizer_cfg.PARAMS
-            learning_rate = parameters.lr
+        dict_optimizer = {}
+        for key, model in models.items():
+            if "NETWORK_TYPE" in optimizer_cfg and optimizer_cfg.NETWORK_TYPE == "DETR":
+                params = get_optim_params(optimizer_cfg.PARAMS, model)
+                module_kwargs = {
+                    "params": params,
+                    "lr": optimizer_cfg.PARAMS.lr,
+                    "betas": optimizer_cfg.PARAMS.betas,
+                    "weight_decay": optimizer_cfg.PARAMS.weight_decay
+                }
+                optimizer = getattr(optim, name)(**module_kwargs)
+                dict_optimizer[key] = optimizer
+            else:
+                # keypt prediction network
+                parameters = optimizer_cfg.PARAMS
+                learning_rate = parameters.lr
 
-            params_group = model.module.get_params_group(learning_rate, keypt_lr=optimizer_cfg.KEYPT_PARAMS.lr)
-            params_group_nonkeypt = [param_group for param_group in params_group if param_group['lr'] != optimizer_cfg.KEYPT_PARAMS.lr]
-            params_group_keypt = [param_group for param_group in params_group if param_group['lr'] == optimizer_cfg.KEYPT_PARAMS.lr]
-
-            optimizer = getattr(optim, name)(params_group_nonkeypt, **parameters)
-            optimizer_keypt = getattr(optim, name)(params_group_keypt, **optimizer_cfg.KEYPT_PARAMS)
-
-            return {
-                'optimizer': optimizer,
-                'optimizer_keypt': optimizer_keypt
-            }
+                if hasattr(model.module, "get_params_group"):
+                    params_group = model.module.get_params_group(learning_rate)
+                else:
+                    params_group = get_optim_params(optimizer_cfg.PARAMS, model)
+                optimizer = getattr(optim, name)(params_group, **parameters.PARAMS)
+                dict_optimizer[key] = optimizer
+        break
+    return dict_optimizer
 
 
-def _prepare_scheduler(schedulers_cfg: dict, optimizer):
+def _prepare_scheduler(schedulers_cfg: dict, optimizers):
     for key, scheduler_cfg in schedulers_cfg.items():
         if not scheduler_cfg.is_enable:
             continue
-        if scheduler_cfg.get("NETWORK_TYPE", None) == "DETR":
-            name = scheduler_cfg.PARAMS.lr_scheduler.type
-            parameters = scheduler_cfg.PARAMS.lr_scheduler.params
+        dict_scheduler = {}
+        for key, optimizer in optimizers.items():
+            if scheduler_cfg.get("NAME", None) == "DETR_SCHEDULER":
+                name = scheduler_cfg.PARAMS.lr_scheduler.type
+                parameters = scheduler_cfg.PARAMS.lr_scheduler.params
 
-            scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
+                scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)
 
-            return {
-                'scheduler': scheduler
-            }
-        elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
-            name = scheduler_cfg.NAME
-            parameters = scheduler_cfg.PARAMS
+                dict_scheduler[key] = scheduler
+            elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
+                name = scheduler_cfg.NAME
+                parameters = scheduler_cfg.PARAMS
 
-            if name == "CosineAnnealingWarmupRestarts":
-                from utils.scheduler import CosineAnnealingWarmupRestarts
+                if name == "CosineAnnealingWarmupRestarts":
+                    from utils.scheduler import CosineAnnealingWarmupRestarts
 
-                scheduler = CosineAnnealingWarmupRestarts(optimizer['optimizer'], **parameters)
+                    scheduler = CosineAnnealingWarmupRestarts(optimizer, **parameters)
+                else:
+                    scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)
+
+                dict_scheduler[key] = scheduler
             else:
-                scheduler = getattr(optim.lr_scheduler, name)(optimizer['optimizer'], **parameters)
-
-            # scheduler_keypt = CustomStepLRScheduler(optimizer['optimizer_keypt'], milestones=[90, 120], factor=0.1)
-            scheduler_keypt = CosineAnnealingWarmupRestarts(optimizer['optimizer_keypt'], **parameters)
-
-            return {
-                'scheduler': scheduler,
-                'scheduler_keypt': scheduler_keypt
-            }
-        else:
-            raise NotImplementedError
+                raise NotImplementedError
+        break
+    return dict_scheduler
 
 
 def _prepare_scaler(learning_cfg):
@@ -425,7 +417,6 @@ class CustomStepLRScheduler(_LRScheduler):
             return [group['lr'] for group in self.optimizer.param_groups]
 
 
-@staticmethod
 def get_optim_params(cfg: dict, model: nn.Module):
     """
     Used in RTDetr to select submodule params and control their learning rate differently. 
