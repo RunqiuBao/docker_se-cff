@@ -67,7 +67,7 @@ class RTDETR(nn.Module):
     def forward(self, x, x_right, labels=None, **kwargs):
         x, x_right = self.predict(x, x_right, targets=labels)
         losses = None
-        if labels is not None and not self.is_freeze:
+        if labels is not None:
             losses, selected_leftdetections, corresponding_gt_labels, indices = self.compute_loss(x, labels, **kwargs)
         artifacts = [x_right]
         if labels is not None:

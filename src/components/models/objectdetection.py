@@ -885,7 +885,7 @@ class StereoEventDetectionHead(nn.Module):
                 bbox_targets[:, 5].unsqueeze(-1),
                 bbox_targets[:, 3].unsqueeze(-1)
             ], dim=1)
-            
+
             batch_size, num_priors, num_grids = right_bboxes.shape[:3]
             kernel_size = self._config['right_roi_feat_size']
             rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks]

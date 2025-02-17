@@ -149,6 +149,46 @@ class StereoDetectionHead(nn.Module):
         model = model.to(device)
         flops, numParams = profile(model, inputs=input_tensor, verbose=False)
         return flops, numParams
+    
+    def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
+        """
+        Decode right bbox refine result [B, 100, 4, ker_h, ker_w] whose '4' dimension is (delta_x, delta_y, w_factor, h_factor) to
+        same shape whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r).
+        Args:
+            sbboxes_pred:  [B, 100, 6]
+            right_boxes_refine: [B, 100, 4, ker_h, ker_w]
+        
+        Return:
+            decoded_right_bboxes: [B, 100, ker_h, ker_w, 4] whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r)
+        """
+        batch_size, num_samples = sbboxes_pred.shape[:2]
+        ker_h, ker_w = right_boxes_refine.shape[-2:]
+        sbboxes_pred = sbboxes_pred.view(-1, 6)
+        right_boxes_refine = right_boxes_refine.view(-1, 4, ker_h, ker_w)
+        
+        strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
+        strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
+        strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
+        grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_x = grid_x.unsqueeze(1)
+        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
+        grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_y = grid_y.unsqueeze(1)
+
+        strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        xys = right_boxes_refine[:, :2, :, :] * strides + grids
+        whs = right_boxes_refine[:, 2:, :, :].exp() * strides
+
+        tl_x = (xys[:, 0, :, :] - whs[:, 0, :, :] / 2).unsqueeze(-1)
+        tl_y = (xys[:, 1, :, :] - whs[:, 1, :, :] / 2).unsqueeze(-1)
+        br_x = (xys[:, 0, :, :] + whs[:, 0, :, :] / 2).unsqueeze(-1)
+        br_y = (xys[:, 1, :, :] + whs[:, 1, :, :] / 2).unsqueeze(-1)
+
+        decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
+        return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
 
     def predict(
         self,
@@ -184,7 +224,8 @@ class StereoDetectionHead(nn.Module):
             # _bboxes_pred[..., 1] -= dhboxes / 2
             # _bboxes_pred[..., 3] += dhboxes / 2
 
-            batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, self._config['num_topk_candidates']).flatten().unsqueeze(-1).to(_bboxes_pred.device)
+            num_detections = bboxes_pred.shape[1]
+            batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, num_detections).flatten().unsqueeze(-1).to(_bboxes_pred.device)
             # print("----- time sub sub1: {}".format(time.time() - starttime))
 
             starttime = time.time()
@@ -196,7 +237,8 @@ class StereoDetectionHead(nn.Module):
             _bboxes_pred[..., 0] -= bbox_disps  # warp to more left side.
             _bboxes_pred[..., 2] -= bbox_disps
             rois_right = _bboxes_pred.reshape(-1, 4)
-            rois_right = torch.cat((batch_number, rois_right), dim=1)        
+            rois_right = torch.cat((batch_number, rois_right), dim=1)
+            import inspect; from IPython import embed; print('in {}!'.format(inspect.currentframe().f_code.co_name)); embed()
             right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.        
             right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
             right_scores_refine = self.right_bbox_refiner_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
@@ -232,16 +274,38 @@ class StereoDetectionHead(nn.Module):
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
-        bbox_expand_factor: float,
         labels=None,
         **kwargs
     ):
-        preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, bbox_expand_factor)
+        """
+        Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
+        """
+        preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_factor"])
+        from IPython import embed; embed()
         losses = None
         if labels is not None and not self.is_freeze:
             losses = self.compute_loss(preds, labels)
         artifacts = None
         return preds, losses, artifacts
+
+    def compute_loss(self, preds: Tuple[List, List, List], labels: List[Dict]):
+        rbboxes_preds, rbboxes_targets, cls_targets = [], []
+        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = preds
+        device, dtype = list_sbboxes_pred[0].device, list_sbboxes_pred[0].dtype
+        for indexInBatch in range(len(labels)):
+            rbboxes_preds.append(torch.cat([
+                list_sbboxes_pred[indexInBatch][:, 4].unsqueeze(-1),
+                list_sbboxes_pred[indexInBatch][:, 1].unsqueeze(-1),
+                list_sbboxes_pred[indexInBatch][:, 5].unsqueeze(-1),
+                list_sbboxes_pred[indexInBatch][:, 3].unsqueeze(-1)
+            ], dim=1))
+            rbboxes_targets.append(torch.cat([
+                labels[indexInBatch][:, 4].unsqueeze(-1),
+                labels[indexInBatch][:, 1].unsqueeze(-1),
+                labels[indexInBatch][:, 5].unsqueeze(-1),
+                labels[indexInBatch][:, 3].unsqueeze(-1)
+            ], dim=1))
+            
 
 
 class FeaturemapHead(nn.Module):

@@ -96,7 +96,7 @@ MODEL:
   rtdetr_cfg:
     DICTKEY: rtdetr
     CLASSNAME: RTDETR
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       inference:
         params:

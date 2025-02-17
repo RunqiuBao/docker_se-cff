@@ -184,14 +184,35 @@ def train(
             )
             right_feature, selected_leftdetections, corresponding_gt_labels, indices = artifacts
             # convert to global bboxes in xyxy format
-            batch_left_bboxes = []
-            for one_left_bboxes in selected_leftdetections["pred_boxes"]:
-                one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes, in_fmt="cxcywh", out_fmt="xyxy".lower())
+            batch_left_bboxes, batch_gt_labels_stereo = [], []
+            for indexInBatch, one_left_bboxes in enumerate(selected_leftdetections):
+                one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes["bboxes"], in_fmt="cxcywh", out_fmt="xyxy".lower())
                 one_left_bboxes_xyxy[:, [0, 2]] *= imageWidth
                 one_left_bboxes_xyxy[:, [1, 3]] *= imageHeight
+                one_gt_bboxes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"]
+                one_gt_bboxes_stereo_reordered = one_gt_bboxes_stereo[indices[indexInBatch][1]]
+                one_gt_classes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]
+                one_gt_classes_stereo_reordered = one_gt_classes_stereo[indices[indexInBatch][1]]
                 batch_left_bboxes.append(one_left_bboxes_xyxy)
+                batch_gt_labels_stereo.append({
+                    "bboxes": one_gt_bboxes_stereo_reordered,
+                    "classes": one_gt_classes_stereo_reordered
+                })
 
-            import inspect; from IPython import embed; print('in {}: {}()!'.format(__file__, inspect.currentframe().f_code.co_name)); embed()
+            if models["rtdetr"].module.is_freeze:
+                # ---------- stereo detection head ----------
+                stereo_preds, lossDictAll = _forward_one_batch(
+                    models["stereo_detection_head"],
+                    {
+                        "right_feat": right_feature,
+                        "left_bboxes": batch_left_bboxes,
+                        "disp_prior": pred_disparity_pyramid[-1],
+                        "batch_img_metas": {"h": imageHeight, "w": imageWidth},
+                    },
+                    batch_gt_labels_stereo,
+                    lossDictAll,
+                    {}
+                )
 
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
@@ -202,7 +223,7 @@ def train(
             log_dict,
             batchSize,
             clip_max_norm,  # param used for amp
-            scaler
+            scaler if not models["rtdetr"].module.is_freeze else None  # Note: only training detr we need this.
         )
 
         if ema is not None:
