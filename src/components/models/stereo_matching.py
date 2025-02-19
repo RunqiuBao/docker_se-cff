@@ -82,8 +82,8 @@ class StereoMatchingNetwork(nn.Module):
         if not self.is_freeze:
             self._disp_loss = getattr(losses, loss_cfg['NAME'])(
                 loss_cfg,
-                is_distributed=kwargs.is_distributed,
-                logger=kwargs.logger
+                is_distributed=kwargs["is_distributed"],
+                logger=kwargs["logger"]
             )
 
     @property
@@ -139,7 +139,7 @@ class StereoMatchingNetwork(nn.Module):
         preds = self.predict(left_img, right_img)
         losses = None
         if labels is not None and not self.is_freeze:
-            losses = self.compute_loss(preds, labels, **kwargs)
+            losses = self.compute_loss(preds, labels, left_img=left_img, right_img=right_img)
         artifacts = None
         return preds, losses, artifacts
 
@@ -150,8 +150,8 @@ class StereoMatchingNetwork(nn.Module):
         loss_final = self._disp_loss((
             preds,
             labels,
-            kwargs["left_event_sharp"],
-            kwargs["right_event_sharp"]
+            kwargs["left_img"],
+            kwargs["right_img"]
         ))
         return loss_final
 

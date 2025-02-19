@@ -2,13 +2,15 @@ import torch.nn as nn
 import torch
 from torch import Tensor
 import numpy
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from thop import profile
 import cv2
 import time
 import math
 
 from mmdet.registry import MODELS
+from mmengine.config import Config
+from mmdet.structures.mask import mask_target, BitmapMasks
 
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
@@ -197,7 +199,7 @@ class StereoDetectionHead(nn.Module):
         disp_prior: Tensor,
         batch_img_metas: Dict,
         bbox_expand_factor: float
-    ) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
+    ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
             right_feat: multi level features from left. max shape is [B, 3, h/8, w/8]
@@ -212,6 +214,12 @@ class StereoDetectionHead(nn.Module):
         """
         list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = [], [], []
         for indexInBatch, bboxes_pred in enumerate(left_bboxes):
+            if bboxes_pred.shape[0] == 0:
+                # No detections in left
+                list_sbboxes_pred.append(None)
+                list_refined_right_bboxes.append(None)
+                list_right_scores_refine.append(None)
+                continue
             starttime = time.time()
             bboxes_pred = torch.unsqueeze(bboxes_pred, dim=0)
 
@@ -238,8 +246,7 @@ class StereoDetectionHead(nn.Module):
             _bboxes_pred[..., 2] -= bbox_disps
             rois_right = _bboxes_pred.reshape(-1, 4)
             rois_right = torch.cat((batch_number, rois_right), dim=1)
-            import inspect; from IPython import embed; print('in {}!'.format(inspect.currentframe().f_code.co_name)); embed()
-            right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.        
+            right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
             right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
             right_scores_refine = self.right_bbox_refiner_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
             logits, ker_h, ker_w = right_boxes_refine.shape[-3:]
@@ -281,7 +288,6 @@ class StereoDetectionHead(nn.Module):
         Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
         """
         preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_factor"])
-        from IPython import embed; embed()
         losses = None
         if labels is not None and not self.is_freeze:
             losses = self.compute_loss(preds, labels)
@@ -289,23 +295,118 @@ class StereoDetectionHead(nn.Module):
         return preds, losses, artifacts
 
     def compute_loss(self, preds: Tuple[List, List, List], labels: List[Dict]):
-        rbboxes_preds, rbboxes_targets, cls_targets = [], []
         list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = preds
-        device, dtype = list_sbboxes_pred[0].device, list_sbboxes_pred[0].dtype
+        loss_dict = {}
         for indexInBatch in range(len(labels)):
-            rbboxes_preds.append(torch.cat([
-                list_sbboxes_pred[indexInBatch][:, 4].unsqueeze(-1),
-                list_sbboxes_pred[indexInBatch][:, 1].unsqueeze(-1),
-                list_sbboxes_pred[indexInBatch][:, 5].unsqueeze(-1),
-                list_sbboxes_pred[indexInBatch][:, 3].unsqueeze(-1)
-            ], dim=1))
-            rbboxes_targets.append(torch.cat([
-                labels[indexInBatch][:, 4].unsqueeze(-1),
-                labels[indexInBatch][:, 1].unsqueeze(-1),
-                labels[indexInBatch][:, 5].unsqueeze(-1),
-                labels[indexInBatch][:, 3].unsqueeze(-1)
-            ], dim=1))
+            if list_sbboxes_pred[indexInBatch] is None:
+                continue
+
+            num_grids = list_refined_right_bboxes[indexInBatch].shape[2]
+            rbboxes_targets = torch.cat([
+                labels[indexInBatch]["bboxes"][:, 4].unsqueeze(-1),
+                labels[indexInBatch]["bboxes"][:, 1].unsqueeze(-1),
+                labels[indexInBatch]["bboxes"][:, 5].unsqueeze(-1),
+                labels[indexInBatch]["bboxes"][:, 3].unsqueeze(-1)
+            ], dim=1)
+
+            rbboxes_refined = list_refined_right_bboxes[indexInBatch].view(-1, num_grids, 4)
+            ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
+
+            # right bbox loss
+            rselect_mask, rbboxes_refined_selected, rbboxes_targets_selected = self.batch_assigner(
+                rbboxes_refined,
+                ious,
+                rbboxes_targets,
+                self._config['r_iou_threshold'],
+                self._config['candidates_k']
+            )
+            num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
+            num_total_samples_timesk = max(num_pos_timesk, 1.0)
+            loss_rbbox = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected) / num_total_samples_timesk            
+
+            # right scores loss
+            rbboxes_scores = list_right_scores_refine[indexInBatch].view(-1, num_grids, 1).sigmoid()
+            ## dynamic targets
+            rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
+            rbboxes_scores_targets[rselect_mask] = 1
+            loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets) / num_total_samples_timesk
+
+            if "loss_rbbox" in loss_dict:
+                loss_dict["loss_rbbox"] += loss_rbbox
+            else:
+                loss_dict["loss_rbbox"] = loss_rbbox
             
+            if "loss_rscore" in loss_dict:
+                loss_dict["loss_rscore"] += loss_rscore
+            else:
+                loss_dict["loss_rscore"] = loss_rscore
+
+        return loss_dict
+
+    @torch.no_grad()
+    def batch_iou_calculator_simple(self, bboxes_preds: Tensor, bboxes_ref: Tensor):
+        """
+        compute IoU between each pred at each batch and the only ref bbox at each batch.
+        Args:
+            bboxes_preds: [B, num_grids, 4]. box format (tl_x, tl_y, br_x, br_y).
+            bboxes_ref: [B, 1, 4].
+
+        Returns: 
+            ious: [B,  num_grids]
+            indicies_best_right: [B]
+        """
+        assert bboxes_ref.shape[1] == 1, "bboxes_ref should have only one at each batch."
+        num_grids = bboxes_preds.shape[1]
+        bboxes_ref = bboxes_ref.expand(-1, num_grids, -1)
+        intersectionBox_tl_x = torch.max(torch.stack((bboxes_preds[..., 0], bboxes_ref[..., 0]), dim=-1), dim=-1)[0]
+        intersectionBox_br_x = torch.min(torch.stack((bboxes_preds[..., 2], bboxes_ref[..., 2]), dim=-1), dim=-1)[0]
+        
+        ws = torch.clamp(intersectionBox_br_x - intersectionBox_tl_x, min=0, max=None)
+        intersectionBox_tl_y = torch.max(torch.stack((bboxes_preds[..., 1], bboxes_ref[..., 1]), dim=-1), dim=-1)[0]
+        intersectionBox_br_y = torch.min(torch.stack((bboxes_preds[..., 3], bboxes_ref[..., 3]), dim=-1), dim=-1)[0]
+        hs = torch.clamp(intersectionBox_br_y - intersectionBox_tl_y, min=0, max=None)
+        intersectionAreas = ws * hs  # [B, num_grids]
+        unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
+        ious = intersectionAreas / unionAreas
+        return ious, torch.max(ious, dim=-1)[1]
+    
+    def batch_assigner(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
+        """
+        for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
+        If candidates within IoU_thres are less than candidates_k, 0 pad them.
+
+        Args:
+            bboxes_preds: shape (B, N, 4)
+            iou_scores: shape (B, N, 1)
+            batch_gt_bboxes: shape (B, 4)
+
+        Returns:
+            rselect_mask: shape (B, N), boolean mask.
+            bboxes_preds_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
+            bboxes_targets_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
+        """
+        bboxes_targets_selected = batch_gt_bboxes.view(-1, 1, 4).expand(-1, candidates_k, -1)
+        batch_size, num_grids = bboxes_preds.shape[:2]
+
+        with torch.no_grad():
+            candidates_mask = iou_scores.squeeze(-1) > iou_thres;
+            iou_scores_masked = iou_scores.squeeze(-1).clone().masked_fill(~candidates_mask, float('-inf'))
+            topk_scores, topk_indices = torch.topk(iou_scores_masked, candidates_k, dim=1)
+
+            valid_mask = topk_scores > float('-inf')
+            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
+            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (B, k)
+        
+        pseudo_bboxes = torch.zeros(batch_size, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
+        bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=1)
+        bboxes_preds_selected = torch.gather(bboxes_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 4))
+        bboxes_targets_selected = bboxes_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
+
+        # make sure at least one candidate for each gt
+        indices_best_ious = torch.argmax(iou_scores, dim=1)
+        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
+
+        return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
 
 
 class FeaturemapHead(nn.Module):
@@ -326,6 +427,22 @@ class FeaturemapHead(nn.Module):
         self._init_layers()
         self._init_weights()
 
+        self.bbox_roi_extractor_forfeature = MODELS.build(
+            {
+                'type': 'SingleRoIExtractor',
+                'roi_layer': {
+                    'type': 'RoIAlign',
+                    'output_size': self._config.PARAMS['feat_size'],
+                    'sampling_ratio': 0
+                },
+                'out_channels': self._config.PARAMS['in_channels'],
+                'featmap_strides': [1]
+            }
+        )
+
+        if not is_freeze:
+            self.loss_featuremap = torch.nn.SmoothL1Loss(reduction='mean')
+
     @property
     def is_freeze(self):
         return self._config["is_freeze"]
@@ -335,43 +452,20 @@ class FeaturemapHead(nn.Module):
         return [(1, 10, 480, 672), (1, 10, 480, 672)]
 
     def _init_layers(self) -> None:
-        if self._config["pred_mode"] == 'keypt_pred_cfg':
-            # Note: two keypoints needed. One at object center, one at object top center.
-            self.keypt1_predictor = self._build_featmap_convs(
-                in_channels=self._config.PARAMS['keypt_in_channels'],
-                feat_channels=self._config.PARAMS['keypt_feat_channels'],
-                num_classes=self._config.PARAMS["num_classes"],
-            )
-            self.keypt2_predictor = self._build_featmap_convs(
-                in_channels=self._config.PARAMS['keypt_in_channels'],
-                feat_channels=self._config.PARAMS['keypt_feat_channels'],
-                num_classes=self._config.PARAMS["num_classes"],
-            )
-        elif self._config["pred_mode"] == 'facet_pred_cfg':
-            self.facet_predictor = self._build_featmap_convs(
-                in_channels=self._config.PARAMS['facet_in_channels'],
-                feat_channels=self._config.PARAMS['facet_feat_channels'],
-                num_classes=self._config.PARAMS['num_classes'],
-            )
+        self.featmap_predictor = self._build_featmap_convs(
+            in_channels=self._config.PARAMS['in_channels'],
+            feat_channels=self._config.PARAMS['feat_channels'],
+            num_classes=self._config.PARAMS["num_classes"],
+        )
 
     def _init_weights(self):
-        if self.keypt1_predictor is not None:
-            for subnet in [self.keypt1_predictor, self.keypt2_predictor]:
-                for m in subnet.modules():
-                    if m is None:
-                        continue
-                    elif hasattr(m, 'weight') and hasattr(m, 'bias'):
-                        nn.init.kaiming_normal_(
-                            m.weight, mode='fan_out', nonlinearity='relu')
-                        nn.init.constant_(m.bias, 0)
-        elif self.facet_predictor is not None:
-            for m in self.facet_predictor.modules():
-                if m is None:
-                    continue
-                elif hasattr(m, 'weight') and hasattr(m, 'bias'):
-                    nn.init.kaiming_normal_(
-                        m.weight, mode='fan_out', nonlinearity='relu')
-                    nn.init.constant_(m.bias, 0)
+        for m in self.featmap_predictor.modules():
+            if m is None:
+                continue
+            elif hasattr(m, 'weight') and hasattr(m, 'bias'):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
 
     @staticmethod
     def _build_featmap_convs(in_channels: int, feat_channels: int, num_classes: int):
@@ -412,7 +506,6 @@ class FeaturemapHead(nn.Module):
         self,
         img_feats: List[Tensor],
         bbox_preds: List[Tensor],
-        featuremap_predictor: nn.Sequential,
         feature_id: str
     ) -> Tensor:
         """
@@ -443,8 +536,8 @@ class FeaturemapHead(nn.Module):
                 rois[:, 2] = rois_centerX + rois_w / 2
                 rois[:, 3] = rois_centerY + rois_h / 2
             bnum_rois = torch.cat([batch_number, rois], dim=1)
-            roi_feats = self.bbox_roi_extractor_forfeature([onefeat[indexInBatch].unsqueeze(0) for onefeat in img_feats], bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
-            output_feat = featuremap_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
+            roi_feats = self.bbox_roi_extractor_forfeature([img_feats[indexInBatch].unsqueeze(0)], bnum_rois)  # Note: output shape is (b*100, 128, 14, 14)
+            output_feat = self.featmap_predictor(roi_feats)  # Note: (b*100, num_of_class, 28, 28)
             # if self.logger is not None:
             #     self.feat_roi_visz[feature_id] = roi_feats.detach()
             #     self.feat_output_visz[feature_id] = output_feat.detach()
@@ -458,18 +551,65 @@ class FeaturemapHead(nn.Module):
         self,
         img_feats: List[Tensor],
         bbox_preds: List[Tensor],
-        featuremap_predictor: nn.Sequential,
+        class_preds: List[Tensor],
         feature_id: str,
         labels=None,
         **kwargs
     ):
-        preds = self.predict(img_feats, bbox_preds, featuremap_predictor, feature_id)
+        preds = self.predict(img_feats, bbox_preds, feature_id)
         losses = None
         if labels is not None and not self.is_freeze:
-            losses = self.compute_loss(preds, labels)
+            losses = self.compute_loss([preds, bbox_preds, class_preds], labels, feature_id + "_loss")
         artifacts = None
         return preds, losses, artifacts
+    
+    def compute_loss(
+        self,
+        preds: List[Tensor],
+        labels: List[Tensor],
+        lossKey: str
+    ):
+        list_featmap_preds, bbox_preds, class_preds = preds
+        # list_featmap_preds[0] shape: (B, ?, num_classes, ker_h, ker_w)
+        # bbox_preds[0] shape: (?, 4)
+        # class_preds[0] shape: (?,)
+        loss_dict = {}
+        list_featmap_preds_inclass, list_mask_targets = [], []
+        for indexInBatch in range(len(bbox_preds)):
+            class_selection = class_preds[indexInBatch]
+            featmap_size = list_featmap_preds[indexInBatch].shape[-1]
+            num_targets = list_featmap_preds[indexInBatch].shape[1]
+            imageHeight, imageWidth = labels[indexInBatch].shape[-2:]
+            with torch.no_grad():
+                pos_bboxes_pred_oneimg = bbox_preds[indexInBatch].detach()
+                enlarge_factor = self._config.PARAMS["enlarge_roi_factor"]
+                rois_w = (pos_bboxes_pred_oneimg[:, 2] - pos_bboxes_pred_oneimg[:, 0]) * enlarge_factor
+                rois_h = (pos_bboxes_pred_oneimg[:, 3] - pos_bboxes_pred_oneimg[:, 1]) * enlarge_factor
+                rois_centerX = (pos_bboxes_pred_oneimg[:, 2] + pos_bboxes_pred_oneimg[:, 0]) / 2
+                rois_centerY = (pos_bboxes_pred_oneimg[:, 3] + pos_bboxes_pred_oneimg[:, 1]) / 2
+                pos_bboxes_pred_oneimg[:, 0] = rois_centerX - rois_w / 2
+                pos_bboxes_pred_oneimg[:, 1] = rois_centerY - rois_h / 2
+                pos_bboxes_pred_oneimg[:, 2] = rois_centerX + rois_w / 2
+                pos_bboxes_pred_oneimg[:, 3] = rois_centerY + rois_h / 2
+            featmap_masks_oneimg = labels[indexInBatch]
 
+            # mask_targets shape: (?, ker_h, ker_w)
+            mask_targets = mask_target(
+                [pos_bboxes_pred_oneimg],
+                [torch.arange(0, num_targets)],
+                [BitmapMasks(featmap_masks_oneimg.cpu().numpy(), height=imageHeight, width=imageWidth)],
+                Config({"mask_size": featmap_size, "soft_mask_target": True})
+            )
+
+            featmap_preds = list_featmap_preds[indexInBatch].view(-1, self._config.PARAMS["num_classes"], featmap_size, featmap_size)
+            featmap_preds_inclass = featmap_preds[torch.arange(0, featmap_preds.shape[0]), class_selection.view(-1).to(torch.int)]
+            list_featmap_preds_inclass.append(featmap_preds_inclass)
+            list_mask_targets.append(mask_targets)
+
+        if len(list_featmap_preds_inclass) > 0:
+            loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0))
+        
+        return loss_dict
 
 class EventStereoObjectDetectionNetwork(nn.Module):
 
@@ -733,4 +873,3 @@ class EventStereoObjectDetectionNetwork(nn.Module):
         global_step_info = dict(epoch=0, indexBatch=0, lengthDataLoader=0)
         flops, numParams = profile(model, inputs=(left_event, right_event, {}, {'h': inputShape[-2], 'w': inputShape[-1]}, global_step_info), verbose=False)
         return flops, numParams
-

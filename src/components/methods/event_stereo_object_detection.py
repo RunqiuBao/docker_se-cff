@@ -27,6 +27,7 @@ def freeze_static_components(models: dict):
     """
     for key, model in models.items():
         if model.module.is_freeze:
+            logger.info("---- freeze params for {}".format(key))
             freeze_module_grads(models[key])
 
 
@@ -77,13 +78,13 @@ def _backward_and_optimize(
             for model in models.values():
                 torch.nn.utils.clip_grad_norm_(model.parameters, clip_max_norm)
         for key, suboptimizer in optimizer.items():
-            if not models[key].is_freeze:
+            if not models[key].module.is_freeze:
                 scaler.step(suboptimizer)
         scaler.update()
     else:
         loss.backward()  # Note: PyTorch’s autograd engine ensures that gradients are only computed for parameters that contribute to a given loss term.
         for key, suboptimizer in optimizer.items():
-            if not models[key].is_freeze:
+            if not models[key].module.is_freeze:
                 suboptimizer.step()
     logger.debug("-> backward_and_optimize time cost: {}".format(time.time() - starttime))
     return
@@ -134,97 +135,132 @@ def train(
             if not models[key].module.is_freeze:
                 suboptimizer.zero_grad()
 
-        # ---------- concentration net ----------
-        left_event_sharp = _forward_one_batch(
-            models["concentration_net"],
-            {"x": batch_data["event"]["left"]},
-            None,
-            lossDictAll,
-            {}
-        )[0]
-        right_event_sharp = _forward_one_batch(
-            models["concentration_net"],
-            {"x": batch_data["event"]["right"]},
-            None,
-            lossDictAll,
-            {}
-        )[0]
-
-        imageHeight, imageWidth = left_event_sharp.shape[-2:]
-
-        # ---------- disp pred net ----------
-        pred_disparity_pyramid, lossDictAll = _forward_one_batch(
-            models["disp_head"],
-            {"left_img": left_event_sharp, "right_img": right_event_sharp},
-            batch_data["gt_labels"]["disparity"],
-            lossDictAll,
-            {}
-        )[:2]
-
-        if models["disp_head"].module.is_freeze:
-            # ---------- detr net ----------
-            gt_labels_forrtdetr = [
-                {
-                    "bboxes": onegt["bboxes"][..., :4].clone(),  # Note: only left bbox is needed for detr
-                    "labels": onegt["labels"].clone()
-                } for onegt in batch_data["gt_labels"]["objdet"]
-            ]
-            global_step = epoch * len(data_loader) + indexBatch
-            epoch_info = dict(epoch=epoch, step=indexBatch, global_step=global_step)
-            left_detections, lossDictAll, artifacts = _forward_one_batch(
-                models["rtdetr"],
-                {
-                    "x": batch_data["event"]["left"],
-                    "x_right": batch_data["event"]["right"],
-                },
-                gt_labels_forrtdetr,
+        with torch.autograd.set_detect_anomaly(True):
+            # ---------- concentration net ----------
+            left_event_sharp = _forward_one_batch(
+                models["concentration_net"],
+                {"x": batch_data["event"]["left"]},
+                None,
                 lossDictAll,
-                epoch_info,
-                scaler
-            )
-            right_feature, selected_leftdetections, corresponding_gt_labels, indices = artifacts
-            # convert to global bboxes in xyxy format
-            batch_left_bboxes, batch_gt_labels_stereo = [], []
-            for indexInBatch, one_left_bboxes in enumerate(selected_leftdetections):
-                one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes["bboxes"], in_fmt="cxcywh", out_fmt="xyxy".lower())
-                one_left_bboxes_xyxy[:, [0, 2]] *= imageWidth
-                one_left_bboxes_xyxy[:, [1, 3]] *= imageHeight
-                one_gt_bboxes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"]
-                one_gt_bboxes_stereo_reordered = one_gt_bboxes_stereo[indices[indexInBatch][1]]
-                one_gt_classes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]
-                one_gt_classes_stereo_reordered = one_gt_classes_stereo[indices[indexInBatch][1]]
-                batch_left_bboxes.append(one_left_bboxes_xyxy)
-                batch_gt_labels_stereo.append({
-                    "bboxes": one_gt_bboxes_stereo_reordered,
-                    "classes": one_gt_classes_stereo_reordered
-                })
+                {}
+            )[0]
+            right_event_sharp = _forward_one_batch(
+                models["concentration_net"],
+                {"x": batch_data["event"]["right"]},
+                None,
+                lossDictAll,
+                {}
+            )[0]
 
-            if models["rtdetr"].module.is_freeze:
-                # ---------- stereo detection head ----------
-                stereo_preds, lossDictAll = _forward_one_batch(
-                    models["stereo_detection_head"],
+            imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
+
+            # ---------- disp pred net ----------
+            pred_disparity_pyramid, lossDictAll = _forward_one_batch(
+                models["disp_head"],
+                {"left_img": left_event_sharp, "right_img": right_event_sharp},
+                batch_data["gt_labels"]["disparity"],
+                lossDictAll,
+                {}
+            )[:2]
+
+            if models["disp_head"].module.is_freeze:
+                # ---------- detr net ----------
+                gt_labels_forrtdetr = [
                     {
-                        "right_feat": right_feature,
-                        "left_bboxes": batch_left_bboxes,
-                        "disp_prior": pred_disparity_pyramid[-1],
-                        "batch_img_metas": {"h": imageHeight, "w": imageWidth},
+                        "bboxes": onegt["bboxes"][..., :4].clone(),  # Note: only left bbox is needed for detr
+                        "labels": onegt["labels"].clone()
+                    } for onegt in batch_data["gt_labels"]["objdet"]
+                ]
+                global_step = epoch * len(data_loader) + indexBatch
+                epoch_info = dict(epoch=epoch, step=indexBatch, global_step=global_step)
+                left_detections, lossDictAll, artifacts = _forward_one_batch(
+                    models["rtdetr"],
+                    {
+                        "x": batch_data["event"]["left"],
+                        "x_right": batch_data["event"]["right"],
                     },
-                    batch_gt_labels_stereo,
+                    gt_labels_forrtdetr,
                     lossDictAll,
-                    {}
+                    epoch_info,
+                    scaler if not models["rtdetr"].module.is_freeze else None
                 )
+                right_feature, selected_leftdetections, corresponding_gt_labels, indices = artifacts
 
-        # backward and optimize
-        batchSize = batch_data["event"]["left"].shape[0]
-        _backward_and_optimize(
-            models,
-            lossDictAll,
-            optimizer,  # dict containing sub optimzers
-            log_dict,
-            batchSize,
-            clip_max_norm,  # param used for amp
-            scaler if not models["rtdetr"].module.is_freeze else None  # Note: only training detr we need this.
-        )
+                if models["rtdetr"].module.is_freeze:
+                    # prepare GT labels for stereo and keypts prediction:
+                    batch_left_bboxes, batch_left_classes, batch_gt_labels_stereo, batch_gt_labels_keypt1, batch_gt_labels_keypt2 = [], [], [], [], []
+                    for indexInBatch, one_left_bboxes in enumerate(selected_leftdetections):
+                        one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes["bboxes"], in_fmt="cxcywh", out_fmt="xyxy".lower())
+                        one_left_bboxes_xyxy[:, [0, 2]] *= imageWidth
+                        one_left_bboxes_xyxy[:, [1, 3]] *= imageHeight
+                        one_gt_bboxes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"]
+                        one_gt_bboxes_stereo_reordered = one_gt_bboxes_stereo[indices[indexInBatch][1]]
+                        one_gt_classes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]
+                        one_gt_classes_stereo_reordered = one_gt_classes_stereo[indices[indexInBatch][1]]
+                        one_gt_featmap_keypt1 = batch_data["gt_labels"]["objdet"][indexInBatch]["keypt1_masks"]
+                        one_gt_featmap_keypt1_reordered = one_gt_featmap_keypt1[indices[indexInBatch][1]]
+                        one_gt_featmap_keypt2 = batch_data["gt_labels"]["objdet"][indexInBatch]["keypt2_masks"]
+                        one_gt_featmap_keypt2_reordered = one_gt_featmap_keypt2[indices[indexInBatch][1]]
+                        batch_left_bboxes.append(one_left_bboxes_xyxy)
+                        batch_left_classes.append(one_left_bboxes["classes"])
+                        batch_gt_labels_stereo.append({
+                            "bboxes": one_gt_bboxes_stereo_reordered,
+                            "classes": one_gt_classes_stereo_reordered
+                        })
+                        batch_gt_labels_keypt1.append(one_gt_featmap_keypt1_reordered)
+                        batch_gt_labels_keypt2.append(one_gt_featmap_keypt2_reordered)
+
+                    # ---------- stereo detection head ----------
+                    stereo_preds, lossDictAll = _forward_one_batch(
+                        models["stereo_detection_head"],
+                        {
+                            "right_feat": right_feature,
+                            "left_bboxes": batch_left_bboxes,
+                            "disp_prior": pred_disparity_pyramid[-1],
+                            "batch_img_metas": {"h": imageHeight, "w": imageWidth},
+                        },
+                        batch_gt_labels_stereo,
+                        lossDictAll,
+                        {}
+                    )[:2]
+
+                    keypt1_preds, lossDictAll = _forward_one_batch(
+                        models["featuremap_head"],
+                        {
+                            "img_feats": batch_data["event"]["left"],
+                            "bbox_preds": batch_left_bboxes,
+                            "class_preds": batch_left_classes,
+                            "feature_id": "keypt1"
+                        },
+                        batch_gt_labels_keypt1,
+                        lossDictAll,
+                        {}
+                    )[:2]
+
+                    keypt2_preds, lossDictAll = _forward_one_batch(
+                        models["featuremap_head"],
+                        {
+                            "img_feats": batch_data["event"]["left"],
+                            "bbox_preds": batch_left_bboxes,
+                            "class_preds": batch_left_classes,
+                            "feature_id": "keypt2"
+                        },
+                        batch_gt_labels_keypt2,
+                        lossDictAll,
+                        {}
+                    )[:2]
+
+            # backward and optimize
+            batchSize = batch_data["event"]["left"].shape[0]
+            _backward_and_optimize(
+                models,
+                lossDictAll,
+                optimizer,  # dict containing sub optimzers
+                log_dict,
+                batchSize,
+                clip_max_norm,  # param used for amp
+                scaler if not models["rtdetr"].module.is_freeze else None  # Note: only training detr we need this.
+            )
 
         if ema is not None:
             # exponential moving average
@@ -233,15 +269,17 @@ def train(
                     ema[key].update(model)
 
         if hasattr(models["disp_head"].module, 'is_freeze') and not models["disp_head"].module.is_freeze:
-            log_dict["EPE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["1PE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["2PE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["RMSE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["EPE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["1PE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["2PE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["RMSE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
 
-        pbar.update(1)
+        if tensorBoardLogger is not None:
+            pbar.update(1)
         torch.cuda.synchronize()
 
-    pbar.close()
+    if tensorBoardLogger is not None:
+        pbar.close()
     return log_dict
 
 
@@ -284,54 +322,126 @@ def valid(
 
 
         # ---------- concentration net ----------
-        left_event_sharp = _forward_one_batch(models["concentration_net"], {"x": batch_data["event"]["left"]})
-        right_event_sharp = _forward_one_batch(models["concentration_net"], {"x": batch_data["event"]["right"]})
+        left_event_sharp = _forward_one_batch(
+            models["concentration_net"],
+            {"x": batch_data["event"]["left"]},
+            None,
+            lossDictAll,
+            {}
+        )[0]
+        right_event_sharp = _forward_one_batch(
+            models["concentration_net"],
+            {"x": batch_data["event"]["right"]},
+            None,
+            lossDictAll,
+            {}
+        )[0]
+
+        imageHeight, imageWidth = left_event_sharp.shape[-2:]
 
         # ---------- disp pred net ----------
-        pred_disparity_pyramid = _forward_one_batch(models["disp_head"], {"left_img": left_event_sharp, "right_img": right_event_sharp})
-
-        if not models["disp_head"].module.is_freeze:
-            lossDictAll = _compute_loss(
-                models["disp_head"],
-                pred_disparity_pyramid,
-                batch_data["gt_labels"]["disparity"],
-                lossDictAll,
-                {},
-                None,
-            )[0]
-        
-        # ---------- detr net ----------
-        gt_labels_forrtdetr = [{
-            "bboxes": onegt["bboxes"][..., :4].clone(),  # Note: only left bbox is needed for detr
-            "labels": onegt["labels"].clone()
-            } for onegt in batch_data["gt_labels"]["objdet"]]
-
-        (left_detections, right_feature) = _forward_one_batch(
-            models["rtdetr"],
+        pred_disparity_pyramid, lossDictAll = _forward_one_batch(
+            models["disp_head"],
             {
-                "x": batch_data["event"]["left"],
-                "x_right": batch_data["event"]["right"],
-                "targets": gt_labels_forrtdetr  # Note: need this to generate some intermediate results for loss computation.
-            }
-        )
+                "left_img": left_event_sharp,
+                "right_img": right_event_sharp
+            },
+            batch_data["gt_labels"]["disparity"],
+            lossDictAll,
+            {}
+        )[:2]
 
-        if models["disp_head"].module.is_freeze and not models["rtdetr"].module.is_freeze:
+        if models["disp_head"].module.is_freeze:
+            # ---------- detr net ----------
+            gt_labels_forrtdetr = [
+                {
+                    "bboxes": onegt["bboxes"][..., :4].clone(),  # Note: only left bbox is needed for detr
+                    "labels": onegt["labels"].clone()
+                } for onegt in batch_data["gt_labels"]["objdet"]
+            ]
             global_step = epoch * len(data_loader) + indexBatch
             epoch_info = dict(epoch=epoch, step=indexBatch, global_step=global_step)
-            lossDictAll, artifacts = _compute_loss(
+            left_detections, lossDictAll, artifacts = _forward_one_batch(
                 models["rtdetr"],
-                left_detections,
+                {
+                    "x": batch_data["event"]["left"],
+                    "x_right": batch_data["event"]["right"],
+                },
                 gt_labels_forrtdetr,
                 lossDictAll,
                 epoch_info,
-                None
             )
+            right_feature, selected_leftdetections, corresponding_gt_labels, indices = artifacts
+
+            if models["rtdetr"].module.is_freeze:
+                # prepare GT labels for stereo and keypts prediction:
+                batch_left_bboxes, batch_left_classes, batch_gt_labels_stereo, batch_gt_labels_keypt1, batch_gt_labels_keypt2 = [], [], [], [], []
+                for indexInBatch, one_left_bboxes in enumerate(selected_leftdetections):
+                    one_left_bboxes_xyxy = torchvision.ops.box_convert(one_left_bboxes["bboxes"], in_fmt="cxcywh", out_fmt="xyxy".lower())
+                    one_left_bboxes_xyxy[:, [0, 2]] *= imageWidth
+                    one_left_bboxes_xyxy[:, [1, 3]] *= imageHeight
+                    one_gt_bboxes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"]
+                    one_gt_bboxes_stereo_reordered = one_gt_bboxes_stereo[indices[indexInBatch][1]]
+                    one_gt_classes_stereo = batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]
+                    one_gt_classes_stereo_reordered = one_gt_classes_stereo[indices[indexInBatch][1]]
+                    one_gt_featmap_keypt1 = batch_data["gt_labels"]["objdet"][indexInBatch]["keypt1_masks"]
+                    one_gt_featmap_keypt1_reordered = one_gt_featmap_keypt1[indices[indexInBatch][1]]
+                    one_gt_featmap_keypt2 = batch_data["gt_labels"]["objdet"][indexInBatch]["keypt2_masks"]
+                    one_gt_featmap_keypt2_reordered = one_gt_featmap_keypt2[indices[indexInBatch][1]]
+                    batch_left_bboxes.append(one_left_bboxes_xyxy)
+                    batch_left_classes.append(one_left_bboxes["classes"])
+                    batch_gt_labels_stereo.append({
+                        "bboxes": one_gt_bboxes_stereo_reordered,
+                        "classes": one_gt_classes_stereo_reordered
+                    })
+                    batch_gt_labels_keypt1.append(one_gt_featmap_keypt1_reordered)
+                    batch_gt_labels_keypt2.append(one_gt_featmap_keypt2_reordered)
+
+                # ---------- stereo detection head ----------
+                stereo_preds, lossDictAll = _forward_one_batch(
+                    models["stereo_detection_head"],
+                    {
+                        "right_feat": right_feature,
+                        "left_bboxes": batch_left_bboxes,
+                        "disp_prior": pred_disparity_pyramid[-1],
+                        "batch_img_metas": {"h": imageHeight, "w": imageWidth},
+                    },
+                    batch_gt_labels_stereo,
+                    lossDictAll,
+                    {}
+                )[:2]
+
+                keypt1_preds, lossDictAll = _forward_one_batch(
+                    models["featuremap_head"],
+                    {
+                        "img_feats": batch_data["event"]["left"],
+                        "bbox_preds": batch_left_bboxes,
+                        "class_preds": batch_left_classes,
+                        "feature_id": "keypt1"
+                    },
+                    batch_gt_labels_keypt1,
+                    lossDictAll,
+                    {}
+                )[:2]
+
+                keypt2_preds, lossDictAll = _forward_one_batch(
+                    models["featuremap_head"],
+                    {
+                        "img_feats": batch_data["event"]["left"],
+                        "bbox_preds": batch_left_bboxes,
+                        "class_preds": batch_left_classes,
+                        "feature_id": "keypt2"
+                    },
+                    batch_gt_labels_keypt2,
+                    lossDictAll,
+                    {}
+                )[:2]
 
         if hasattr(models["disp_head"].module, 'is_freeze') and not models["disp_head"].module.is_freeze:
-            log_dict["EPE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["1PE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["2PE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
-            log_dict["RMSE"].update(pred_disparity_pyramid[-1], batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["EPE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["1PE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["2PE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
+            log_dict["RMSE"].update(pred_disparity_pyramid[-1].cpu(), batch_data["disparity"].cpu(), mask.cpu())
 
         if tensorBoardLogger is not None:
             pbar.update(1)

@@ -60,7 +60,8 @@ class RTDETR(nn.Module):
     def predict(self, x, x_right, targets=None):
         x = self._backbone(x)
         x_right = self._backbone(x_right)
-        x = self._encoder(x)        
+        x = self._encoder(x)
+        x_right = self._encoder(x_right)
         x = self._decoder(x, targets)
         return x, x_right
 
