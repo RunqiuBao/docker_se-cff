@@ -167,16 +167,18 @@ class ConcentrationNet(nn.Module):
 
         return new_x
     
-    def forward(self, x, **kwargs):
-        preds = self.predict(x)
+    def forward(self, left_img, right_img, **kwargs):
+        left_preds = self.predict(left_img)
+        right_preds = self.predict(right_img)
         losses = None
         artifacts = None
-        return preds, losses, artifacts
+        return (left_preds, right_preds), losses, artifacts
     
     @staticmethod
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        input_tensor = torch.randn(*model.inputShape).to(device)
+        left_img = torch.randn(*model.input_shape).to(device)
+        right_img = torch.randn(*model.input_shape).to(device)
         model = model.to(device)
-        flops, numParams = profile(model, inputs=input_tensor, verbose=False)
+        flops, numParams = profile(model, inputs=(left_img, right_img), verbose=False)
         return flops, numParams

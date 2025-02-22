@@ -49,7 +49,7 @@ class RTDETR(nn.Module):
 
     @property
     def input_shape(self):
-        return [(1, 10, 480, 672), (1, 10, 480, 672)]
+        return (1, 10, 480, 672)
 
     def predict_single(self, x, targets=None):
         x = self._backbone(x)
@@ -75,6 +75,8 @@ class RTDETR(nn.Module):
             artifacts.append(selected_leftdetections)
             artifacts.append(corresponding_gt_labels)
             artifacts.append(indices)
+        if self.is_freeze:
+            losses = None
         return x, losses, artifacts
 
     def deploy(self, ):
@@ -105,8 +107,8 @@ class RTDETR(nn.Module):
     @staticmethod
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        input_tensor1 = torch.randn(*model.input_shape[0]).to(device)
-        input_tensor2 = torch.randn(*model.input_shape[1]).to(device)
+        input_tensor1 = torch.randn(model.input_shape).to(device)
+        input_tensor2 = torch.randn(model.input_shape).to(device)
         model = model.to(device)
         flops, numParams = profile(model, inputs=(input_tensor1, input_tensor2), verbose=False)
         return flops, numParams

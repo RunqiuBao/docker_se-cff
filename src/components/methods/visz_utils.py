@@ -344,7 +344,7 @@ def RenderImageWithBboxesAndKeypts(
     right_event_sharp: numpy.ndarray,
     obj_preds: Dict,
     is_enable_keypt: bool = False,
-    is_enable_facet: bool = True
+    is_enable_facet: bool = False
 ) -> Tuple[Tensor]:
     """
     Args:
@@ -384,7 +384,7 @@ def RenderImageWithBboxes(
 
     left_event_sharp = left_event_sharp - left_event_sharp.min()
     left_event_sharp = (left_event_sharp * 255 / left_event_sharp.max()).astype('uint8')
-    left_event_sharp = cv2.cvtColor(left_event_sharp, cv2.COLOR_GRAY2RGB)
+    left_event_sharp = cv2.cvtColor(left_event_sharp.squeeze(), cv2.COLOR_GRAY2RGB)
     imageHeight, imageWidth = left_event_sharp.shape[:2]
     if segMaps is not None:  
         instances_segmap = numpy.zeros_like(left_event_sharp, dtype='uint8')
@@ -392,7 +392,7 @@ def RenderImageWithBboxes(
         top_left = (max(min(int(bbox[0]), imageWidth), 0), max(min(int(bbox[1]), imageHeight), 0))
         top_right = (max(min(int(bbox[2]), imageWidth), 0), max(min(int(bbox[1]), imageHeight), 0))
         bottom_right = (int(bbox[2]), int(bbox[3]))
-        cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=1)
+        cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=2)
         text = 'cls: {}\nconfi: {}'.format(format(classindex.item(), '.2f'), format(confidence.item(), '.2f'))
         textposition = (int(top_right[0] + bottom_right[1]) // 2, int(top_right[1] + bottom_right[1]) // 2)
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))

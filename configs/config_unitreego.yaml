@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 600
 METHOD: event_stereo_object_detection
 DATASET:
   TRAIN:
@@ -50,26 +50,26 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   TEST:
     NAME: get_sequence_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: False
 MODEL:
   concentration_net_cfg:
     DICTKEY: concentration_net
     CLASSNAME: ConcentrationNet
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       in_channels: 10
       attention_method: soft
@@ -77,7 +77,7 @@ MODEL:
   disp_head_cfg:
     DICTKEY: disp_head
     CLASSNAME: StereoMatchingNetwork
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       in_channels: 1
       max_disp: 168
@@ -96,7 +96,7 @@ MODEL:
   rtdetr_cfg:
     DICTKEY: rtdetr
     CLASSNAME: RTDETR
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       inference:
         params:

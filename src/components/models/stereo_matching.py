@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from typing import Optional
+from thop import profile
 
 from .refinement import StereoDRNetRefinement
 from . import losses
@@ -89,6 +90,10 @@ class StereoMatchingNetwork(nn.Module):
     @property
     def is_freeze(self):
         return self._config["is_freeze"]
+    
+    @property
+    def input_shape(self):
+        return (1, 1, 480, 672)
 
     def disparity_refinement(self, left_img, right_img, disparity):
         disparity_pyramid = []
@@ -185,3 +190,12 @@ class StereoMatchingNetwork(nn.Module):
         ]
 
         return params_group
+
+    @staticmethod
+    def ComputeCostProfile(model):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        left_img = torch.randn(*model.input_shape).to(device)
+        right_img = torch.randn(*model.input_shape).to(device)
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=(left_img, right_img), verbose=False)
+        return flops, numParams

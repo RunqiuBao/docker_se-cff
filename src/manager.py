@@ -63,9 +63,9 @@ class DLManager:
                     "loading checkpoint {} ...".format(self.args.resume_cpt)
                 )
             # FIXME: adding 'module.' to each key in model state dict
-            for key, model in self.models.items():
+            for keyModel, model in self.models.items():
                 model_statedict = model.state_dict()
-                for key, value in checkpoint["models"][key].items():
+                for key, value in checkpoint["models"][keyModel].items():
                     if self.args.only_resume_weight_from is not None:
                         if self.args.only_resume_weight_from not in key:
                             continue
@@ -75,7 +75,7 @@ class DLManager:
                         model_statedict["module." + key] = value
                     else:
                         print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
-                self.models[key].load_state_dict(model_statedict)
+                self.models[keyModel].load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 for key, optimizer in self.optimizer.items():
                     self.optimizer[key].load_state_dict(checkpoint["optimizer"][key])
@@ -83,7 +83,7 @@ class DLManager:
                     self.scheduler[key].load_state_dict(checkpoint["scheduler"][key])
                 self.args.start_epoch = checkpoint["epoch"] + 1
                 self.current_epoch = self.args.start_epoch
-                print("resumed old training states.")                                
+                print("resumed old training states.")  
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME
@@ -111,20 +111,20 @@ class DLManager:
             is_distributed=self.args.is_distributed,
         )
 
-        # # profiling the network
-        # for key, model_cfg in self.cfg.MODEL.items():
-        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-        #     parameters = model_cfg.PARAMS
-        #     loss_cfg = self.cfg.LOSSES[key]
-        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-        #     # torch.Size([4, 1, 360, 576, 1, 10])
-        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-        #     if self.args.is_master:
-        #         self.logger.write(
-        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-        #         )
-        #     del profile_model
+        # profiling the network
+        for key, model_cfg in self.cfg.MODEL.items():
+            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+            parameters = model_cfg.PARAMS
+            loss_cfg = self.cfg.LOSSES[key]
+            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+            # torch.Size([4, 1, 360, 576, 1, 10])
+            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+            if self.args.is_master:
+                self.logger.write(
+                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+                )
+            del profile_model
 
         # freeze model gradients if static:
         self.method.freeze_static_components(self.models)
@@ -164,13 +164,13 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
-
+            
             valid_log_dict = self.method.valid(
-                models=[one_ema_model.module for one_ema_model in self.ema] if self.ema else [model.module for model in self.models],
+                models={key: one_ema_model.module for key, one_ema_model in self.ema.items()} if self.ema else {key: model.module for key, model in self.models.items()},
                 data_loader=valid_loader,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
-                logger=self.logger,
+                tensorBoardLogger=self.logger,
                 epoch=epoch
             )
 

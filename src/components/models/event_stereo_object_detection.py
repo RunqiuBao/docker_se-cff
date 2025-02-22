@@ -277,7 +277,7 @@ class StereoDetectionHead(nn.Module):
 
     def forward(
         self,
-        right_feat: Tensor,
+        right_feat: List[Tensor],
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
@@ -407,6 +407,23 @@ class StereoDetectionHead(nn.Module):
         candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
 
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
+    
+    @staticmethod
+    def ComputeCostProfile(model):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        right_feature = [
+            torch.randn((1, 384, 60, 84)).to(device),
+            torch.randn((1, 384, 30, 42)).to(device),
+            torch.randn((1, 384, 15, 21)).to(device),
+        ]
+        left_bboxes = [torch.randn((10, 4)).to(device)]
+        left_bboxes[0][:, [0, 2]] *= 672
+        left_bboxes[0][:, [1, 3]] *= 480
+        disp_prior = torch.randn((1, 480, 672)).to(device)
+        batch_img_metas = {"h": 480, "w": 672}
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=(right_feature, left_bboxes, disp_prior, batch_img_metas), verbose=False)
+        return flops, numParams
 
 
 class FeaturemapHead(nn.Module):
@@ -549,7 +566,7 @@ class FeaturemapHead(nn.Module):
 
     def forward(
         self,
-        img_feats: List[Tensor],
+        img_feats: Tensor,
         bbox_preds: List[Tensor],
         class_preds: List[Tensor],
         feature_id: str,
@@ -610,6 +627,19 @@ class FeaturemapHead(nn.Module):
             loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0))
         
         return loss_dict
+    
+    @staticmethod
+    def ComputeCostProfile(model):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        img_feats = torch.randn((1, 10, 480, 672)).to(device)
+        bbox_preds = [torch.randn((10, 4)).to(device)]
+        bbox_preds[0][:, [0, 2]] *= 672
+        bbox_preds[0][:, [1, 3]] *= 480
+        class_preds = [torch.randn((10,)).to(device)]
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=(img_feats, bbox_preds, class_preds, "profile"), verbose=False)
+        return flops, numParams
+
 
 class EventStereoObjectDetectionNetwork(nn.Module):
 
