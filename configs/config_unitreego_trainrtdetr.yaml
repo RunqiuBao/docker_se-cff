@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 600
+TOTAL_EPOCH: 1
 METHOD: event_stereo_object_detection
 DATASET:
   TRAIN:
