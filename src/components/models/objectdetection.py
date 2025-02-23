@@ -7,6 +7,7 @@ from typing import Sequence, Tuple, List, Dict, Union, Optional
 import math
 import numpy
 import time
+from thop import profile
 import copy
 import torch.profiler
 
@@ -1426,3 +1427,473 @@ class StereoEventDetectionHead(nn.Module):
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
 
 
+class ObjectDetectionHead(nn.Module):
+    def __init__(
+        self,
+        network_cfg: dict,
+        loss_cfg: dict,
+        is_freeze: bool,
+        **kwargs
+    ):
+        super(ObjectDetectionHead, self).__init__()
+        self._config = network_cfg
+        self._config["is_freeze"] = is_freeze
+        self.strides = [8, 16, 32]
+
+        # =========== feature extractor ===========
+        self._feature_extraction_net = FeatureExtractor2(
+            net_cfg=self._config["feature_extraction_net_cfg"]
+        )
+
+        # objdet tools
+        self.assigner = TASK_UTILS.build({'type': 'SimOTAAssigner', 'center_radius': 2.5})
+        self.sampler = PseudoSampler()
+
+        # loss preparation
+        self.loss_obj = MODELS.build({'type': 'CrossEntropyLoss',
+                                      'use_sigmoid': True,
+                                      'reduction': 'sum',
+                                      'loss_weight': 1.0})
+        self.loss_cls = MODELS.build({'type': 'CrossEntropyLoss',
+                                      'use_sigmoid': True,
+                                      'reduction': 'sum',
+                                      'loss_weight': 1.0})
+        self.loss_bbox = MODELS.build({'type': 'IoULoss',
+                                        'mode': 'square',
+                                        'eps': 1e-16,
+                                        'reduction': 'sum',
+                                        'loss_weight': 5.0})
+
+        self._init_layers()
+        self._init_weights()
+
+        # points generator for multi-level (mlvl) feature maps
+        self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
+
+    @property
+    def is_freeze(self):
+        return self._config["is_freeze"]
+    
+    @property
+    def input_shape(self):
+        return [(1, 10, 480, 672), (1, 10, 480, 672)]
+
+    def _init_layers(self):
+        # ========== multi level convs init ==========
+        self._multi_level_cls_convs = nn.ModuleList()
+        self._multi_level_reg_convs = nn.ModuleList()
+        self._multi_level_conv_cls = nn.ModuleList()
+        self._multi_level_conv_reg = nn.ModuleList()
+        self._multi_level_conv_obj = nn.ModuleList()
+        for indexLevel in range(len(self.strides)):
+            self._multi_level_cls_convs.append(
+                self._build_objdet_convs(
+                    num_stacked_convs=self._config['num_stacked_convs'],
+                    in_channels=self._config['in_channels'],  # Note: cost volume channel size
+                    feat_channels=self._config["feat_channels"],
+                    norm_eps=self._config["norm_cfg"]["eps"],
+                    norm_momentum=self._config["norm_cfg"]["momentum"],
+                    act_type=self._config["act_cfg"]["type"],
+                )
+            )
+            self._multi_level_reg_convs.append(
+                self._build_objdet_convs(
+                    num_stacked_convs=self._config['num_stacked_convs'],
+                    in_channels=self._config['in_channels'],
+                    feat_channels=self._config["feat_channels"],
+                    norm_eps=self._config["norm_cfg"]["eps"],
+                    norm_momentum=self._config["norm_cfg"]["momentum"],
+                    act_type=self._config["act_cfg"]["type"],
+                )
+            )
+            conv_cls = nn.Conv2d(
+                self._config["feat_channels"], self._config["num_classes"], 1
+            )
+            conv_reg = nn.Conv2d(self._config["feat_channels"], 4, 1)
+            conv_obj = nn.Conv2d(self._config["feat_channels"], 1, 1)
+            self._multi_level_conv_cls.append(conv_cls)
+            self._multi_level_conv_reg.append(conv_reg)
+            self._multi_level_conv_obj.append(conv_obj)
+
+    @staticmethod
+    def _build_objdet_convs(
+        num_stacked_convs: int,
+        in_channels: int,
+        feat_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        norm_eps: float = 1e-5,
+        norm_momentum: float = 0.1,
+        act_type: str = "ReLU",
+    ) -> nn.Sequential:
+        """
+        initialize conv (conv, bn, act) layes for a single level head.
+        """
+        stacked_convs = []
+        for indexConvLayer in range(num_stacked_convs):
+            stacked_convs.append(
+                nn.Conv2d(
+                    in_channels if indexConvLayer == 0 else feat_channels,
+                    feat_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                )
+            )
+            stacked_convs.append(
+                nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum)
+            )
+            stacked_convs.append(getattr(nn, act_type)())
+        return nn.Sequential(*stacked_convs)
+
+    def _init_weights(self):
+        """
+        all conv2d need weights initialization
+        """
+        for module_list in [
+            self._multi_level_cls_convs,
+            self._multi_level_reg_convs,
+            self._multi_level_conv_cls,
+            self._multi_level_conv_reg,
+            self._multi_level_conv_obj
+        ]:
+            for module in module_list:
+                if isinstance(module, nn.Conv2d):
+                    nn.init.kaiming_uniform_(
+                        module.weight,
+                        a=math.sqrt(5),
+                        mode="fan_in",
+                        nonlinearity="leaky_relu"
+                    )
+
+        prior_prob = 0.01
+        bias_init = float(-numpy.log((1 - prior_prob) / prior_prob))
+        for module_list in [self._multi_level_conv_cls, self._multi_level_conv_obj]:
+            for module in module_list:
+                module.bias.data.fill_(bias_init)
+
+    def predict(
+        self,
+        left_event_voxel: Tensor,
+        right_event_voxel: Tensor,
+    ) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
+        """
+        Args:
+            left_event_voxel: (B, 10, H, W) shape tensor.
+            right_event_voxel: (B, 10, H, W) shape tensor.
+        """
+        # feature extraction
+        left_features = self._feature_extraction_net(left_event_voxel)
+        right_features = self._feature_extraction_net(right_event_voxel)
+
+        cls_scores, bboxes, objectnesses = [], [], []
+        for indexLevel in range(len(left_features)):
+            cls_scores_one, bboxes_one, objectnesses_one = self.forward_objdet_single(
+                left_features[indexLevel],
+                self._multi_level_cls_convs[indexLevel],
+                self._multi_level_reg_convs[indexLevel],
+                self._multi_level_conv_cls[indexLevel],
+                self._multi_level_conv_reg[indexLevel],
+                self._multi_level_conv_obj[indexLevel]
+            )
+            cls_scores.append(cls_scores_one)
+            bboxes.append(bboxes_one)
+            objectnesses.append(objectnesses_one)
+
+        return bboxes, cls_scores, objectnesses, right_features
+
+    def forward(
+        self,
+        left_event_voxel: Tensor,
+        right_event_voxel: Tensor,
+        batch_img_metas: Dict,
+        labels=None,
+        **kwargs
+    ):
+        """
+        Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
+        """
+        preds = self.predict(left_event_voxel, right_event_voxel)
+        losses = None
+        artifacts = [preds[-1]]
+        preds = preds[:-1]
+        if labels is not None and not self.is_freeze:
+            losses_and_artifacts = self.compute_loss(preds, labels, batch_img_metas=batch_img_metas)
+            artifacts.extend(losses_and_artifacts[1:])
+            losses = losses_and_artifacts[0]
+        return preds, losses, artifacts
+
+    def forward_objdet_single(
+        self,
+        left_feat: Tensor,
+        cls_convs: nn.Module,
+        reg_convs: nn.Module,
+        conv_cls: nn.Module,
+        conv_reg: nn.Module,
+        conv_obj: nn.Module,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        forward feature of a single scale level
+        Args:
+            left_feat: (b, c, h, w) tensor from left camera of stereo pair.
+            ...
+        
+        Returns:
+            cls_score (Tensor): (b, num_classes, h, w) shape. 
+                                probabilities of class of the bbox at each grid.
+            bbox_pred (Tensor): (b, 4, h, w) shape.
+                                each grid contains one predicted bbox. 
+                                The dimension 4 contains [delta_x, delta_y, w_l, h_l].
+                                Note that stereo disparity will not be estimated here. 
+                                A rough disp estimation is from external, then fine disp will be estimated in stereo bbox regression part.
+            objectness (Tensor): (b, 1, h, w) shape.
+                                 Confidence of whether the object in the bbox is an object.
+                                 Will be used for non-maximum suppression.
+        """
+        # x = torch.cat((left_feat, right_feat), 1)
+        x = left_feat
+        # cls, bbox, objectness prediction, similar to yolo
+        cls_feat = cls_convs(x)
+        reg_feat = reg_convs(x)
+
+        cls_score = conv_cls(
+            cls_feat
+        )
+        bbox_pred = conv_reg(
+            reg_feat
+        )
+        objectness = conv_obj(
+            reg_feat
+        )
+        
+        return cls_score, bbox_pred, objectness
+
+    def compute_loss(
+        self,
+        preds: Tuple[List, List, List],
+        labels: List[Dict],
+        batch_img_metas: Dict
+    ):
+        bboxes, cls_scores, objectnesses = preds
+        (
+            loss_dict_bboxdet,
+            batch_selected_boxes,
+            batch_selected_classes,
+            batch_selected_confidences
+        ) = self.loss_by_bboxdet(
+            cls_scores,
+            bboxes,
+            objectnesses,
+            labels,
+            batch_img_metas
+        )
+
+        return loss_dict_bboxdet, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
+
+    def loss_by_bboxdet(
+        self,
+        cls_scores: Tuple[Tensor],
+        bbox_preds: Tuple[Tensor],
+        objectnesses: Tuple[Tensor],
+        gt_labels: List[Dict],
+        batch_img_metas: Dict
+    ) -> Tuple:
+        """
+        Train left side object detection only.
+        """
+        num_imgs = len(gt_labels)
+        featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
+        mlvl_priors = self.prior_generator.grid_priors(
+            featmap_sizes,
+            dtype=cls_scores[0].dtype,
+            device=cls_scores[0].device,
+            with_stride=True)
+
+        flatten_cls_preds = [
+            cls_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1,
+                                                 self._config['num_classes'])
+            for cls_pred in cls_scores
+        ]
+
+        flatten_bbox_preds = [
+            bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
+            for bbox_pred in bbox_preds
+        ]
+        flatten_objectness = [
+            objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
+            for objectness in objectnesses
+        ]
+
+        flatten_cls_preds = torch.cat(flatten_cls_preds, dim=1)
+        flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
+        flatten_objectness = torch.cat(flatten_objectness, dim=1)
+        flatten_priors = torch.cat(mlvl_priors)
+        flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
+
+        pos_masks, cls_targets, obj_targets, bbox_targets, num_pos_imgs = [], [], [], [], []
+        for indexInBatch in range(len(gt_labels)):
+            (
+                pos_mask,
+                cls_target,
+                obj_target,
+                bbox_target,
+                num_pos_img
+            ) = self._get_targets_single(
+                flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1)[indexInBatch],
+                flatten_cls_preds.detach()[indexInBatch],
+                flatten_bboxes.detach()[indexInBatch],
+                flatten_objectness.detach()[indexInBatch],
+                gt_labels[indexInBatch],
+                img_meta=batch_img_metas)
+            pos_masks.append(pos_mask)
+            cls_targets.append(cls_target)
+            obj_targets.append(obj_target)
+            bbox_targets.append(bbox_target)
+            num_pos_imgs.append(num_pos_img)
+
+        num_pos = torch.tensor(
+            sum(num_pos_imgs),
+            dtype=torch.float,
+            device=flatten_cls_preds.device)
+        num_total_samples = max(num_pos, 1.0)
+        
+        pos_masks = torch.cat(pos_masks, 0)
+        cls_targets = torch.cat(cls_targets, 0)
+        obj_targets = torch.cat(obj_targets, 0)
+        bbox_targets = torch.cat(bbox_targets, 0)        
+        
+        loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
+        if num_pos > 0:
+            loss_cls = self.loss_cls(
+                flatten_cls_preds.view(-1, self._config['num_classes'])[pos_masks],
+                cls_targets) / num_total_samples
+            loss_bbox = self.loss_bbox(
+                flatten_bboxes.view(-1, 4)[pos_masks],
+                bbox_targets) / num_total_samples
+        else:
+            # Avoid cls and reg branch not participating in the gradient
+            # propagation when there is no ground-truth in the images.
+            # For more details, please refer to
+            # https://github.com/open-mmlab/mmdetection/issues/7298
+            loss_cls = flatten_cls_preds.sum() * 0
+            loss_bbox = flatten_bboxes.sum() * 0
+        loss_dict = {
+            'loss_cls': loss_cls,
+            'loss_bbox': loss_bbox,
+            'loss_obj': loss_obj
+        }
+
+        batch_selected_boxes = []
+        batch_selected_classes = []
+        batch_selected_confidences = []
+        pos_masks = pos_masks.reshape(num_imgs, -1)
+        for index_img in range(num_imgs):
+            batch_selected_boxes.append(
+                flatten_bboxes[index_img][pos_masks[index_img]].detach()
+            )
+            batch_selected_classes.append(
+                torch.argmax(flatten_cls_preds[index_img][pos_masks[index_img]].detach(), dim=1)
+            )
+            batch_selected_confidences.append(
+                torch.max(flatten_cls_preds[index_img][pos_masks[index_img]], dim=-1)[0].detach() * flatten_objectness[index_img][pos_masks[index_img]].detach()
+            )
+        return  loss_dict, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
+
+    def _get_targets_single(
+        self,
+        priors: Tensor,
+        cls_preds: Tensor,
+        decoded_bboxes: Tensor,
+        objectness: Tensor,
+        gt_labels: InstanceData,
+        img_meta: dict,
+    ):
+        num_priors = priors.shape[0]
+        num_gts = gt_labels['bboxes'].shape[0]
+        # No target
+        if num_gts == 0:
+            cls_target = cls_preds.new_zeros((0, self.num_classes))
+            bbox_target = cls_preds.new_zeros((0, 4))
+            obj_target = cls_preds.new_zeros((num_priors, 1))
+            pos_mask = cls_preds.new_zeros(num_priors).bool()
+            return (pos_mask, cls_target, obj_target, bbox_target, 0)
+
+        # YOLOX uses center priors with 0.5 offset to assign targets,
+        # but use center priors without offset to regress bboxes.
+        offset_priors = torch.cat(
+            [priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
+
+        scores = cls_preds.sigmoid() * objectness.unsqueeze(1).sigmoid()
+        pred_instances = InstanceData(
+            bboxes=decoded_bboxes,
+            scores=scores.sqrt_(),
+            priors=offset_priors
+        )
+        
+        gt_instances = InstanceData(
+            bboxes=gt_labels['bboxes'][:, :4],
+            labels=gt_labels['labels']
+        )
+        assign_result = self.assigner.assign(
+            pred_instances=pred_instances,
+            gt_instances=gt_instances
+        )
+        sampling_result = self.sampler.sample(assign_result, pred_instances, gt_instances)
+
+        pos_inds = sampling_result.pos_inds
+        num_pos_per_img = pos_inds.size(0)
+
+        pos_ious = assign_result.max_overlaps[pos_inds]
+        # IOU aware classification score
+        cls_target = F.one_hot(sampling_result.pos_gt_labels,
+                               self._config['num_classes']) * pos_ious.unsqueeze(-1)
+        obj_target = torch.zeros_like(objectness).unsqueeze(-1)
+        obj_target[pos_inds] = 1
+        bbox_target = sampling_result.pos_gt_bboxes
+        pos_mask = torch.zeros_like(objectness).to(torch.bool)
+        pos_mask[pos_inds] = 1
+        return (pos_mask, cls_target, obj_target, bbox_target, num_pos_per_img)
+    
+    def _bbox_decode(self, priors: Tensor, bbox_preds: Tensor) -> Tensor:
+        """
+        Decode bbox regression result (delta_x, delta_y, w, h, delta_x_r, w_r) to
+        bboxes (tl_x, tl_y, br_x, br_y) format.
+
+        Args:
+            priors (Tensor): Center proiors of an image, has shape
+                (num_instances, 2).
+            bbox_preds (Tensor): Box energies / deltas for all instances,
+                has shape (batch_size, num_instances, 4).
+
+        Returns:
+            Tensor: Decoded bboxes in (tl_x, tl_y, br_x, br_y) format. Has
+            shape (batch_size, num_instances, 4).
+        """
+        xys = (bbox_preds[..., :2] * priors[:, 2:]) + priors[:, :2]
+        whs = bbox_preds[..., 2:].exp() * priors[:, 2:]
+
+        tl_x = (xys[..., 0] - whs[..., 0] / 2)
+        tl_y = (xys[..., 1] - whs[..., 1] / 2)
+        br_x = (xys[..., 0] + whs[..., 0] / 2)
+        br_y = (xys[..., 1] + whs[..., 1] / 2)
+
+        decoded_bboxes = torch.stack([tl_x, tl_y, br_x, br_y], -1)
+        return decoded_bboxes
+
+    @staticmethod
+    def ComputeCostProfile(model):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        right_feature = [
+            torch.randn((1, 384, 60, 84)).to(device),
+            torch.randn((1, 384, 30, 42)).to(device),
+            torch.randn((1, 384, 15, 21)).to(device),
+        ]
+        left_bboxes = [torch.randn((10, 4)).to(device)]
+        left_bboxes[0][:, [0, 2]] *= 672
+        left_bboxes[0][:, [1, 3]] *= 480
+        disp_prior = torch.randn((1, 480, 672)).to(device)
+        batch_img_metas = {"h": 480, "w": 672}
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=(right_feature, left_bboxes, disp_prior, batch_img_metas), verbose=False)
+        return flops, numParams

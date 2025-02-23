@@ -1,0 +1,294 @@
+TOTAL_EPOCH: 300
+METHOD: event_stereo_object_detection_with_yolo
+DATASET:
+  TRAIN:
+    NAME: unitreego
+    PARAMS:
+      split: train
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 672
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 500000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  VALID:
+    NAME: unitreego
+    PARAMS:
+      split: valid
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 672
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 500000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+  TEST:
+    NAME: unitreego
+    PARAMS:
+      split: test
+      sampling_ratio: 1
+      crop_height: 480
+      crop_width: 672
+      randomhorizontalflip: False
+      event_cfg:
+        NAME: sbn
+        PARAMS:
+          num_of_event: 500000
+          stack_method: MixedDensityEventStacking
+          stack_size: 10
+          use_preprocessed_image: False
+DATALOADER:
+  TRAIN:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  VALID:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: True
+  TEST:
+    NAME: get_sequence_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: False
+MODEL:
+  concentration_net_cfg:
+    DICTKEY: concentration_net
+    CLASSNAME: ConcentrationNet
+    is_freeze: True
+    PARAMS:
+      in_channels: 10
+      attention_method: soft
+      base_channels: 32
+  disp_head_cfg:
+    DICTKEY: disp_head
+    CLASSNAME: StereoMatchingNetwork
+    is_freeze: True
+    PARAMS:
+      in_channels: 1
+      max_disp: 168
+      refine_channels: 1
+      num_downsample: 2
+      no_mdconv: False
+      feature_similarity: "correlation"
+      num_scales: 3
+      num_fusions: 6
+      deformable_groups: 2
+      mdconv_dilation: 2
+      no_intermediate_supervision: False
+      num_stage_blocks: 1
+      num_deform_blocks: 3
+      isInputFeature: False
+  objdet_head_cfg:
+    DICTKEY: objdet_head
+    CLASSNAME: ObjectDetectionHead
+    is_freeze: True
+    PARAMS:
+      # feature extraction net
+      feature_extraction_net_cfg:
+        backbone:
+          stem_in_channels: 10
+          type: CSPDarknet
+          deepen_factor: 0.33
+          widen_factor: 0.5
+          out_indices: [2, 3, 4]
+          use_depthwise: False
+          spp_kernal_sizes: [5, 9, 13]
+          norm_cfg:
+            type: 'BN'
+            momentum: 0.03
+            eps: 0.001
+          act_cfg:
+            type: 'Swish'
+        neck:
+          type: YOLOXPAFPN
+          in_channels: [128, 256, 512]
+          out_channels: 128
+          num_csp_blocks: 1
+          use_depthwise: False
+          upsample_cfg: 
+            scale_factor: 2
+            mode: nearest
+          norm_cfg:
+            type: 'BN'
+            momentum: 0.03
+            eps: 0.001
+          act_cfg:
+            type: 'Swish'
+      min_bbox_size: 5
+      # detection
+      num_classes: 80
+      in_channels: 128
+      feat_channels: 256
+      num_stacked_convs: 2
+      num_topk_candidates: 30
+      bbox_expand_factor: 1.6
+      strides: [8, 16, 32]
+      norm_cfg:
+        type: BN
+        momentum: 0.03
+        eps: 0.001
+      act_cfg:
+        type: ReLU
+      # region proposal
+      nms_pre: 100
+      nms_iou_threshold: 0.5
+  stereo_detection_head_cfg:
+    DICTKEY: stereo_detection_head
+    CLASSNAME: StereoDetectionHead
+    is_freeze: False
+    PARAMS:
+      freeze_leftobjdet: True
+      # detection
+      num_classes: 1
+      in_channels: 128
+      feat_channels: 256
+      num_stacked_convs: 2
+      bbox_expand_factor: 1.6
+      strides: [8, 16, 32]
+      norm_cfg:
+        type: BN
+        momentum: 0.03
+        eps: 0.001
+      act_cfg:
+        type: ReLU
+      # right bbox regression
+      right_roi_feat_size: 7
+      r_iou_threshold: 0.4
+      candidates_k: 8
+      # inference:
+      rscore_threshold: 0.9
+  featuremap_head_cfg:
+    DICTKEY: featuremap_head
+    CLASSNAME: FeaturemapHead
+    is_freeze: False
+    PARAMS:
+      # keypt prediction
+      keypt_pred_cfg:
+        is_enable: True
+        PARAMS:
+          # keypt prediction
+          enlarge_roi_factor: 1.5
+          num_classes: 80
+          feat_size: 14
+          in_channels: 10
+          feat_channels: 512
+      facet_pred_cfg:
+        is_enable: False
+        PARAMS:
+          enlarge_roi_factor: 1.5
+          num_classes: 1
+          facet_feat_size: 14
+          facet_in_channels: 10
+          facet_feat_channels: 512
+  featuremap_head2_cfg:
+    DICTKEY: featuremap_head2
+    CLASSNAME: FeaturemapHead
+    is_freeze: False
+    PARAMS:
+      # keypt prediction
+      keypt_pred_cfg:
+        is_enable: True
+        PARAMS:
+          # keypt prediction
+          enlarge_roi_factor: 1.5
+          num_classes: 80
+          feat_size: 14
+          in_channels: 10
+          feat_channels: 512
+      facet_pred_cfg:
+        is_enable: False
+        PARAMS:
+          enlarge_roi_factor: 1.5
+          num_classes: 1
+          facet_feat_size: 14
+          facet_in_channels: 10
+          facet_feat_channels: 512
+LOSSES:
+  concentration_net_cfg:
+    noloss: True
+  disp_head_cfg:
+    NAME: DisparityLoss
+    ls_loss_weight: 1.0
+    warp_loss_weight: 100.0
+    use_warp_loss: False
+  objdet_head_cfg:
+    noloss: True
+  stereo_detection_head_cfg:
+    noloss: True
+  featuremap_head_cfg:
+    noloss: True
+  featuremap_head2_cfg:
+    noloss: True
+OPTIMIZER:
+  # one type of optimizer being enabled
+  optimizer0:
+    is_enable: True
+    NAME: Adam
+    PARAMS:
+      lr: 0.0005
+      weight_decay: 0.0001
+  optimizer1:
+    is_enable: False
+    NETWORK_TYPE: DETR
+    NAME: AdamW
+    PARAMS:
+      params: 
+        - 
+          params: '^(?=.*backbone)(?!.*norm|bn).*$'
+          lr: 0.000001
+        - 
+          params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$'
+          weight_decay: 0.
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.0001
+LEARNING_CONFIG:
+  clip_max_norm: 0.1
+  use_amp: True  # Automatic Mixed Precision
+  amp:
+    type: GradScaler
+  use_ema: True # Exponential Moving Average
+  ema:
+    type: 
+    params:
+      decay: 0.9999
+      warmups: 2000
+SCHEDULER:
+# one type of scheduler being enabled at a time
+  scheduler0:
+    is_enable: True
+    NAME: CosineAnnealingWarmupRestarts
+    PARAMS:
+      cycle_mult: 1.0
+      first_cycle_steps: 100
+      gamma: 1.0
+      lr_ratio: 0.0001
+      warmup_steps: 3
+  scheduler1:
+    is_enable: False
+    NAME: DETR_SCHEDULER
+    PARAMS:
+      lr_scheduler:
+        type: MultiStepLR
+        params:
+          milestones: [1000]
+          gamma: 0.1
+      lr_warmup_scheduler:
+        type: LinearWarmup
+        params:
+          warmup_duration: 2000

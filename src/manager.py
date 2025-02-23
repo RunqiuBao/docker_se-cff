@@ -111,20 +111,20 @@ class DLManager:
             is_distributed=self.args.is_distributed,
         )
 
-        # profiling the network
-        for key, model_cfg in self.cfg.MODEL.items():
-            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-            parameters = model_cfg.PARAMS
-            loss_cfg = self.cfg.LOSSES[key]
-            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-            # torch.Size([4, 1, 360, 576, 1, 10])
-            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-            if self.args.is_master:
-                self.logger.write(
-                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-                )
-            del profile_model
+        # # profiling the network
+        # for key, model_cfg in self.cfg.MODEL.items():
+        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+        #     parameters = model_cfg.PARAMS
+        #     loss_cfg = self.cfg.LOSSES[key]
+        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+        #     # torch.Size([4, 1, 360, 576, 1, 10])
+        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+        #     if self.args.is_master:
+        #         self.logger.write(
+        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+        #         )
+        #     del profile_model
 
         # freeze model gradients if static:
         self.method.freeze_static_components(self.models)
@@ -318,7 +318,7 @@ def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = F
 
 
 def _prepare_optimizer(optimizers_cfg: dict, models):
-    for key, optimizer_cfg in optimizers_cfg.items():
+    for optimizer_cfg in optimizers_cfg.values():
         if not optimizer_cfg.is_enable:
             continue
         name = optimizer_cfg.NAME
@@ -343,7 +343,7 @@ def _prepare_optimizer(optimizers_cfg: dict, models):
                     params_group = model.module.get_params_group(learning_rate)
                 else:
                     params_group = get_optim_params(optimizer_cfg.PARAMS, model)
-                optimizer = getattr(optim, name)(params_group, **parameters.PARAMS)
+                optimizer = getattr(optim, name)(params_group, **parameters)
                 dict_optimizer[key] = optimizer
         break
     return dict_optimizer
