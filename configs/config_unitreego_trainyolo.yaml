@@ -137,6 +137,7 @@ MODEL:
       num_stacked_convs: 2
       num_topk_candidates: 30
       bbox_expand_factor: 1.6
+      # prior generator strides
       strides: [8, 16, 32]
       norm_cfg:
         type: BN
@@ -152,9 +153,8 @@ MODEL:
     CLASSNAME: StereoDetectionHead
     is_freeze: False
     PARAMS:
-      freeze_leftobjdet: True
       # detection
-      num_classes: 1
+      num_classes: 3
       in_channels: 128
       feat_channels: 256
       num_stacked_convs: 2
@@ -175,7 +175,7 @@ MODEL:
   featuremap_head_cfg:
     DICTKEY: featuremap_head
     CLASSNAME: FeaturemapHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
@@ -183,7 +183,7 @@ MODEL:
         PARAMS:
           # keypt prediction
           enlarge_roi_factor: 1.5
-          num_classes: 80
+          num_classes: 3
           feat_size: 14
           in_channels: 10
           feat_channels: 512
@@ -198,7 +198,7 @@ MODEL:
   featuremap_head2_cfg:
     DICTKEY: featuremap_head2
     CLASSNAME: FeaturemapHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
@@ -206,7 +206,7 @@ MODEL:
         PARAMS:
           # keypt prediction
           enlarge_roi_factor: 1.5
-          num_classes: 80
+          num_classes: 3
           feat_size: 14
           in_channels: 10
           feat_channels: 512

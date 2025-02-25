@@ -14,13 +14,13 @@ import torch.profiler
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
 from mmdet.models.task_modules.samplers import PseudoSampler
 from mmengine.structures import InstanceData
-from mmdet.structures.bbox import cat_boxes
 from mmdet.registry import TASK_UTILS, MODELS
 from mmdet.structures.mask import mask_target, BitmapMasks
 from mmengine.config import Config
 from mmcv.ops import batched_nms
 
-from .utils.misc import DetachCopyNested, freeze_module_grads
+from .utils.misc import freeze_module_grads
+from .utils.objdet_utils import _get_targets_single
 from . import losses
 from .rtdetr.rtdetr import RTDETR
 from .rtdetr.rtdetr_criterion import RTDETRCriterion
@@ -1183,183 +1183,6 @@ class StereoEventDetectionHead(nn.Module):
 
         decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
         return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
-
-    def _bbox_decode(self, priors: Tensor, bbox_preds: Tensor) -> Tensor:
-        """
-        Decode bbox regression result (delta_x, delta_y, w, h, delta_x_r, w_r) to
-        bboxes (tl_x, tl_y, br_x, br_y) format.
-
-        Args:
-            priors (Tensor): Center proiors of an image, has shape
-                (num_instances, 2).
-            bbox_preds (Tensor): Box energies / deltas for all instances,
-                has shape (batch_size, num_instances, 4).
-
-        Returns:
-            Tensor: Decoded bboxes in (tl_x, tl_y, br_x, br_y) format. Has
-            shape (batch_size, num_instances, 4).
-        """
-        xys = (bbox_preds[..., :2] * priors[:, 2:]) + priors[:, :2]
-        whs = bbox_preds[..., 2:].exp() * priors[:, 2:]
-
-        tl_x = (xys[..., 0] - whs[..., 0] / 2)
-        tl_y = (xys[..., 1] - whs[..., 1] / 2)
-        br_x = (xys[..., 0] + whs[..., 0] / 2)
-        br_y = (xys[..., 1] + whs[..., 1] / 2)
-
-        decoded_bboxes = torch.stack([tl_x, tl_y, br_x, br_y], -1)
-        return decoded_bboxes
-
-    @torch.no_grad()
-    def _get_targets_stereo_single(
-        self,
-        priors: Tensor,
-        cls_scores: Tensor,
-        bboxes: Tensor,
-        objectness: Tensor,
-        gt_labels: Dict,
-        img_metas: Dict
-    ) -> tuple:
-        """
-        Compute classification, regression, and objectness targets for priors in the left image
-    
-        Args:
-            priors (Tensor): Grid priors of the image. 
-                             A 2D tensor with shape [num_priors, 4] in [cx, cy, stride_w, stride_y] format.
-                             each grid represents one pred at that pixel.
-            cls_scores (Tensor): Classification predictions of one image. 
-                                 A 2D tensor with shape [num_priors, num_classes].
-            bboxes (Tensor): Decoded bboxes predictions. 
-                             A 2D tensor with shape [num_priors, 6].
-            objectness (Tensor): Objectness predictions of one image, a 1D tensor with shape [num_priors]
-            gt_labels (Dict): It includes 'bboxes' (num_instances, 11) and 'labels' (num_instances,) and 'keypt1_masks' and 'keypt2_masks'.
-            img_metas (Dict): meta info about the input image width and height. 
-        """
-        num_priors = priors.shape[0]
-        num_gts = gt_labels['bboxes'].shape[0]
-
-        # no target
-        if num_gts == 0:
-            cls_target = cls_scores.new_zeros((0, self._config['num_classes']))
-            bbox_target = cls_scores.new_zeros((0, 6))
-            obj_target = cls_scores.new_zeros((num_priors, 1))
-            pos_mask = cls_scores.new_zeros(num_priors).bool()
-            indices_bbox_target = cls_scores.new_zeros((0, 1))
-            return (pos_mask, cls_target, obj_target, bbox_target, indices_bbox_target, 0)
-
-        # (refer to YOLOX) use center priors with 0.5 offset to assign targets,
-        # but use center priors without offset to regress bboxes
-        offset_priors = torch.cat([priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
-        scores = cls_scores.sigmoid() * objectness.unsqueeze(1).sigmoid()
-
-        pred_instances = InstanceData(
-            bboxes=bboxes[:, :4],
-            scores=scores.sqrt_(),
-            priors=offset_priors
-        )
-        gt_instances = InstanceData(
-            bboxes=gt_labels['bboxes'][:, :4],
-            labels=gt_labels['labels'],
-            sbboxes=gt_labels['bboxes'][:, :]
-        )
-
-        starttime = time.time()
-        # use SimOTA dynamic assigner, same as yolox
-        assign_result = self.assigner.assign(
-            pred_instances=pred_instances,
-            gt_instances=gt_instances
-        )
-        # with torch.profiler.profile(
-        #     activities=[
-        #         torch.profiler.ProfilerActivity.CPU,
-        #         torch.profiler.ProfilerActivity.CUDA],
-        #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log')
-        # ) as prof:
-        #     assign_result = self.assigner.assign(
-        #         pred_instances=pred_instances,
-        #         gt_instances=gt_instances
-        #     )
-        # if not self.training:
-        #     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-        # use a pesudo sampler to get all results. just for using mmdet util's api.
-        starttime = time.time()
-        sampling_result = self.sampler.sample(
-            assign_result,
-            pred_instances,
-            gt_instances
-        )
-        # print("----- pesudo sampler: {}".format(time.time() - starttime))
-
-        pos_inds = sampling_result.pos_inds
-        num_pos_per_img = pos_inds.size(0)
-
-        pos_ious = assign_result.max_overlaps[pos_inds]
-        # Yolox: IoU aware classification scores
-        cls_target = F.one_hot(sampling_result.pos_gt_labels, self._config['num_classes']) * pos_ious.unsqueeze(-1)
-        obj_target = torch.zeros_like(objectness).unsqueeze(-1)
-        obj_target[pos_inds] = 1
-        bbox_target = sampling_result.pos_gt_sbboxes
-        indices_bbox_target = sampling_result.pos_bboxes_indices
-        pos_mask = torch.zeros_like(objectness).to(torch.bool)
-        pos_mask[pos_inds] = True
-        
-        return (pos_mask, cls_target, obj_target, bbox_target, indices_bbox_target, num_pos_per_img)
-
-    def _get_targets_single(
-        self,
-        priors: Tensor,
-        cls_preds: Tensor,
-        decoded_bboxes: Tensor,
-        objectness: Tensor,
-        gt_labels: InstanceData,
-        img_meta: dict,
-    ):
-        num_priors = priors.shape[0]
-        num_gts = gt_labels['bboxes'].shape[0]
-        # No target
-        if num_gts == 0:
-            cls_target = cls_preds.new_zeros((0, self.num_classes))
-            bbox_target = cls_preds.new_zeros((0, 4))
-            obj_target = cls_preds.new_zeros((num_priors, 1))
-            pos_mask = cls_preds.new_zeros(num_priors).bool()
-            return (pos_mask, cls_target, obj_target, bbox_target, 0)
-
-        # YOLOX uses center priors with 0.5 offset to assign targets,
-        # but use center priors without offset to regress bboxes.
-        offset_priors = torch.cat(
-            [priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
-
-        scores = cls_preds.sigmoid() * objectness.unsqueeze(1).sigmoid()
-        pred_instances = InstanceData(
-            bboxes=decoded_bboxes,
-            scores=scores.sqrt_(),
-            priors=offset_priors
-        )
-        
-        gt_instances = InstanceData(
-            bboxes=gt_labels['bboxes'][:, :4],
-            labels=gt_labels['labels']
-        )
-        assign_result = self.assigner.assign(
-            pred_instances=pred_instances,
-            gt_instances=gt_instances
-        )
-        sampling_result = self.sampler.sample(assign_result, pred_instances, gt_instances)
-
-        pos_inds = sampling_result.pos_inds
-        num_pos_per_img = pos_inds.size(0)
-
-        pos_ious = assign_result.max_overlaps[pos_inds]
-        # IOU aware classification score
-        cls_target = F.one_hot(sampling_result.pos_gt_labels,
-                               self._config['num_classes']) * pos_ious.unsqueeze(-1)
-        obj_target = torch.zeros_like(objectness).unsqueeze(-1)
-        obj_target[pos_inds] = 1
-        bbox_target = sampling_result.pos_gt_bboxes
-        pos_mask = torch.zeros_like(objectness).to(torch.bool)
-        pos_mask[pos_inds] = 1
-        return (pos_mask, cls_target, obj_target, bbox_target, num_pos_per_img)
     
     @torch.no_grad()
     def batch_iou_calculator_simple(self, bboxes_preds: Tensor, bboxes_ref: Tensor):
@@ -1469,6 +1292,10 @@ class ObjectDetectionHead(nn.Module):
 
         # points generator for multi-level (mlvl) feature maps
         self.prior_generator = MlvlPointGenerator(self.strides, offset=0)
+
+    @property
+    def config(self):
+        return self._config
 
     @property
     def is_freeze(self):
@@ -1616,11 +1443,13 @@ class ObjectDetectionHead(nn.Module):
         """
         preds = self.predict(left_event_voxel, right_event_voxel)
         losses = None
-        artifacts = [preds[-1]]
+        artifacts = [preds[-1], None, None, None]
         preds = preds[:-1]
         if labels is not None and not self.is_freeze:
             losses_and_artifacts = self.compute_loss(preds, labels, batch_img_metas=batch_img_metas)
-            artifacts.extend(losses_and_artifacts[1:])
+            artifacts[1] = losses_and_artifacts[1]
+            artifacts[2] = losses_and_artifacts[2]
+            artifacts[3] = losses_and_artifacts[3]
             losses = losses_and_artifacts[0]
         return preds, losses, artifacts
 
@@ -1738,14 +1567,18 @@ class ObjectDetectionHead(nn.Module):
                 cls_target,
                 obj_target,
                 bbox_target,
+                indices_bbox_target,
                 num_pos_img
-            ) = self._get_targets_single(
+            ) = _get_targets_single(
                 flatten_priors.unsqueeze(0).repeat(num_imgs, 1, 1)[indexInBatch],
                 flatten_cls_preds.detach()[indexInBatch],
                 flatten_bboxes.detach()[indexInBatch],
                 flatten_objectness.detach()[indexInBatch],
                 gt_labels[indexInBatch],
-                img_meta=batch_img_metas)
+                img_meta=batch_img_metas,
+                config=self.config,
+                assigner=self.assigner,
+                sampler=self.sampler)
             pos_masks.append(pos_mask)
             cls_targets.append(cls_target)
             obj_targets.append(obj_target)
@@ -1800,61 +1633,6 @@ class ObjectDetectionHead(nn.Module):
             )
         return  loss_dict, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
 
-    def _get_targets_single(
-        self,
-        priors: Tensor,
-        cls_preds: Tensor,
-        decoded_bboxes: Tensor,
-        objectness: Tensor,
-        gt_labels: InstanceData,
-        img_meta: dict,
-    ):
-        num_priors = priors.shape[0]
-        num_gts = gt_labels['bboxes'].shape[0]
-        # No target
-        if num_gts == 0:
-            cls_target = cls_preds.new_zeros((0, self.num_classes))
-            bbox_target = cls_preds.new_zeros((0, 4))
-            obj_target = cls_preds.new_zeros((num_priors, 1))
-            pos_mask = cls_preds.new_zeros(num_priors).bool()
-            return (pos_mask, cls_target, obj_target, bbox_target, 0)
-
-        # YOLOX uses center priors with 0.5 offset to assign targets,
-        # but use center priors without offset to regress bboxes.
-        offset_priors = torch.cat(
-            [priors[:, :2] + priors[:, 2:] * 0.5, priors[:, 2:]], dim=-1)
-
-        scores = cls_preds.sigmoid() * objectness.unsqueeze(1).sigmoid()
-        pred_instances = InstanceData(
-            bboxes=decoded_bboxes,
-            scores=scores.sqrt_(),
-            priors=offset_priors
-        )
-        
-        gt_instances = InstanceData(
-            bboxes=gt_labels['bboxes'][:, :4],
-            labels=gt_labels['labels']
-        )
-        assign_result = self.assigner.assign(
-            pred_instances=pred_instances,
-            gt_instances=gt_instances
-        )
-        sampling_result = self.sampler.sample(assign_result, pred_instances, gt_instances)
-
-        pos_inds = sampling_result.pos_inds
-        num_pos_per_img = pos_inds.size(0)
-
-        pos_ious = assign_result.max_overlaps[pos_inds]
-        # IOU aware classification score
-        cls_target = F.one_hot(sampling_result.pos_gt_labels,
-                               self._config['num_classes']) * pos_ious.unsqueeze(-1)
-        obj_target = torch.zeros_like(objectness).unsqueeze(-1)
-        obj_target[pos_inds] = 1
-        bbox_target = sampling_result.pos_gt_bboxes
-        pos_mask = torch.zeros_like(objectness).to(torch.bool)
-        pos_mask[pos_inds] = 1
-        return (pos_mask, cls_target, obj_target, bbox_target, num_pos_per_img)
-    
     def _bbox_decode(self, priors: Tensor, bbox_preds: Tensor) -> Tensor:
         """
         Decode bbox regression result (delta_x, delta_y, w, h, delta_x_r, w_r) to

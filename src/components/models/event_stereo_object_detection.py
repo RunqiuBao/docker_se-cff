@@ -289,12 +289,86 @@ class StereoDetectionHead(nn.Module):
         """
         preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_factor"])
         losses = None
-        if labels is not None and not self.is_freeze:
-            losses = self.compute_loss(preds, labels)
         artifacts = None
+        if labels is not None and not self.is_freeze:
+            if kwargs["detector_format"] == "detr":
+                losses = self.compute_loss_detrformat(preds, labels)
+            elif kwargs["detector_format"] == "yolox":
+                losses, artifacts = self.compute_loss_yoloxformat(preds, labels)
         return preds, losses, artifacts
+    
+    def compute_loss_yoloxformat(self, preds: Tuple[List, List, List], labels: Dict):
+        """
+        Args:
+            preds:
+            labels: dict containing the following keys.
+                pos_masks: (B*100,)
+                cls_targets: (sum(?), num_classes)
+                bbox_targets: (sum(?), 6)
+                indices_bbox_targets:
+                batch_num_pos_per_img:
+        """
+        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = preds
+        pos_masks, cls_targets, bbox_targets, indices_bbox_targets, batch_num_pos_per_img = labels["pos_masks"], labels["cls_targets"], labels["bbox_targets"], labels["indices_bbox_targets"], labels["batch_num_pos_per_img"]
+        loss_dict = {}
+        num_batch = len(list_sbboxes_pred)
+        list_sbboxes_pred_refined = []
 
-    def compute_loss(self, preds: Tuple[List, List, List], labels: List[Dict]):
+        rbboxes_targets = torch.cat([
+            bbox_targets[:, 4].unsqueeze(-1),
+            bbox_targets[:, 1].unsqueeze(-1),
+            bbox_targets[:, 5].unsqueeze(-1),
+            bbox_targets[:, 3].unsqueeze(-1)
+        ], dim=1)
+        right_bboxes = torch.concat(list_refined_right_bboxes, dim=0)
+        right_scores = torch.concat(list_right_scores_refine, dim=0)
+        bboxes = torch.concat(list_sbboxes_pred, dim=0)  # shape [1, 100, 6]. (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format bbox, all in global scale.
+
+        batch_size, num_priors, num_grids = right_bboxes.shape[:3]
+        kernel_size = self._config['right_roi_feat_size']
+        rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks]
+        num_positive = rbboxes_refined.shape[0]
+        ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
+
+        rselect_mask, rbboxes_refined_selected, rbboxes_targets_selected = self.batch_assigner(
+            rbboxes_refined,
+            ious,
+            rbboxes_targets,
+            self._config['r_iou_threshold'],
+            self._config['candidates_k']
+        )
+        num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
+        num_total_samples_timesk = max(num_pos_timesk, 1.0)
+        
+        loss_rbbox = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected) / num_total_samples_timesk
+
+        # right scores
+        rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks].sigmoid()
+        ## dynamic targets
+        rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
+        rbboxes_scores_targets[rselect_mask] = 1
+        
+        loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples_timesk
+        from IPython import embed; embed()       
+
+        # substitute right bboxes in sbboxes for visualization.
+        bboxes = bboxes.view(-1, 6)
+        selected_sbboxes = bboxes[pos_masks]
+        indices_highest_score = torch.argmax(rbboxes_scores.squeeze(-1), dim=1)
+        rbboxes_highest_score = torch.gather(rbboxes_refined, 1, indices_highest_score.view(num_positive, 1, 1).expand(-1, -1, 4)).squeeze(1)            
+        selected_sbboxes[:, 4] = rbboxes_highest_score[:, 0]
+        selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
+        bboxes[pos_masks] = selected_sbboxes
+        bboxes = bboxes.view(batch_size, num_priors, 6)
+        list_sbboxes_pred_refined.append(bboxes)
+        # print("----- time sub sub2 loss stereo: {}".format(time.time() - starttime))
+        
+        loss_dict["loss_rbbox"] = loss_rbbox
+        loss_dict["loss_rscore"] = loss_rscore
+
+        return loss_dict, list_sbboxes_pred_refined
+
+    def compute_loss_detrformat(self, preds: Tuple[List, List, List], labels: List[Dict]):
         list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = preds
         loss_dict = {}
         for indexInBatch in range(len(labels)):
@@ -369,7 +443,7 @@ class StereoDetectionHead(nn.Module):
         unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
         ious = intersectionAreas / unionAreas
         return ious, torch.max(ious, dim=-1)[1]
-    
+
     def batch_assigner(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
         """
         for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
@@ -575,9 +649,10 @@ class FeaturemapHead(nn.Module):
     ):
         preds = self.predict(img_feats, bbox_preds, feature_id)
         losses = None
-        if labels is not None and not self.is_freeze:
-            losses = self.compute_loss([preds, bbox_preds, class_preds], labels, feature_id + "_loss")
         artifacts = None
+        if labels is not None and not self.is_freeze:
+            losses, list_featmap_preds_inclass, list_mask_targets = self.compute_loss([preds, bbox_preds, class_preds], labels, "loss_" + feature_id)
+            artifacts = (list_featmap_preds_inclass, list_mask_targets)
         return preds, losses, artifacts
     
     def compute_loss(
@@ -624,9 +699,9 @@ class FeaturemapHead(nn.Module):
             list_mask_targets.append(mask_targets)
 
         if len(list_featmap_preds_inclass) > 0:
-            loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0))
+            loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0)) * 100  # Note: times 100 to increase loss magnitude
         
-        return loss_dict
+        return loss_dict, list_featmap_preds_inclass, list_mask_targets
     
     @staticmethod
     def ComputeCostProfile(model):
@@ -847,6 +922,7 @@ class EventStereoObjectDetectionNetwork(nn.Module):
             specific_layer_name = ['_keypt_feature_extraction_net', 'keypt2_predictor', 'keypt1_predictor', "offset_conv.weight", "offset_conv.bias"]
         else:
             specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]# Note: exist in deform conv.
+
         def filter_specific_params(kv):
             specific_layer_name = ["offset_conv.weight", "offset_conv.bias"]  
             for name in specific_layer_name:
