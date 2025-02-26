@@ -1575,7 +1575,6 @@ class ObjectDetectionHead(nn.Module):
                 flatten_bboxes.detach()[indexInBatch],
                 flatten_objectness.detach()[indexInBatch],
                 gt_labels[indexInBatch],
-                img_meta=batch_img_metas,
                 config=self.config,
                 assigner=self.assigner,
                 sampler=self.sampler)
@@ -1594,7 +1593,7 @@ class ObjectDetectionHead(nn.Module):
         pos_masks = torch.cat(pos_masks, 0)
         cls_targets = torch.cat(cls_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
-        bbox_targets = torch.cat(bbox_targets, 0)        
+        bbox_targets = torch.cat(bbox_targets, 0)[..., :4]
         
         loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
         if num_pos > 0:
