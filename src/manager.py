@@ -164,7 +164,7 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
-            
+
             valid_log_dict = self.method.valid(
                 models={key: one_ema_model.module for key, one_ema_model in self.ema.items()} if self.ema else {key: model.module for key, model in self.models.items()},
                 data_loader=valid_loader,

@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 1
 METHOD: event_stereo_object_detection_with_yolo
 DATASET:
   TRAIN:
@@ -50,13 +50,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   TEST:
@@ -101,7 +101,7 @@ MODEL:
       # feature extraction net
       feature_extraction_net_cfg:
         backbone:
-          stem_in_channels: 10
+          stem_in_channels: 1
           type: CSPDarknet
           deepen_factor: 0.33
           widen_factor: 0.5
@@ -131,7 +131,7 @@ MODEL:
             type: 'Swish'
       min_bbox_size: 5
       # detection
-      num_classes: 80
+      num_classes: 1
       in_channels: 128
       feat_channels: 256
       num_stacked_convs: 2
@@ -151,10 +151,10 @@ MODEL:
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # detection
-      num_classes: 80
+      num_classes: 1
       in_channels: 128
       feat_channels: 256
       num_stacked_convs: 2
@@ -169,22 +169,22 @@ MODEL:
       # right bbox regression
       right_roi_feat_size: 7
       r_iou_threshold: 0.4
-      candidates_k: 3
+      candidates_k: 8
       # inference:
       rscore_threshold: 0.9
   featuremap_head_cfg:
     DICTKEY: featuremap_head
     CLASSNAME: FeaturemapHead
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
         is_enable: True
         PARAMS:
           # keypt prediction
-          enlarge_roi_factor: 1.5
-          num_classes: 80
-          feat_size: 14
+          enlarge_roi_factor: 1.1
+          num_classes: 1
+          feat_size: 28
           in_channels: 10
           feat_channels: 512
       facet_pred_cfg:
@@ -198,16 +198,16 @@ MODEL:
   featuremap_head2_cfg:
     DICTKEY: featuremap_head2
     CLASSNAME: FeaturemapHead
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
         is_enable: True
         PARAMS:
           # keypt prediction
-          enlarge_roi_factor: 1.5
-          num_classes: 80
-          feat_size: 14
+          enlarge_roi_factor: 1.1
+          num_classes: 1
+          feat_size: 28
           in_channels: 10
           feat_channels: 512
       facet_pred_cfg:

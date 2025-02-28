@@ -166,12 +166,12 @@ def train(
             tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
 
         if models["disp_head"].module.is_freeze:
-            # ---------- objdet net ----------
+            # ---------- objdet net ----------            
             left_detections, lossDictAll, artifacts = _forward_one_batch(
                 models["objdet_head"],
                 {
-                    "left_event_voxel": batch_data["event"]["left"],
-                    "right_event_voxel": batch_data["event"]["right"],
+                    "left_event_voxel": left_event_sharp,
+                    "right_event_voxel": right_event_sharp,
                     "batch_img_metas": {"h": imageHeight, "w": imageWidth},
                 },
                 batch_data["gt_labels"]["objdet"],
@@ -267,21 +267,22 @@ def train(
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None:
-                        right_bboxes = artifacts[0].detach()[0]
-                        right_bboxes = torch.cat([
-                            right_bboxes[..., 4].unsqueeze(-1),
-                            right_bboxes[..., 1].unsqueeze(-1),
-                            right_bboxes[..., 5].unsqueeze(-1),
-                            right_bboxes[..., 3].unsqueeze(-1)
-                        ], dim=-1)
-                        rightimage_visz = RenderImageWithBboxes(
-                            right_event_sharp[0].detach().squeeze(1).cpu().numpy(),
-                            {
-                                "bboxes": right_bboxes[pos_masks],
-                                "classes": torch.max(left_cls_scores_selected[0][pos_masks], dim=-1)[-1],
-                            }
-                        )
-                        tensorBoardLogger.add_image("(train) right sharp with bboxes", rightimage_visz[0])
+                        if artifacts is not None:
+                            right_bboxes = artifacts[0].detach()[0]
+                            right_bboxes = torch.cat([
+                                right_bboxes[..., 4].unsqueeze(-1),
+                                right_bboxes[..., 1].unsqueeze(-1),
+                                right_bboxes[..., 5].unsqueeze(-1),
+                                right_bboxes[..., 3].unsqueeze(-1)
+                            ], dim=-1)
+                            rightimage_visz = RenderImageWithBboxes(
+                                right_event_sharp[0].detach().squeeze(1).cpu().numpy(),
+                                {
+                                    "bboxes": right_bboxes[pos_masks],
+                                    "classes": torch.max(left_cls_scores_selected[0][pos_masks], dim=-1)[-1],
+                                }
+                            )
+                            tensorBoardLogger.add_image("(train) right sharp with bboxes", rightimage_visz[0])
 
                     batch_left_bboxes, batch_left_class_preds, batch_gt_labels_keypt1, batch_gt_labels_keypt2 = [], [], [], []
                     batch_size, num_priors = left_bboxes_selected.shape[:2]
@@ -457,8 +458,8 @@ def valid(
             left_detections, lossDictAll, artifacts = _forward_one_batch(
                 models["objdet_head"],
                 {
-                    "left_event_voxel": batch_data["event"]["left"],
-                    "right_event_voxel": batch_data["event"]["right"],
+                    "left_event_voxel": left_event_sharp,
+                    "right_event_voxel": right_event_sharp,
                     "batch_img_metas": {"h": imageHeight, "w": imageWidth},
                 },
                 batch_data["gt_labels"]["objdet"],
@@ -481,7 +482,7 @@ def valid(
                         "classes": left_selected_classes[0],
                     }
                 )
-                tensorBoardLogger.add_image("(train) left sharp with bboxes", leftimage_visz[0])
+                tensorBoardLogger.add_image("(valid) left sharp with bboxes", leftimage_visz[0])
 
             if models["objdet_head"].is_freeze:
                 (
@@ -551,25 +552,25 @@ def valid(
                         lossDictAll,
                         {}
                     )
-                    from IPython import embed; embed()
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None:
-                        right_bboxes = artifacts[0].detach()[0]
-                        right_bboxes = torch.cat([
-                            right_bboxes[..., 4].unsqueeze(-1),
-                            right_bboxes[..., 1].unsqueeze(-1),
-                            right_bboxes[..., 5].unsqueeze(-1),
-                            right_bboxes[..., 3].unsqueeze(-1)
-                        ], dim=-1)
-                        rightimage_visz = RenderImageWithBboxes(
-                            right_event_sharp[0].detach().squeeze(1).cpu().numpy(),
-                            {
-                                "bboxes": right_bboxes[pos_masks],
-                                "classes": torch.max(left_cls_scores_selected[0][pos_masks], dim=-1)[-1],
-                            }
-                        )
-                        tensorBoardLogger.add_image("(train) right sharp with bboxes", rightimage_visz[0])
+                        if artifacts is not None:
+                            right_bboxes = artifacts[0].detach()[0]
+                            right_bboxes = torch.cat([
+                                right_bboxes[..., 4].unsqueeze(-1),
+                                right_bboxes[..., 1].unsqueeze(-1),
+                                right_bboxes[..., 5].unsqueeze(-1),
+                                right_bboxes[..., 3].unsqueeze(-1)
+                            ], dim=-1)
+                            rightimage_visz = RenderImageWithBboxes(
+                                right_event_sharp[0].detach().squeeze(1).cpu().numpy(),
+                                {
+                                    "bboxes": right_bboxes[pos_masks],
+                                    "classes": torch.max(left_cls_scores_selected[0][pos_masks], dim=-1)[-1],
+                                }
+                            )
+                            tensorBoardLogger.add_image("(valid) right sharp with bboxes", rightimage_visz[0])
 
                     batch_left_bboxes, batch_left_class_preds, batch_gt_labels_keypt1, batch_gt_labels_keypt2 = [], [], [], []
                     batch_size, num_priors = left_bboxes_selected.shape[:2]

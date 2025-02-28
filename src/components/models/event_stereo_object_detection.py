@@ -17,7 +17,6 @@ from .stereo_matching import StereoMatchingNetwork
 from .objectdetection import StereoEventDetectionHead
 
 
-
 from . import losses
 from .utils.misc import freeze_module_grads, unfreeze_module_grads, multi_apply, convert_tensor_to_numpy
 from ..methods.visz_utils import RenderImageWithBboxes, RenderImageWithBboxesAndKeypts
@@ -349,7 +348,6 @@ class StereoDetectionHead(nn.Module):
         rbboxes_scores_targets[rselect_mask] = 1
         
         loss_rscore = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples_timesk
-        from IPython import embed; embed()       
 
         # substitute right bboxes in sbboxes for visualization.
         bboxes = bboxes.view(-1, 6)
@@ -699,7 +697,7 @@ class FeaturemapHead(nn.Module):
             list_mask_targets.append(mask_targets)
 
         if len(list_featmap_preds_inclass) > 0:
-            loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0)) * 100  # Note: times 100 to increase loss magnitude
+            loss_dict[lossKey] = self.loss_featuremap(torch.cat(list_featmap_preds_inclass, dim=0), torch.cat(list_mask_targets, dim=0))  # Note: times 100 to increase loss magnitude
         
         return loss_dict, list_featmap_preds_inclass, list_mask_targets
     
