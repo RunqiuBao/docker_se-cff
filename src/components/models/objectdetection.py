@@ -1445,7 +1445,7 @@ class ObjectDetectionHead(nn.Module):
         losses = None
         artifacts = [preds[-1], None, None, None]
         preds = preds[:-1]
-        if labels is not None and not self.is_freeze:
+        if labels is not None:
             losses_and_artifacts = self.compute_loss(preds, labels, batch_img_metas=batch_img_metas)
             artifacts[1] = losses_and_artifacts[1]
             artifacts[2] = losses_and_artifacts[2]
@@ -1595,14 +1595,14 @@ class ObjectDetectionHead(nn.Module):
         obj_targets = torch.cat(obj_targets, 0)
         bbox_targets = torch.cat(bbox_targets, 0)[..., :4]
         
-        loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
-        if num_pos > 0:
+        if (not self.is_freeze) and num_pos > 0:
             loss_cls = self.loss_cls(
                 flatten_cls_preds.view(-1, self._config['num_classes'])[pos_masks],
                 cls_targets) / num_total_samples
             loss_bbox = self.loss_bbox(
                 flatten_bboxes.view(-1, 4)[pos_masks],
                 bbox_targets) / num_total_samples
+            loss_obj = self.loss_obj(flatten_objectness.view(-1, 1), obj_targets) / num_total_samples
         else:
             # Avoid cls and reg branch not participating in the gradient
             # propagation when there is no ground-truth in the images.
@@ -1610,6 +1610,7 @@ class ObjectDetectionHead(nn.Module):
             # https://github.com/open-mmlab/mmdetection/issues/7298
             loss_cls = flatten_cls_preds.sum() * 0
             loss_bbox = flatten_bboxes.sum() * 0
+            loss_obj = flatten_objectness.sum() * 0
         loss_dict = {
             'loss_cls': loss_cls,
             'loss_bbox': loss_bbox,

@@ -67,6 +67,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         """
         bboxes = []
         labels = []
+        keypts = []
         for indexInstance, oneInstance in enumerate(labels_data["shapes"]):
             labels.append(numpy.array([int(oneInstance["label"])]))
             x_keypt2 = (oneInstance["keypt2"][0][0] + oneInstance["keypt2"][1][0]) / 2
@@ -88,15 +89,23 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     ]
                 )[numpy.newaxis, :]
             )
+            keypts.append(
+                numpy.array([
+                    [oneInstance["keypt1"][0], oneInstance["keypt1"][1], 2],
+                    [(oneInstance["keypt2"][0][0] + oneInstance["keypt2"][1][0]) / 2.0, (oneInstance["keypt2"][0][1] + oneInstance["keypt2"][1][1]) / 2.0, 2]
+                ])[numpy.newaxis, :]
+            )
         bboxes = numpy.concatenate(bboxes, axis=0)
         labels = numpy.concatenate(labels)
+        keypts = numpy.concatenate(keypts, axis=0)
         keypt1_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 1)
         keypt2_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 2)
         return {
             "bboxes": bboxes,
             "labels": labels,
             "keypt1_masks": keypt1_masks,
-            "keypt2_masks": keypt2_masks
+            "keypt2_masks": keypt2_masks,
+            "keypts": keypts
         }
     
     def GetGtKeyptDistanceMasks(self, bboxes: Tensor, keypts: Tensor, indexKeypt: int) -> Tensor:

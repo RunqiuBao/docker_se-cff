@@ -202,7 +202,7 @@ class DLManager:
         for sequence_dataloader in test_loader:            
             sequence_name = sequence_dataloader.dataset.sequence_name
             self.method.test(
-                model=self.model,
+                model=self.models,
                 data_loader=sequence_dataloader,
                 sequence_name=sequence_name,  # Note: for saving debug images
                 save_root=self.args.save_root,

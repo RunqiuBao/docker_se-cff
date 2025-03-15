@@ -155,6 +155,7 @@ class VerticalFlip:
             bboxes_cformat[:, 8],
             y_keypt2_new,
         )
+        sample["keypts"][:, :, 1] = self.img_height - sample["keypts"][:, :, 1]
         return sample
 
 
@@ -189,6 +190,7 @@ class HorizontalFlip:
                 bboxes_cformat[:, 9],
             ]
         )
+        sample["keypts"][:, :, 0] = self.img_width - sample["keypts"][:, :, 0]
         return sample
 
 

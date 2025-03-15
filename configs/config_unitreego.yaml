@@ -1,5 +1,5 @@
 TOTAL_EPOCH: 300
-METHOD: event_stereo_object_detection_with_yolo
+METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
     NAME: unitreego
@@ -95,46 +95,13 @@ MODEL:
       isInputFeature: False
   objdet_head_cfg:
     DICTKEY: objdet_head
-    CLASSNAME: ObjectDetectionHead
+    CLASSNAME: YoloPose
     is_freeze: True
     PARAMS:
-      # feature extraction net
-      feature_extraction_net_cfg:
-        backbone:
-          stem_in_channels: 1
-          type: CSPDarknet
-          deepen_factor: 0.33
-          widen_factor: 0.5
-          out_indices: [2, 3, 4]
-          use_depthwise: False
-          spp_kernal_sizes: [5, 9, 13]
-          norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
-        neck:
-          type: YOLOXPAFPN
-          in_channels: [128, 256, 512]
-          out_channels: 128
-          num_csp_blocks: 1
-          use_depthwise: False
-          upsample_cfg: 
-            scale_factor: 2
-            mode: nearest
-          norm_cfg:
-            type: 'BN'
-            momentum: 0.03
-            eps: 0.001
-          act_cfg:
-            type: 'Swish'
       min_bbox_size: 5
       # detection
       num_classes: 1
-      in_channels: 128
-      feat_channels: 256
-      num_stacked_convs: 2
+      in_channels: 1
       num_topk_candidates: 30
       bbox_expand_factor: 1.6
       # prior generator strides
@@ -151,7 +118,7 @@ MODEL:
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       # detection
       num_classes: 1
@@ -172,68 +139,23 @@ MODEL:
       candidates_k: 8
       # inference:
       rscore_threshold: 0.9
-  featuremap_head_cfg:
-    DICTKEY: featuremap_head
-    CLASSNAME: FeaturemapHead
-    is_freeze: False
-    PARAMS:
-      # keypt prediction
-      keypt_pred_cfg:
-        is_enable: True
-        PARAMS:
-          # keypt prediction
-          enlarge_roi_factor: 1.1
-          num_classes: 1
-          feat_size: 28
-          in_channels: 10
-          feat_channels: 512
-      facet_pred_cfg:
-        is_enable: False
-        PARAMS:
-          enlarge_roi_factor: 1.5
-          num_classes: 1
-          facet_feat_size: 14
-          facet_in_channels: 10
-          facet_feat_channels: 512
-  featuremap_head2_cfg:
-    DICTKEY: featuremap_head2
-    CLASSNAME: FeaturemapHead
-    is_freeze: False
-    PARAMS:
-      # keypt prediction
-      keypt_pred_cfg:
-        is_enable: True
-        PARAMS:
-          # keypt prediction
-          enlarge_roi_factor: 1.1
-          num_classes: 1
-          feat_size: 28
-          in_channels: 10
-          feat_channels: 512
-      facet_pred_cfg:
-        is_enable: False
-        PARAMS:
-          enlarge_roi_factor: 1.5
-          num_classes: 1
-          facet_feat_size: 14
-          facet_in_channels: 10
-          facet_feat_channels: 512
 LOSSES:
   concentration_net_cfg:
-    noloss: True
+    skiplossconf: True
   disp_head_cfg:
     NAME: DisparityLoss
     ls_loss_weight: 1.0
     warp_loss_weight: 100.0
     use_warp_loss: False
   objdet_head_cfg:
-    noloss: True
+    bbox_loss_weight: 7.5
+    cls_loss_weight: 0.5
+    dfl_loss_weight: 1.5
+    pose_loss_weight: 12.0
+    kobj_loss_weight: 1.0
   stereo_detection_head_cfg:
-    noloss: True
-  featuremap_head_cfg:
-    noloss: True
-  featuremap_head2_cfg:
-    noloss: True
+    pose_loss_weight: 12.0
+    kobj_loss_weight: 1.0
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:
