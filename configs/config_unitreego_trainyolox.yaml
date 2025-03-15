@@ -50,13 +50,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 4
+      batch_size: 1
       shuffle: False
       drop_last: True
   TEST:
@@ -151,7 +151,7 @@ MODEL:
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       # detection
       num_classes: 1
@@ -175,7 +175,7 @@ MODEL:
   featuremap_head_cfg:
     DICTKEY: featuremap_head
     CLASSNAME: FeaturemapHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
@@ -198,7 +198,7 @@ MODEL:
   featuremap_head2_cfg:
     DICTKEY: featuremap_head2
     CLASSNAME: FeaturemapHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # keypt prediction
       keypt_pred_cfg:
