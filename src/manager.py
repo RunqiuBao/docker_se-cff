@@ -40,6 +40,20 @@ class DLManager:
         assert cfg is not None
         self.cfg = cfg
 
+        # profiling the network
+        for key, model_cfg in self.cfg.MODEL.items():
+            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+            parameters = model_cfg.PARAMS
+            loss_cfg = self.cfg.LOSSES[key]
+            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+            if self.args.is_master:
+                self.logger.write(
+                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+                )
+            del profile_model
+
         self.models = _prepare_models(
             self.cfg.MODEL,
             self.cfg.LOSSES,
@@ -110,20 +124,6 @@ class DLManager:
             dataloader_cfg=self.cfg.DATALOADER.VALID,
             is_distributed=self.args.is_distributed,
         )
-
-        # profiling the network
-        for key, model_cfg in self.cfg.MODEL.items():
-            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-            parameters = model_cfg.PARAMS
-            loss_cfg = self.cfg.LOSSES[key]
-            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-            if self.args.is_master:
-                self.logger.write(
-                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-                )
-            del profile_model
 
         # freeze model gradients if static:
         self.method.freeze_static_components(self.models)
