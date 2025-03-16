@@ -7,6 +7,7 @@ import cv2
 import time
 import torchvision
 from typing import Optional
+from torch import Tensor
 
 from tqdm import tqdm
 from collections import OrderedDict
@@ -25,6 +26,18 @@ from..models.utils.misc import freeze_module_grads
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def ExtractRefinedBboxes(refined_bboxes: Tensor, refined_scores: Tensor):
+    """
+    for each instance, find the highest scored one in ker_h * ker_w and select the corresponding bbox as the final.
+    Args:
+        refined_bboxes: (B, NumInstance, ker_h * ker_w, 4).
+        refined_scores: (B, NumInstance, ker_h * ker_w, 1).
+    """
+    indices_highest_score = torch.argmax(refined_scores.squeeze(-1), dim=-1)
+    refined_bboxes_selected = torch.gather(refined_bboxes, -2, indices_highest_score.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 4)).squeeze(-2)
+    return refined_bboxes_selected
 
 
 def freeze_static_components(models: dict):
@@ -585,6 +598,7 @@ def test(
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
         batch_img_metas = {"h": imageHeight, "w": imageWidth}
+        num_classes = models["objdet_head"].module.config["num_classes"]
 
         # ---------- disp pred net ----------
         pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
@@ -596,28 +610,144 @@ def test(
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
         left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
             left_detections_multilevels_detachcopy,
-            conf_thres=0.001,
+            conf_thres=0.52,
             iou_thres=0.7,
             labels=[],
             nc=1,
             multi_label=True,
             agnostic=False,
-            max_det=models["objdet_head"].config["num_topk_candidates"],
+            max_det=models["objdet_head"].module.config["num_topk_candidates"],
             end2end=False,
         )
 
-        # ---------- stereo detection head ----------
-        left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
-        batch_sbboxes_pred, batch_refined_right_bboxes, batch_right_scores_refine, pred_kpts = models["stereo_detection_head"].module.predict(
-            right_feature,
-            left_bboxes_nmsed_topked,
-            pred_disparity_pyramid[-1],
-            batch_img_metas,
-            models["stereo_detection_head"].module.config["bbox_expand_factor"],
-            True
-        )
+        batch_refined_right_bboxes_selected = None
+        if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
+            # ---------- stereo detection head ----------
+            left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
+            batch_sbboxes_pred, batch_refined_right_bboxes, batch_right_scores_refine, right_pred_kpts = models["stereo_detection_head"].module.predict(
+                right_feature,
+                left_bboxes_nmsed_topked,
+                pred_disparity_pyramid[-1],
+                batch_img_metas,
+                models["stereo_detection_head"].module.config["bbox_expand_factor"],
+                True
+            )
+
+            assert left_event_sharp.shape[0] == 1  # batch size should be 1        
+            batch_refined_right_bboxes_selected = [ExtractRefinedBboxes(batch_refined_right_bboxes[0], batch_right_scores_refine[0])]
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
+
+        if batch_refined_right_bboxes_selected is not None:
+            # (l_tl_x, l_tl_y, r_br_x, r_br_y,
+            #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
+            #                                                                  l_kpt0_x, l_kpt0_y, l_kpt1_x, l_kpt1_y,
+            #                                                                                                          r_kpt0_x, r_kpt0_y, r_kpt1_x, r_kpt1_y, class_label, confidence)
+            prediction_dict = {
+                "objdet": [
+                    torch.concat([
+                        left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
+                        batch_refined_right_bboxes_selected[0][0],
+                        left_bboxesClsKeypts_nmsed_topked[0][:, 5:7],
+                        left_bboxesClsKeypts_nmsed_topked[0][:, 8:10],
+                        right_pred_kpts[nms_topk_mask][:, 0:2],
+                        right_pred_kpts[nms_topk_mask][:, 3:5],
+                        torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
+                        torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
+                    ], dim=1)
+                ],
+                "concentrate": {
+                    "left": left_event_sharp,
+                    "right": right_event_sharp
+                }
+            
+            }
+            SaveTestResultsAndVisualize(
+                prediction_dict,
+                indexBatch,
+                batch_data["end_timestamp"].item(),
+                sequence_name,
+                save_root,
+                batch_data["image_metadata"]
+            )
+
         pbar.update(1)
     pbar.close()
+    return
+
+
+def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, sequence_name: str, save_root: str, img_metas: dict):
+    """
+    for EventStereoObjectDetectionNetwork.
+    Args:
+        pred:
+            objdet: List[Tensor]. Each tensor is a (NumInstance, 18) shape.
+            concentrate: Dict[Tensor]. "left" and "right", each is a (B, 1, H, W) shape tensor.
+        indexBatch: index of the batch in dataset.
+        timestamp: timestamp of the batch.
+        sequence_name: name of the data sequence. for saving.
+        save_root: path.
+        img_metas: "h" and "w" of each input frame. Usaually contains padding.
+    """
+    # save detection results in txt, frame by frame.
+    path_det_results_folder = os.path.join(save_root, "inference", "detections", sequence_name)
+    path_tsfile = os.path.join(save_root, "inference", "detections", sequence_name, "timestamps.txt")
+    os.makedirs(path_det_results_folder, exist_ok=True)
+    ts_openmode = "a" if os.path.isfile(path_tsfile) else "w"
+    with open(path_tsfile, ts_openmode) as tsfile:
+        tsfile.write(str(timestamp) + "\n")
+    detresults_openmode = "w"
+    batch_size = len(pred['objdet'])
+    for indexInBatch, detection in enumerate(pred['objdet']):
+        with open(os.path.join(path_det_results_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".txt"), detresults_openmode) as detresult_file:
+            for indexDet in range(detection.shape[0]):
+                oneDet = numpy.array2string(detection[indexDet].cpu().numpy(), separator=" ", max_line_width=numpy.inf, formatter={'float_kind':lambda x: "%.4f" % x})[1:-1]
+                detresult_file.write(oneDet + "\n")
+
+    # save detection visualization results, frame by frame. Concate left and right horizontally.
+    path_det_visz_folder = os.path.join(save_root, "inference", "det_visz", sequence_name)
+    path_concentrate_left_folder = os.path.join(save_root, "inference", "left", sequence_name)
+    path_concentrate_right_folder = os.path.join(save_root, "inference", "right", sequence_name)
+    os.makedirs(path_det_visz_folder, exist_ok=True)
+    os.makedirs(path_concentrate_left_folder, exist_ok=True)
+    os.makedirs(path_concentrate_right_folder, exist_ok=True)
+    imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
+    facets_info_batch = []
+    for indexInBatch, detection in enumerate(pred['objdet']):
+        left_bboxes = detection[:, 0:4].cpu().numpy()
+        tl_x = numpy.clip(left_bboxes[:, 0], 0, imgWidth)
+        tl_y = numpy.clip(left_bboxes[:, 1], 0, imgHeight)
+        br_x = numpy.clip(left_bboxes[:, 2], 0, imgWidth)
+        br_y = numpy.clip(left_bboxes[:, 3], 0, imgHeight)
+        left_bboxes = numpy.stack([tl_x, tl_y, br_x, br_y], axis=1)
+        right_bboxes = detection[:, 4:8].cpu().numpy()
+        tl_x_r = numpy.clip(right_bboxes[:, 0], 0, imgWidth)
+        br_x_r = numpy.clip(right_bboxes[:, 2], 0, imgWidth)
+        right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
+        sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
+        classes = detection[:, -2].cpu().numpy().astype('int')
+        confidences = detection[:, -1].cpu().numpy()
+        if detection.shape[-1] > 11:
+            keypts_left = detection[:, 8:12].cpu().numpy()
+            keypts_right = detection[:, 12:16].cpu().numpy()
+            visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
+                pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
+                pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
+                sbboxes,
+                classes,
+                confidences,
+                keypts_left,
+                keypts_right)
+        visz = numpy.concatenate([visz_left, visz_right], axis=-2)
+        visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)
+        left_concentrated = pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        left_concentrated = left_concentrated - left_concentrated.min()
+        left_concentrated = (left_concentrated * 255 / left_concentrated.max()).astype('uint8')
+        right_concentrated = pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        right_concentrated = right_concentrated - right_concentrated.min()
+        right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
+        cv2.imwrite(os.path.join(path_concentrate_left_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), left_concentrated)
+        cv2.imwrite(os.path.join(path_concentrate_right_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), right_concentrated)
+
     return

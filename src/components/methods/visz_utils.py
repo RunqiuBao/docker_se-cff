@@ -350,8 +350,8 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
     sbboxes,
     classes,
     confidences,
-    keypts1=None,
-    keypts2=None,
+    keypts_left=None,
+    keypts_right=None,
     facets=None,
     facets_right=None,
     enlarge_facet_factor=None,
@@ -359,9 +359,12 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
     indexBatch=None,
     facets_info = None
 ):
-    if keypts1 is not None and keypts1.ndim == 1:
-        keypts1 = keypts1.unsqueeze(0)
-        keypts2 = keypts2.unsqueeze(0)
+    """
+    Args:
+        ...
+        keypts_left: (NumInstances, 2 * numKeyptsPerInstance)
+        keypts_right: (NumInstances, 2 * numKeyptsPerInstance)
+    """
     if isinstance(facets, torch.Tensor):
         facets = facets.numpy()
     if isinstance(facets_right, torch.Tensor):
@@ -385,14 +388,14 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         bottom_right = (int(bbox[2]), int(bbox[3]))
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-        text = 'cf:{:.4f},cl:{}'.format(confidence.item(), classindex)
+        text = 'cf:{:.3f},cl:{}'.format(confidence.item(), classindex)
         textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
-        if keypts1 is not None:
-            keypt1, keypt2 = keypts1[ii], keypts2[ii]
-            keypt1_int = (int(keypt1[0] * w + top_left[0]), int(keypt1[1] * h + top_left[1]))
-            keypt2_int = (int(keypt2[0] * w + top_left[0]), int(keypt2[1] * h + top_left[1]))        
+        if keypts_left is not None:
+            keypt1, keypt2 = keypts_left[ii][:2], keypts_left[ii][2:]
+            keypt1_int = (int(keypt1[0]), int(keypt1[1]))
+            keypt2_int = (int(keypt2[0]), int(keypt2[1]))        
             cv2.circle(left_event_sharp, keypt1_int, radius=5, color=(0, 255, 0), thickness=-1)
             cv2.circle(left_event_sharp, keypt2_int, radius=5, color=(0, 0, 255), thickness=-1)
         if facets is not None:
@@ -418,9 +421,10 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
             cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
-        if keypts1 is not None:
-            keypt1_int_r = (int(keypt1[0] * w + top_left[0]), int(keypt1[1] * h + top_left[1]))
-            keypt2_int_r = (int(keypt2[0] * w + top_left[0]), int(keypt2[1] * h + top_left[1]))        
+        if keypts_right is not None:
+            keypt1, keypt2 = keypts_right[ii][:2], keypts_right[ii][2:]
+            keypt1_int_r = (int(keypt1[0]), int(keypt1[1]))
+            keypt2_int_r = (int(keypt2[0]), int(keypt2[1]))        
             cv2.circle(right_event_sharp, keypt1_int_r, radius=5, color=(0, 255, 0), thickness=-1)
             cv2.circle(right_event_sharp, keypt2_int_r, radius=5, color=(0, 0, 255), thickness=-1)
         if facets_right is not None:

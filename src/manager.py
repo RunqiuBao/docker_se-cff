@@ -111,20 +111,19 @@ class DLManager:
             is_distributed=self.args.is_distributed,
         )
 
-        # # profiling the network
-        # for key, model_cfg in self.cfg.MODEL.items():
-        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-        #     parameters = model_cfg.PARAMS
-        #     loss_cfg = self.cfg.LOSSES[key]
-        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-        #     # torch.Size([4, 1, 360, 576, 1, 10])
-        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-        #     if self.args.is_master:
-        #         self.logger.write(
-        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-        #         )
-        #     del profile_model
+        # profiling the network
+        for key, model_cfg in self.cfg.MODEL.items():
+            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+            parameters = model_cfg.PARAMS
+            loss_cfg = self.cfg.LOSSES[key]
+            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+            if self.args.is_master:
+                self.logger.write(
+                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+                )
+            del profile_model
 
         # freeze model gradients if static:
         self.method.freeze_static_components(self.models)
@@ -202,7 +201,7 @@ class DLManager:
         for sequence_dataloader in test_loader:            
             sequence_name = sequence_dataloader.dataset.sequence_name
             self.method.test(
-                model=self.models,
+                models=self.models,
                 data_loader=sequence_dataloader,
                 sequence_name=sequence_name,  # Note: for saving debug images
                 save_root=self.args.save_root,

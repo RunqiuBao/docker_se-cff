@@ -5,6 +5,7 @@ import torch.nn as nn
 import copy
 from typing import Sequence, Tuple, List, Dict, Union, Optional
 from torch import Tensor
+from thop import profile
 
 from torch.nn.modules.upsampling import Upsample
 from .yolo_pose_blocks import Conv, C3k2, Concat, SPPF, C2PSA, DWConv, DFL
@@ -355,7 +356,12 @@ class YoloPose(nn.Module):
     
     @staticmethod
     def ComputeCostProfile(model):
-        pass
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        left_event_voxel = torch.randn(4, 1, 480, 672).to(device)
+        right_event_voxel = torch.randn(4, 1, 480, 672).to(device)
+        model = model.to(device)
+        flops, numParams = profile(model, inputs=(left_event_voxel, right_event_voxel), verbose=False)
+        return flops, numParams
 
     def predict(
         self,

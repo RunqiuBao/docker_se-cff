@@ -103,8 +103,8 @@ class StereoDetectionHead(nn.Module):
         return self._config["is_freeze"]
     
     @property
-    def input_shape(self):
-        return [(1, 10, 480, 672), (1, 10, 480, 672)]
+    def config(self):
+        return self._config
 
     def _init_layers(self):
         self.right_bbox_refiner = self._build_bbox_refiner_convs(
@@ -168,9 +168,17 @@ class StereoDetectionHead(nn.Module):
     @staticmethod
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        input_tensor = torch.randn(*model.input_shape).to(device)
+        h, w = 480, 672
+        input_feats = [
+            torch.randn(4, 128, int(h / 8), int(w / 8)).to(device),
+            torch.randn(4, 128, int(h / 16), int(w / 16)).to(device),
+            torch.randn(4, 128, int(h / 32), int(w / 32)).to(device)
+        ]
+        bboxes = [torch.randn(120, 4).to(device)]
+        disp_prior = torch.randn(4, h, w).to(device)
+        batch_img_metas = {"h": h, "w": w}
         model = model.to(device)
-        flops, numParams = profile(model, inputs=input_tensor, verbose=False)
+        flops, numParams = profile(model, inputs=(input_feats,  bboxes, disp_prior, batch_img_metas), verbose=False)
         return flops, numParams
     
     def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
@@ -314,10 +322,11 @@ class StereoDetectionHead(nn.Module):
     def decode_rescale_kpts(self, pred_kpts: Tensor):
         ndim = self._config["keypts_prediction"]["kpt_shape"][1]
         y = pred_kpts.clone()
+        y = y.permute(0, 2, 1)
         if ndim == 3:
-            y[:, 2::3] = y[:, 2::3].sigmoid()        
-        y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self._anchors[0] - 0.5)) * self._strides
-        y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self._anchors[1] - 0.5)) * self._strides
+            y[..., 2::3] = y[..., 2::3].sigmoid()        
+        y[..., 0::ndim] = (y[..., 0::ndim] * 2.0 + (self._anchors[..., 0] - 0.5).unsqueeze(-1).expand(-1, -1, 2)) * self._strides.expand(-1, -1, 2)
+        y[..., 1::ndim] = (y[..., 1::ndim] * 2.0 + (self._anchors[..., 1] - 0.5).unsqueeze(-1).expand(-1, -1, 2)) * self._strides.expand(-1, -1, 2)
         return y
 
     def forward(
@@ -683,23 +692,6 @@ class StereoDetectionHead(nn.Module):
         candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
 
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
-
-    @staticmethod
-    def ComputeCostProfile(model):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        right_feature = [
-            torch.randn((1, 384, 60, 84)).to(device),
-            torch.randn((1, 384, 30, 42)).to(device),
-            torch.randn((1, 384, 15, 21)).to(device),
-        ]
-        left_bboxes = [torch.randn((10, 4)).to(device)]
-        left_bboxes[0][:, [0, 2]] *= 672
-        left_bboxes[0][:, [1, 3]] *= 480
-        disp_prior = torch.randn((1, 480, 672)).to(device)
-        batch_img_metas = {"h": 480, "w": 672}
-        model = model.to(device)
-        flops, numParams = profile(model, inputs=(right_feature, left_bboxes, disp_prior, batch_img_metas), verbose=False)
-        return flops, numParams
 
 
 class FeaturemapHead(nn.Module):
