@@ -670,7 +670,7 @@ class StereoDetectionHead(nn.Module):
             bboxes_preds_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
             bboxes_targets_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
         """
-        bboxes_targets_selected = batch_gt_bboxes.view(-1, 1, 4).expand(-1, candidates_k, -1)
+        bboxes_targets_selected = batch_gt_bboxes.view(-1, 1, 4).repeat(1, candidates_k, 1)
         batch_size, num_grids = bboxes_preds.shape[:2]
 
         with torch.no_grad():
