@@ -28,16 +28,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def ExtractRefinedBboxes(refined_bboxes: Tensor, refined_scores: Tensor):
+def ExtractRefinedInstance(refined_instances: Tensor, refined_scores: Tensor):
     """
-    for each instance, find the highest scored one in ker_h * ker_w and select the corresponding bbox as the final.
+    for each instance, find the highest scored one in ker_h * ker_w and select the corresponding one as the final.
     Args:
-        refined_bboxes: (B, NumInstance, ker_h * ker_w, 4).
+        refined_instances: (B, NumInstance, ker_h * ker_w, ?).
         refined_scores: (B, NumInstance, ker_h * ker_w, 1).
     """
+    logits_length = refined_instances.shape[-1]
     indices_highest_score = torch.argmax(refined_scores.squeeze(-1), dim=-1)
-    refined_bboxes_selected = torch.gather(refined_bboxes, -2, indices_highest_score.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 4)).squeeze(-2)
-    return refined_bboxes_selected
+    refined_instances_selected = torch.gather(refined_instances, -2, indices_highest_score.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, logits_length)).squeeze(-2)
+    return refined_instances_selected
 
 
 def freeze_static_components(models: dict):
@@ -623,7 +624,7 @@ def test(
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
             # ---------- stereo detection head ----------
             left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
-            batch_sbboxes_pred, batch_refined_right_bboxes, batch_right_scores_refine, right_pred_kpts = models["stereo_detection_head"].module.predict(
+            batch_sbboxes_pred, batch_refined_right_bboxes, batch_right_scores_refine, right_pred_kpts, right_scores_keypts = models["stereo_detection_head"].module.predict(
                 right_feature,
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
@@ -632,8 +633,9 @@ def test(
                 True
             )
 
-            assert left_event_sharp.shape[0] == 1  # batch size should be 1        
-            batch_refined_right_bboxes_selected = [ExtractRefinedBboxes(batch_refined_right_bboxes[0], batch_right_scores_refine[0])]
+            assert left_event_sharp.shape[0] == 1  # batch size should be 1
+            batch_refined_right_bboxes_selected = ExtractRefinedInstance(batch_refined_right_bboxes[0], batch_right_scores_refine[0])
+            batch_refined_right_keypts_selected = ExtractRefinedInstance(right_pred_kpts[0], right_scores_keypts[0])
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
 
@@ -646,11 +648,11 @@ def test(
                 "objdet": [
                     torch.concat([
                         left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
-                        batch_refined_right_bboxes_selected[0][0],
+                        batch_refined_right_bboxes_selected[0],
                         left_bboxesClsKeypts_nmsed_topked[0][:, 5:7],
                         left_bboxesClsKeypts_nmsed_topked[0][:, 8:10],
-                        right_pred_kpts[nms_topk_mask][:, 0:2],
-                        right_pred_kpts[nms_topk_mask][:, 3:5],
+                        batch_refined_right_keypts_selected[0][:, 0:2],
+                        batch_refined_right_keypts_selected[0][:, 3:5],
                         torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
                         torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
                     ], dim=1)
@@ -659,7 +661,6 @@ def test(
                     "left": left_event_sharp,
                     "right": right_event_sharp
                 }
-            
             }
             SaveTestResultsAndVisualize(
                 prediction_dict,
