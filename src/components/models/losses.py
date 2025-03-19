@@ -4,6 +4,7 @@ import torch
 import numpy
 import torchvision
 import torch.distributed as dist
+from torch import Tensor
 
 from .yolo_pose_utils import TaskAlignedAssigner, dist2bbox, make_anchors, bbox_iou, bbox2dist, xywh2xyxy, xyxy2xywh
 from .warp import disp_warp
@@ -284,13 +285,21 @@ class v8DetectionLoss:
 class KeypointLoss(nn.Module):
     """Criterion class for computing training losses."""
 
-    def __init__(self, sigmas) -> None:
+    def __init__(self, sigmas: Tensor = None, oks_sigmas: numpy.ndarray = None) -> None:
         """Initialize the KeypointLoss class."""
         super().__init__()
-        self.sigmas = sigmas
+        if sigmas is None:
+            assert oks_sigmas is not None
+            self.oks_sigmas = oks_sigmas
+            self.sigmas = None
+        else:
+            assert oks_sigmas is None
+            self.sigmas = sigmas
 
     def forward(self, pred_kpts, gt_kpts, kpt_mask, area):
         """Calculates keypoint loss factor and Euclidean distance loss for predicted and actual keypoints."""
+        if self.sigmas is None:
+            self.sigmas = torch.from_numpy(self.oks_sigmas).to(pred_kpts.device)
         d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
         kpt_loss_factor = kpt_mask.shape[1] / (torch.sum(kpt_mask != 0, dim=1) + 1e-9)
         # e = d / (2 * (area * self.sigmas) ** 2 + 1e-9)  # from formula

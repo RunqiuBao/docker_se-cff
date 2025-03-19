@@ -40,19 +40,19 @@ class DLManager:
         assert cfg is not None
         self.cfg = cfg
 
-        # profiling the network
-        for key, model_cfg in self.cfg.MODEL.items():
-            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-            parameters = model_cfg.PARAMS
-            loss_cfg = self.cfg.LOSSES[key]
-            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-            if self.args.is_master:
-                self.logger.write(
-                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-                )
-            del profile_model
+        # # profiling the network
+        # for key, model_cfg in self.cfg.MODEL.items():
+        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+        #     parameters = model_cfg.PARAMS
+        #     loss_cfg = self.cfg.LOSSES[key]
+        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+        #     if self.args.is_master:
+        #         self.logger.write(
+        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+        #         )
+        #     del profile_model
 
         self.models = _prepare_models(
             self.cfg.MODEL,
@@ -79,16 +79,18 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             for keyModel, model in self.models.items():
                 model_statedict = model.state_dict()
+                if self.args.not_resume_weight_from is not None:
+                    if self.args.not_resume_weight_from in keyModel:
+                        logger.info("Skipping parameters from {} due to not_resume_weight_from".format(keyModel))
+                        continue
                 for key, value in checkpoint["models"][keyModel].items():
                     if self.args.only_resume_weight_from is not None:
                         if self.args.only_resume_weight_from not in key:
                             continue
-                    # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
-                    #     continue
                     if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
                         model_statedict["module." + key] = value
                     else:
-                        print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
+                        logger.info("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
                 self.models[keyModel].load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 for key, optimizer in self.optimizer.items():
@@ -97,7 +99,7 @@ class DLManager:
                     self.scheduler[key].load_state_dict(checkpoint["scheduler"][key])
                 self.args.start_epoch = checkpoint["epoch"] + 1
                 self.current_epoch = self.args.start_epoch
-                print("resumed old training states.")  
+                logger.info("resumed old training states.")  
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME

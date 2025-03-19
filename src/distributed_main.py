@@ -23,6 +23,7 @@ parser.add_argument("--save_term", type=int, default=25)
 parser.add_argument("--resume_cpt", type=str, default=None)
 parser.add_argument("--only_resume_weight", action='store_true', help="whether only resume network weights")
 parser.add_argument("--only_resume_weight_from", type=str, default=None, help="only resume network weights for this subnet.")
+parser.add_argument("--not_resume_weight_from", type=str, default=None, help="not resume network weights for this subnet.")
 parser.add_argument("--is_save_onnx", action='store_true', help="simply save the model to a onnx model at 'data_root'")
 parser.add_argument(
     "--local-rank", type=int, default=0

@@ -16,9 +16,8 @@ from mmdet.structures.mask import mask_target, BitmapMasks
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
 from .yolo_pose_blocks import Conv
-from .yolo_pose_utils import make_anchors
+from .yolo_pose_utils import make_anchors, xyxy2xywh
 from .objectdetection import StereoEventDetectionHead
-
 
 from . import losses
 from .utils.misc import freeze_module_grads, unfreeze_module_grads, multi_apply, convert_tensor_to_numpy
@@ -55,21 +54,6 @@ class StereoDetectionHead(nn.Module):
         self._config = network_cfg
         self._config["is_freeze"] = is_freeze
 
-        # keypoint prediction
-        self._anchors = None
-        self._strides = None
-        self.loss_keypoint = None
-        kpt_shape = (2, 3)
-        nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
-        feat_channels = (128, 128, 128)
-        c4 = max(feat_channels[0] // 4, nk)
-        self.keypts_predictor = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, nk, 1)) for x in feat_channels)
-        self._config["keypts_prediction"] = {
-            "kpt_shape": kpt_shape,
-            "nk": nk,
-            "feat_channels": feat_channels,
-            "stride": (8.0, 16.0, 32.0)
-        }
         self._config["loss_cfg"] = loss_cfg
 
         # objdet tools
@@ -93,7 +77,11 @@ class StereoDetectionHead(nn.Module):
                                          'reduction': 'sum',
                                          'loss_weight': 1.0})
         self.loss_bce_pose = nn.BCEWithLogitsLoss()
-
+        OKS_SIGMA = (
+            numpy.array([0.26, 0.25])  # Note: hard-coded values
+            / 10.0
+        )
+        self.loss_keypoint = losses.KeypointLoss(oks_sigmas=OKS_SIGMA)
 
         self._init_layers()
         self._init_weights()
@@ -124,11 +112,28 @@ class StereoDetectionHead(nn.Module):
             act_type=self._config["act_cfg"]["type"]
         )
 
+        self.right_keypts_predictor = self._build_bbox_refiner_convs(
+            self._config['in_channels'],
+            self._config['feat_channels'],
+            output_logits=6,
+            norm_eps=self._config["norm_cfg"]["eps"],
+            norm_momentum=self._config["norm_cfg"]["momentum"],
+            act_type=self._config["act_cfg"]["type"]
+        )
+        self.right_keypts_predictor_scorer = self._build_bbox_refiner_convs(
+            self._config['in_channels'],
+            self._config['feat_channels'],
+            output_logits=1,
+            norm_eps=self._config["norm_cfg"]["eps"],
+            norm_momentum=self._config["norm_cfg"]["momentum"],
+            act_type=self._config["act_cfg"]["type"]
+        )
+
     def _init_weights(self):
         """
         all conv2d need weights initialization
         """
-        for subnet in [self.right_bbox_refiner]:
+        for subnet in [self.right_bbox_refiner, self.right_keypts_predictor]:
             for module in subnet.modules():
                 if isinstance(module, (nn.Conv2d, nn.Linear)):
                     nn.init.kaiming_uniform_(
@@ -220,6 +225,44 @@ class StereoDetectionHead(nn.Module):
 
         decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
         return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
+    
+    def _right_keypts_decode(self, sbboxes_pred: Tensor, right_keypts_pred: Tensor) -> Tensor:
+        """
+        Decode right keypts prediction [B, 100, 6, ker_h, ker_w] whose '6' dimension is (delta_keypt0_x, delta_keypt0_y, visibility, delta_keypt1_x, delta_keypt1_y, visibility) to same shape whose '6'
+        dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
+        Args:
+            sbboxes_pred: [B, 100, 6]
+            right_keypts_pred: [B, 100, 6, ker_h, ker_w]
+
+        Return:
+            decoded_right_keypts: [B, 100, ker_h, ker_w, 6] whose '6' dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
+        """
+        # ----------------- this part is same as _right_bbox_decode. TODO: reuse this part more -----------------
+        batch_size, num_samples = sbboxes_pred.shape[:2]
+        ker_h, ker_w = right_keypts_pred.shape[-2:]
+        sbboxes_pred = sbboxes_pred.view(-1, 6)
+        right_keypts_pred = right_keypts_pred.view(-1, 6, ker_h, ker_w)
+
+        strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
+        strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
+        strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
+        grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_x = grid_x.unsqueeze(1)
+        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
+        grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+        grid_y = grid_y.unsqueeze(1)
+
+        strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+        # ----------------- this part is same as _right_bbox_decode -----------------
+
+        keypt0_xys = right_keypts_pred[:, 0:2, :, :] * strides + grids
+        keypt1_xys = right_keypts_pred[:, 3:5, :, :] * strides + grids
+
+        decoded_right_keypts = torch.cat([keypt0_xys, right_keypts_pred[:, 2, :, :].unsqueeze(1), keypt1_xys, right_keypts_pred[:, 5, :, :].unsqueeze(1)], dim=1).permute(0, 2, 3, 1)
+        return decoded_right_keypts.view(batch_size, num_samples, ker_h * ker_w, 6)
 
     def predict(
         self,
@@ -243,7 +286,7 @@ class StereoDetectionHead(nn.Module):
             refined_right_bboxes: shape [B, N, ker_h * ker_w, 4]. Corresponding refined right bboxes.
             right_scores_refine: shape [B, N, ker_h * ker_w, 1]. Corresponding scores.
         """
-        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine = [], [], []
+        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts = [], [], [], [], []
         for indexInBatch, bboxes_pred in enumerate(left_bboxes):
             if bboxes_pred.shape[0] == 0:
                 # No detections in left
@@ -293,7 +336,7 @@ class StereoDetectionHead(nn.Module):
             # print("----- time sub sub2.5: {}".format(time.time() - starttime))
 
             starttime = time.time()
-            batch_size = bboxes_pred.shape[0]
+            batch_size = 1
             x_tl_r = _bboxes_pred[..., 0].view(batch_size, -1).unsqueeze(-1)
             x_br_r = _bboxes_pred[..., 2].view(batch_size, -1).unsqueeze(-1)
             sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1).contiguous()
@@ -301,33 +344,21 @@ class StereoDetectionHead(nn.Module):
             refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
             # print("----- time sub sub3: {}".format(time.time() - starttime))
 
+            # right keypts prediction
+            right_roi_feats_clone = right_roi_feats.detach().clone()
+            right_keypts_pred = self.right_keypts_predictor(right_roi_feats_clone)  # Note: shape [B*100, 6, 7, 7]
+            right_scores_pred = self.right_keypts_predictor_scorer(right_roi_feats_clone)  # Note: shape [B*100, 1, 7, 7]
+            logits, ker_h, ker_w = right_keypts_pred.shape[-3:]
+            right_keypts_pred = right_keypts_pred.view(1, -1, logits, ker_h, ker_w)
+            predicted_right_keypts = self._right_keypts_decode(sbboxes_pred, right_keypts_pred)  # Note: shape [B, 100, 49, 6]
+
             list_sbboxes_pred.append(sbboxes_pred)
             list_refined_right_bboxes.append(refined_right_bboxes)
             list_right_scores_refine.append(right_scores_refine.view(1, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2))
+            list_predicted_right_keypts.append(predicted_right_keypts)
+            list_right_scores_keypts.append(right_scores_pred.view(1, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2))
 
-        # keypoints prediction
-        batch_size = len(left_bboxes)
-        pred_kpts = torch.cat([self.keypts_predictor[i](right_feat[i]).view(batch_size, self._config["keypts_prediction"]["nk"], -1) for i in range(len(self._config["keypts_prediction"]["feat_channels"]))], -1)
-
-        # prepare data for keypoint decode. update anchors with new disp for every batch
-        disp_multilevel = [F.interpolate(disp_prior.unsqueeze(1), scale_factor=(1 / scale_factor), mode='area') / scale_factor for scale_factor in self._config["keypts_prediction"]["stride"]]
-        disp_multilevel = [disp.squeeze() for disp in disp_multilevel]
-        self._anchors, self._strides = make_anchors(right_feat, self._config["keypts_prediction"]["stride"], 0.5, disp_prior=disp_multilevel)
-
-        if decode_keypts:
-            pred_kpts = self.decode_rescale_kpts(pred_kpts)
-
-        return list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, pred_kpts
-
-    def decode_rescale_kpts(self, pred_kpts: Tensor):
-        ndim = self._config["keypts_prediction"]["kpt_shape"][1]
-        y = pred_kpts.clone()
-        y = y.permute(0, 2, 1)
-        if ndim == 3:
-            y[..., 2::3] = y[..., 2::3].sigmoid()        
-        y[..., 0::ndim] = (y[..., 0::ndim] * 2.0 + (self._anchors[..., 0] - 0.5).unsqueeze(-1).expand(-1, -1, 2)) * self._strides.expand(-1, -1, 2)
-        y[..., 1::ndim] = (y[..., 1::ndim] * 2.0 + (self._anchors[..., 1] - 0.5).unsqueeze(-1).expand(-1, -1, 2)) * self._strides.expand(-1, -1, 2)
-        return y
+        return list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts
 
     def forward(
         self,
@@ -356,8 +387,7 @@ class StereoDetectionHead(nn.Module):
                 losses, sbboxes, masks, selected_keypts = self.compute_loss_yoloposeformat(preds, labels)
                 artifacts = [sbboxes, masks, selected_keypts]
         return preds, losses, artifacts
-    
-    
+
     def compute_loss_yoloposeformat(self, preds: Tuple[List, List, List], labels: Dict):
         """
         Args:
@@ -374,7 +404,7 @@ class StereoDetectionHead(nn.Module):
                     "keypoints_right": (N_allbatch, 2, 3),
                     "batch_idx": (N_allbatch,). Index in this batch for this instance.
         """
-        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, pred_kpts = preds  # Note: number of positive in each can be different after nms.
+        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts = preds  # Note: number of positive in each can be different after nms.
         left_fg_mask, left_target_gt_idx, left_nms_topk_mask, stereo_objdet_targets, batch_img_metas = labels["left_fg_mask"], labels["left_target_gt_idx"], labels["left_nms_topk_mask"], labels["stereo_objdet_targets"], labels["batch_img_metas"]
 
         loss_dict = {}
@@ -382,6 +412,7 @@ class StereoDetectionHead(nn.Module):
         list_sbboxes_pred_refined = []
         bbox_targets = []
         pos_masks = []
+        list_right_selected_keypts = []
         # right bboxes related loss
         for indexInBatch in range(num_batch):
             bbox_targetset_one = stereo_objdet_targets["bboxes"][stereo_objdet_targets["batch_idx"] == indexInBatch]
@@ -401,7 +432,7 @@ class StereoDetectionHead(nn.Module):
             batch_size, num_priors, num_grids = right_bboxes.shape[:3]
             rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks_one]
             num_positive = rbboxes_refined.shape[0]
-            ious, indicies_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
+            ious, indices_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
 
             rselect_mask, rbboxes_refined_selected, rbboxes_targets_selected = self.batch_assigner(
                 rbboxes_refined,
@@ -419,7 +450,7 @@ class StereoDetectionHead(nn.Module):
             else:
                 loss_dict["loss_rbbox"] += loss_rbbox_one
 
-            # right scores
+            # right bboxes scores
             rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks_one].sigmoid()
             ## dynamic targets
             rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
@@ -442,63 +473,63 @@ class StereoDetectionHead(nn.Module):
             bboxes = bboxes.view(num_priors, 6)
             list_sbboxes_pred_refined.append(bboxes)
             pos_masks.append(pos_masks_one)
-            # print("----- time sub sub2 loss stereo: {}".format(time.time() - starttime))
-            
+
+            # loss for right keypts
+            keypts_targetset_one = stereo_objdet_targets["keypoints_right"][stereo_objdet_targets["batch_idx"] == indexInBatch]
+            keypts_targets_one = keypts_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]].view(num_priors, -1)[pos_masks_one]
+            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
+            keypts_distances, indices_best_right_keypts = self.batch_keypts_distance_calculator_simple(right_keypts, keypts_targets_one.unsqueeze(1))
+
+            rkeypts_select_mask, keypts_preds_selected, keypts_targets_selected = self.batch_assigner_keypts(
+                right_keypts,
+                keypts_distances,
+                keypts_targets_one,
+                5.0,  # distance_threshold
+                self._config["candidates_k"]
+            )
+            num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
+            num_total_samples_timesk = max(num_pos_timesk, 1.0)
+            kpt_mask = keypts_targets_selected.view(-1, 2, 3)[..., 2] != 0
+            rbboxes_roi = bboxes[:, [4, 1, 5, 3]].unsqueeze(1).repeat(1, self._config["candidates_k"], 1)[pos_masks_one].view(-1, 4)
+            area = xyxy2xywh(rbboxes_roi)[:, 2:].prod(1, keepdim=True)
+            loss_rkeypts = self.loss_keypoint(
+                keypts_preds_selected.view(-1, 2, 3),
+                keypts_targets_selected.view(-1, 2, 3),
+                kpt_mask,
+                area
+            ) / num_total_samples_timesk
+            loss_rkeypts_obj = self.loss_bce_pose(keypts_preds_selected.view(-1, 2, 3)[..., 2], kpt_mask.float()) / num_total_samples_timesk
+            # right keypts scores
+            rkeypts_scores = list_right_scores_keypts[indexInBatch].view(-1, num_grids, 1)[pos_masks_one][rkeypts_select_mask].sigmoid()
+            rkeypts_scores_targets = torch.ones_like(rkeypts_scores)
+            loss_rkeypts_score_one = self.loss_rscore(rkeypts_scores, rkeypts_scores_targets) / num_total_samples_timesk
+            if "loss_rkeypts" not in loss_dict:
+                loss_dict["loss_rkeypts"] = loss_rkeypts
+                loss_dict["loss_rkeypts_obj"] = loss_rkeypts_obj
+                loss_dict["loss_rkeypts_score"] = loss_rkeypts_score_one
+            else:
+                loss_dict["loss_rkeypts"] += loss_rkeypts
+                loss_dict["loss_rkeypts_obj"] += loss_rkeypts_obj
+                loss_dict["loss_rkeypts_score"] += loss_rkeypts_score_one
+
+            # select best keypts for visualization
+            with torch.no_grad():
+                right_keypts_selected_best = self.batch_assigner_keypts(
+                    right_keypts,
+                    keypts_distances,
+                    keypts_targets_one,
+                    5.0,  # distance_threshold
+                    1
+                )[1]
+                list_right_selected_keypts.append(right_keypts_selected_best.squeeze(1).view(-1, 2, 3))
+
         loss_dict["loss_rbbox"] /= num_batch
         loss_dict["loss_rscore"] /= num_batch
+        loss_dict["loss_rkeypts"] /= num_batch / 100  # Note: scale it to a reasonable magnitude
+        loss_dict["loss_rkeypts_obj"] /= num_batch
+        loss_dict["loss_rkeypts_score"] /= num_batch
 
-        # keypoints related loss
-        batch_rbboxes_targets = stereo_objdet_targets['bboxes'][:, :6]
-        batch_rbboxes_targets = torch.concat([
-                batch_rbboxes_targets[:, 4].unsqueeze(-1),
-                batch_rbboxes_targets[:, 1].unsqueeze(-1),
-                batch_rbboxes_targets[:, 5].unsqueeze(-1),
-                batch_rbboxes_targets[:, 3].unsqueeze(-1)
-            ], dim=1)
-        batch_rbboxes_targets = batch_rbboxes_targets[left_target_gt_idx]
-        pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()
-        pred_kpts = losses.kpts_decode(self._anchors, pred_kpts.view(num_batch, -1, *self._config["keypts_prediction"]["kpt_shape"]))
-        gt_keypoints = stereo_objdet_targets["keypoints_right"]
-        gt_keypoints[..., 0] *= batch_img_metas["w"]
-        gt_keypoints[..., 1] *= batch_img_metas["h"]
-        if self.loss_keypoint is None:
-            OKS_SIGMA = (
-                numpy.array([0.26, 0.25])  # Note: hard-coded values
-                / 10.0
-            )
-            sigmas = torch.from_numpy(OKS_SIGMA).to(pred_kpts.device)
-            self.loss_keypoint = losses.KeypointLoss(sigmas=sigmas)
-        loss_kptpose, loss_kptobj = losses.calculate_keypoints_loss(
-            left_fg_mask,
-            left_target_gt_idx,
-            gt_keypoints,
-            stereo_objdet_targets["batch_idx"],
-            self._strides,
-            batch_rbboxes_targets,
-            pred_kpts,
-            self.loss_bce_pose,
-            self.loss_keypoint
-        )
-        loss_dict["loss_kptpose"] = loss_kptpose * self._config["loss_cfg"]["pose_loss_weight"]
-        loss_dict["loss_kptobj"] = loss_kptobj * self._config["loss_cfg"]["kobj_loss_weight"]
-        pred_kpts_clone = pred_kpts.detach().clone()[..., :2]
-        stride_tensor_expand = (self._strides.unsqueeze(-1)).expand(-1, -1, 2, 2)
-        right_selected_keypts = []
-        right_pred_keypts_all = (pred_kpts_clone * stride_tensor_expand)
-        for indexInBatch in range(num_batch):
-            right_keypts_one = right_pred_keypts_all[indexInBatch][left_nms_topk_mask[indexInBatch]]
-            pos_masks_one = left_fg_mask[indexInBatch][left_nms_topk_mask[indexInBatch]]
-            right_selected_keypts.append(right_keypts_one[pos_masks_one])
-
-        # # debug code. Replace right_selected_keypts with gt_selected_keypts.
-        # gt_selected_keypts = []
-        # for indexInBatch in range(num_batch):
-        #     gt_keypointset_one = gt_keypoints[..., :2][stereo_objdet_targets["batch_idx"] == indexInBatch]
-        #     gt_keypoints_one = gt_keypointset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]]
-        #     pos_masks_one = left_fg_mask[indexInBatch][left_nms_topk_mask[indexInBatch]]
-        #     gt_selected_keypts.append(gt_keypoints_one[pos_masks_one])
-
-        return loss_dict, list_sbboxes_pred_refined, pos_masks, right_selected_keypts
+        return loss_dict, list_sbboxes_pred_refined, pos_masks, list_right_selected_keypts
 
     @staticmethod
     def kpts_decode(anchor_points, pred_kpts):
@@ -627,6 +658,24 @@ class StereoDetectionHead(nn.Module):
                 loss_dict["loss_rscore"] = loss_rscore
 
         return loss_dict
+    
+    @torch.no_grad()
+    def batch_keypts_distance_calculator_simple(self, keypts_preds: Tensor, keypts_ref: Tensor):
+        """
+        compute euclidian distances between each pair of keypoints and the only ref pair of keypoints.
+        Args:
+            keypts_preds: [B. num_grids, 6]. keypts format(keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility,)
+            keypts_ref: [B, 1, 6].
+
+        Returns:
+            distances: [B, num_grids]
+            indices_best_right: [B]
+        """
+        assert keypts_ref.shape[1] == 1, "keypts_ref should have only one at each instance."
+        num_grids = keypts_preds.shape[1]
+        keypts_ref = keypts_ref.expand(-1, num_grids, -1)
+        distances = torch.norm(keypts_ref[..., [0, 1]] - keypts_preds[..., [0, 1]], dim=-1) + torch.norm(keypts_ref[..., [3, 4]] - keypts_preds[..., [3, 4]], dim=-1)
+        return distances, torch.min(distances, dim=-1)[1]
 
     @torch.no_grad()
     def batch_iou_calculator_simple(self, bboxes_preds: Tensor, bboxes_ref: Tensor):
@@ -674,7 +723,7 @@ class StereoDetectionHead(nn.Module):
         batch_size, num_grids = bboxes_preds.shape[:2]
 
         with torch.no_grad():
-            candidates_mask = iou_scores.squeeze(-1) > iou_thres;
+            candidates_mask = iou_scores.squeeze(-1) > iou_thres
             iou_scores_masked = iou_scores.squeeze(-1).clone().masked_fill(~candidates_mask, float('-inf'))
             topk_scores, topk_indices = torch.topk(iou_scores_masked, candidates_k, dim=1)
 
@@ -692,6 +741,42 @@ class StereoDetectionHead(nn.Module):
         candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
 
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
+    
+    def batch_assigner_keypts(self, keypts_preds: Tensor, distances: Tensor, batch_gt_keypts: Tensor, distance_threshold: float, candidates_k: int):
+        """
+        for each gt, there are N candidates. Find the best candidates based on distance_threshold and candidates_k.
+        If candidates within distance_threshold are less than candidates_k, 0 pad them.
+
+        Args:
+            keypts_preds: shape (B, numGrids, 6)
+            distances: shape (B, numGrids)
+            batch_gt_keypts: shape (B, 6)
+        Returns:
+            candidates_mask: shape (B, numGrids). boolean mask.
+            keypts_preds_selected: shape (B, k, 6). Note some of the k elemenets can be just 0s.
+            bboxes_targets_selected: shape (B, k, 6). Note some of the k elements can be just 0s.
+        """
+        keypts_targets_selected = batch_gt_keypts.view(-1, 1, 6).repeat(1, candidates_k, 1)
+        batch_size, num_grids = keypts_preds.shape[:2]
+
+        with torch.no_grad():
+            candidates_mask = distances < distance_threshold
+            distances_masked = distances.clone().masked_fill(~candidates_mask, float('inf'))
+            topk_distances, topk_indices = torch.topk(distances_masked, candidates_k, dim=1)
+
+            valid_mask = topk_distances < float('inf')
+            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
+            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)
+        pseudo_keypts = torch.zeros(batch_size, 1, 6, dtype=keypts_preds.dtype, device=keypts_preds.device)
+        keypts_preds_padded = torch.cat([keypts_preds, pseudo_keypts], dim=1)
+        keypts_preds_selected = torch.gather(keypts_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 6))
+        keypts_targets_selected = keypts_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 6), 0)
+
+        # make sure at least one candidate for each gt
+        indices_best_distances = torch.argmax(distances, dim=1)
+        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_distances] = True
+        
+        return candidates_mask, keypts_preds_selected, keypts_targets_selected
 
 
 class FeaturemapHead(nn.Module):

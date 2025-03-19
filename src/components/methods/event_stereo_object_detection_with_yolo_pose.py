@@ -135,11 +135,10 @@ def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: 
     if is_stereo_bbox:
         keypoints_right = keypts_tensor.clone()
         keypoints_right[:, :, 0] = keypts_tensor[:, :, 0] - disparity.unsqueeze(-1).expand(-1, 2)
+        # Note: do not normalize for keypoints_right
     keypts_tensor[:, :, 0] /= batch_img_metas["w"]
     keypts_tensor[:, :, 1] /= batch_img_metas["h"]
-    if is_stereo_bbox:
-        keypoints_right[:, :, 0] /= batch_img_metas["w"]
-        keypoints_right[:, :, 1] /= batch_img_metas["h"]
+
     batchidx_tensor = [torch.ones((one_labels["bboxes"].shape[0]), dtype=torch.float, device=one_labels["bboxes"].device) * indexInBatch for indexInBatch, one_labels in enumerate(batch_labels)]
     batchidx_tensor = torch.cat(batchidx_tensor, dim=0)
     batch_labels_yolopose = {
@@ -323,8 +322,8 @@ def train(
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
                                     "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                                     "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "keypts1": artifacts[-1][0][:, 0, :].detach().cpu().numpy(),
-                                    "keypts2": artifacts[-1][0][:, 1, :].detach().cpu().numpy()
+                                    "keypts1": artifacts[-1][0][:, 0, :2].detach().cpu().numpy(),
+                                    "keypts2": artifacts[-1][0][:, 1, :2].detach().cpu().numpy()
                                 }
                             )
                             tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
@@ -533,8 +532,8 @@ def valid(
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
                                     "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                                     "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "keypts1": artifacts[-1][0][:, 0, :].detach().cpu().numpy(),
-                                    "keypts2": artifacts[-1][0][:, 1, :].detach().cpu().numpy()
+                                    "keypts1": artifacts[-1][0][:, 0, :2].detach().cpu().numpy(),
+                                    "keypts2": artifacts[-1][0][:, 1, :2].detach().cpu().numpy()
                                 }
                             )
                             tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)
