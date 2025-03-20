@@ -737,8 +737,7 @@ class StereoDetectionHead(nn.Module):
         bboxes_targets_selected = bboxes_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
 
         # make sure at least one candidate for each gt
-        indices_best_ious = torch.argmax(iou_scores, dim=1)
-        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_ious] = True
+        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
 
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
     
@@ -762,7 +761,7 @@ class StereoDetectionHead(nn.Module):
         with torch.no_grad():
             candidates_mask = distances < distance_threshold
             distances_masked = distances.clone().masked_fill(~candidates_mask, float('inf'))
-            topk_distances, topk_indices = torch.topk(distances_masked, candidates_k, dim=1)
+            topk_distances, topk_indices = torch.topk(distances_masked, candidates_k, dim=1, largest=False)
 
             valid_mask = topk_distances < float('inf')
             valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
@@ -773,8 +772,7 @@ class StereoDetectionHead(nn.Module):
         keypts_targets_selected = keypts_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 6), 0)
 
         # make sure at least one candidate for each gt
-        indices_best_distances = torch.argmax(distances, dim=1)
-        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), indices_best_distances] = True
+        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
         
         return candidates_mask, keypts_preds_selected, keypts_targets_selected
 
