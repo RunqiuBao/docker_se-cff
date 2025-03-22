@@ -484,7 +484,7 @@ class StereoDetectionHead(nn.Module):
                 right_keypts,
                 keypts_distances,
                 keypts_targets_one,
-                5.0,  # distance_threshold
+                35.0,  # distance_threshold
                 self._config["candidates_k"]
             )
             num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
@@ -518,7 +518,7 @@ class StereoDetectionHead(nn.Module):
                     right_keypts,
                     keypts_distances,
                     keypts_targets_one,
-                    5.0,  # distance_threshold
+                    35.0,  # distance_threshold
                     1
                 )[1]
                 list_right_selected_keypts.append(right_keypts_selected_best.squeeze(1).view(-1, 2, 3))

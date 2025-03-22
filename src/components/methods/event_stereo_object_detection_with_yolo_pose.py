@@ -234,8 +234,8 @@ def train(
             left_detections, lossDictAll, artifacts = _forward_one_batch(
                 models["objdet_head"],
                 {
-                    "left_event_voxel": left_event_sharp,
-                    "right_event_voxel": right_event_sharp,
+                    "left_event_voxel": batch_data["event"]["left"],
+                    "right_event_voxel": batch_data["event"]["right"],
                 },
                 objdet_targets,
                 lossDictAll,
@@ -444,8 +444,8 @@ def valid(
             left_detections, lossDictAll, artifacts = _forward_one_batch(
                 models["objdet_head"],
                 {
-                    "left_event_voxel": left_event_sharp,
-                    "right_event_voxel": right_event_sharp,
+                    "left_event_voxel": batch_data["event"]["left"],
+                    "right_event_voxel": batch_data["event"]["right"],
                 },
                 objdet_targets,
                 lossDictAll,
@@ -604,8 +604,8 @@ def test(
         pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
 
         # ---------- objdet net ----------
-        left_detections = models["objdet_head"].module.predict(left_event_sharp)
-        right_feature = models["objdet_head"].module.predict(right_event_sharp, isRightFeatures=True)
+        left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
+        right_feature = models["objdet_head"].module.predict(batch_data["event"]["right"], isRightFeatures=True)
 
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
         left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
