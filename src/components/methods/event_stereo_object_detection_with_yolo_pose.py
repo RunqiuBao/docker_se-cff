@@ -610,8 +610,8 @@ def test(
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
         left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
             left_detections_multilevels_detachcopy,
-            conf_thres=0.52,
-            iou_thres=0.7,
+            conf_thres=models["objdet_head"].module.config["confidence_threshold_inference"],
+            iou_thres=models["objdet_head"].module.config["nms_iou_threshold_inference"],
             labels=[],
             nc=1,
             multi_label=True,
@@ -644,36 +644,66 @@ def test(
             #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
             #                                                                  l_kpt0_x, l_kpt0_y, l_kpt1_x, l_kpt1_y,
             #                                                                                                          r_kpt0_x, r_kpt0_y, r_kpt1_x, r_kpt1_y, class_label, confidence)
-            prediction_dict = {
-                "objdet": [
-                    torch.concat([
-                        left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
-                        batch_refined_right_bboxes_selected[0],
-                        left_bboxesClsKeypts_nmsed_topked[0][:, 5:7],
-                        left_bboxesClsKeypts_nmsed_topked[0][:, 8:10],
-                        batch_refined_right_keypts_selected[0][:, 0:2],
-                        batch_refined_right_keypts_selected[0][:, 3:5],
-                        torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
-                        torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
-                    ], dim=1)
-                ],
-                "concentrate": {
-                    "left": left_event_sharp,
-                    "right": right_event_sharp
-                }
-            }
-            SaveTestResultsAndVisualize(
-                prediction_dict,
-                indexBatch,
-                batch_data["end_timestamp"].item(),
-                sequence_name,
-                save_root,
-                batch_data["image_metadata"]
+            preds = FilterBadDetections(
+                torch.concat([
+                    left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
+                    batch_refined_right_bboxes_selected[0],
+                    left_bboxesClsKeypts_nmsed_topked[0][:, 5:7],
+                    left_bboxesClsKeypts_nmsed_topked[0][:, 8:10],
+                    batch_refined_right_keypts_selected[0][:, 0:2],
+                    batch_refined_right_keypts_selected[0][:, 3:5],
+                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
+                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
+                ], dim=1),
+                imageHeight=imageHeight,
+                imageWidth=imageWidth,
+                margin=20
             )
+            if preds is not None:
+                prediction_dict = {
+                    "objdet": [preds],
+                    "concentrate": {
+                        "left": left_event_sharp,
+                        "right": right_event_sharp
+                    }
+                }
+                SaveTestResultsAndVisualize(
+                    prediction_dict,
+                    indexBatch,
+                    batch_data["end_timestamp"].item(),
+                    sequence_name,
+                    save_root,
+                    batch_data["image_metadata"]
+                )
 
         pbar.update(1)
     pbar.close()
     return
+
+
+def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int):
+    """
+    delete objects whose bboxes are within 4 edges' margin of the image.
+    """
+    new_preds = []
+    num_objects = preds.shape[0]
+    for i in range(num_objects):
+        if (
+            preds[i][0] < margin
+            or preds[i][1] < margin
+            or preds[i][4] < margin
+            or preds[i][5] < margin
+            or preds[i][2] > (imageWidth - margin)
+            or preds[i][3] > (imageHeight - margin)
+            or preds[i][6] > (imageWidth - margin)
+            or preds[i][7] > (imageWidth - margin)
+        ):
+            continue
+        new_preds.append(preds[i].unsqueeze(0))
+    if len(new_preds) > 0:
+        return torch.concat(new_preds, dim=0)
+    else:
+        return None
 
 
 def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, sequence_name: str, save_root: str, img_metas: dict):
