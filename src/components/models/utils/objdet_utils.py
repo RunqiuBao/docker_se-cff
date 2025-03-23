@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import Sequence, Tuple, List, Dict, Union, Optional
 import time
 import torch.profiler
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 from mmdet.structures.bbox import cat_boxes
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
@@ -348,3 +349,43 @@ def SelectTargets(
     bbox_targets = torch.cat(bbox_targets, 0)
     indices_bbox_targets = torch.cat(indices_bbox_targets, 0)
     return num_pos, pos_masks, cls_targets, bbox_targets, indices_bbox_targets, batch_num_pos_per_img
+
+
+@torch.no_grad
+def EvaluateObjDetPerformance(preds: List[dict], targets: List[dict]):
+    """
+    For example,
+        Args:
+            preds = [
+                {
+                    "boxes": torch.tensor([[100, 100, 200, 200], [200, 200, 300, 300]]),  # (x1, y1, x2, y2)
+                    "scores": torch.tensor([0.9, 0.8]),
+                    "labels": torch.tensor([1, 1])
+                }
+            ],
+            targets = [
+                {
+                    "boxes": torch.tensor([[102, 98, 198, 202], [200, 200, 300, 300]]),
+                    "labels": torch.tensor([1, 1])
+                }
+            ]
+
+        Returns:
+            {'map': tensor(0.9112),
+            'map_50': tensor(1.),
+            'map_75': tensor(1.),
+            'map_small': tensor(-1.),
+            'map_medium': tensor(-1.),
+            'map_large': tensor(0.9112),
+            'mar_1': tensor(0.6000),
+            'mar_10': tensor(0.9333),
+            'mar_100': tensor(0.9333),
+            'mar_small': tensor(-1.),
+            'mar_medium': tensor(-1.),
+            'mar_large': tensor(0.9333),
+            'map_per_class': tensor(-1.),
+            'mar_100_per_class': tensor(-1.)}
+    """
+    metric = MeanAveragePrecision(iou_type="bbox")
+    metric.update(preds, targets)
+    return metric.compute()
