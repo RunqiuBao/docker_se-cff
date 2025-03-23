@@ -15,7 +15,7 @@ from utils import visualizer
 from .visz_utils import DrawResultBboxesAndKeyptsOnStereoEventFrame, RenderImageWithBboxes
 from ..models.utils.misc import freeze_module_grads, convert_tensor_to_numpy, DetachCopyNested
 
-from ..models.utils.objdet_utils import SelectTargets, SelectTopkCandidates
+from ..models.utils.objdet_utils import SelectTargets, SelectTopkCandidates, EvaluateObjDetPerformance
 from ..methods.visz_utils import RenderImageWithBboxesAndKeypts
 from .log_utils import GetLogDict
 from .base import batch_to_cuda
@@ -412,6 +412,8 @@ def valid(
     if tensorBoardLogger is not None:
         pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
+    preds_evaluation = []
+    targets_evaluation = []
     for indexBatch in range(len(data_loader)):
         batch_data = next(data_iter)
         if hasattr(models["disp_head"], 'is_freeze') and not models["disp_head"].is_freeze:
@@ -470,8 +472,21 @@ def valid(
                 right_feature,
                 left_selected_boxes,  # Note: only use this when training left objdet
                 left_selected_classes,
-                left_selected_confidences
+                left_selected_confidences,
+                left_target_gt_idx
             ) = artifacts
+ 
+            bboxes_targets_xyxy_full = batch_data["gt_labels"]["objdet"][0]["bboxes"][:, :4]
+            CollectPredsTargetsForEvaluation(
+                left_selected_boxes[0],
+                left_selected_classes[0],
+                left_selected_confidences[0].sigmoid(),
+                left_target_gt_idx[0],
+                bboxes_targets_xyxy_full,
+                batch_data["gt_labels"]["objdet"][0]["labels"],
+                preds_evaluation,
+                targets_evaluation
+            )
 
             # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
             if tensorBoardLogger is not None and left_selected_boxes is not None:
@@ -669,4 +684,48 @@ def valid(
     if tensorBoardLogger is not None:
         pbar.close()
 
+    evalResults = EvaluateObjDetPerformance(preds_evaluation, targets_evaluation)
+    logger.info("evalResults:\n{}".format(evalResults))
+
     return log_dict
+
+
+@torch.no_grad
+def CollectPredsTargetsForEvaluation(
+    selected_boxes,
+    selected_classes,
+    selected_scores,
+    selected_target_gt_idx,
+    gt_bboxes,
+    gt_cls,
+    preds_evaluation,  # Output
+    targets_evaluation
+):
+    """
+    Prepare preds and targets pair for final evaluation. See requirements at objdet_utils.EvaluateObjDetPerformance
+    """
+    num_gt = gt_bboxes.shape[0]
+    preds_bboxes = []
+    preds_scores = []
+    preds_labels = []
+    target_bboxes = []
+    target_cls = []
+    for ii in range(num_gt):
+        mask_for_this_gt = (selected_target_gt_idx == ii)[:, 0]
+        selected_score_for_this_gt = selected_scores[mask_for_this_gt]
+        index_highest_score = torch.argmax(selected_score_for_this_gt)
+        preds_bboxes.append(selected_boxes[mask_for_this_gt][index_highest_score].unsqueeze(0))
+        preds_scores.append(selected_score_for_this_gt[index_highest_score].view(1))
+        preds_labels.append(selected_classes[mask_for_this_gt][index_highest_score].view(1))
+        target_bboxes.append(gt_bboxes[ii].unsqueeze(0))
+        target_cls.append(gt_cls[ii].view(1))
+    preds_evaluation.append({
+        "boxes": torch.concat(preds_bboxes, dim=0),
+        "scores": torch.concat(preds_scores),
+        "labels": torch.concat(preds_labels)
+    })
+    targets_evaluation.append({
+        "boxes": torch.concat(target_bboxes, dim=0),
+        "labels": torch.concat(target_cls, dim=0),
+    })
+    return

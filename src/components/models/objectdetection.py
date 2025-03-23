@@ -1443,13 +1443,14 @@ class ObjectDetectionHead(nn.Module):
         """
         preds = self.predict(left_event_voxel, right_event_voxel)
         losses = None
-        artifacts = [preds[-1], None, None, None]
+        artifacts = [preds[-1], None, None, None, None]
         preds = preds[:-1]
-        if labels is not None and not self.is_freeze:
+        if labels is not None:
             losses_and_artifacts = self.compute_loss(preds, labels, batch_img_metas=batch_img_metas)
             artifacts[1] = losses_and_artifacts[1]
             artifacts[2] = losses_and_artifacts[2]
             artifacts[3] = losses_and_artifacts[3]
+            artifacts[4] = losses_and_artifacts[4]
             losses = losses_and_artifacts[0]
         return preds, losses, artifacts
 
@@ -1509,7 +1510,8 @@ class ObjectDetectionHead(nn.Module):
             loss_dict_bboxdet,
             batch_selected_boxes,
             batch_selected_classes,
-            batch_selected_confidences
+            batch_selected_confidences,
+            batch_targets_indices
         ) = self.loss_by_bboxdet(
             cls_scores,
             bboxes,
@@ -1518,7 +1520,7 @@ class ObjectDetectionHead(nn.Module):
             batch_img_metas
         )
 
-        return loss_dict_bboxdet, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
+        return loss_dict_bboxdet, batch_selected_boxes, batch_selected_classes, batch_selected_confidences, batch_targets_indices
 
     def loss_by_bboxdet(
         self,
@@ -1560,7 +1562,7 @@ class ObjectDetectionHead(nn.Module):
         flatten_priors = torch.cat(mlvl_priors)
         flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
 
-        pos_masks, cls_targets, obj_targets, bbox_targets, num_pos_imgs = [], [], [], [], []
+        pos_masks, cls_targets, obj_targets, bbox_targets, num_pos_imgs, batch_targets_indices = [], [], [], [], [], []
         for indexInBatch in range(len(gt_labels)):
             (
                 pos_mask,
@@ -1583,6 +1585,7 @@ class ObjectDetectionHead(nn.Module):
             obj_targets.append(obj_target)
             bbox_targets.append(bbox_target)
             num_pos_imgs.append(num_pos_img)
+            batch_targets_indices.append(indices_bbox_target)
 
         num_pos = torch.tensor(
             sum(num_pos_imgs),
@@ -1630,7 +1633,7 @@ class ObjectDetectionHead(nn.Module):
             batch_selected_confidences.append(
                 torch.max(flatten_cls_preds[index_img][pos_masks[index_img]], dim=-1)[0].detach() * flatten_objectness[index_img][pos_masks[index_img]].detach()
             )
-        return  loss_dict, batch_selected_boxes, batch_selected_classes, batch_selected_confidences
+        return  loss_dict, batch_selected_boxes, batch_selected_classes, batch_selected_confidences, batch_targets_indices
 
     def _bbox_decode(self, priors: Tensor, bbox_preds: Tensor) -> Tensor:
         """
