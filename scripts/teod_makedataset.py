@@ -95,7 +95,7 @@ def ConfigureArguments():
 
     args = parser.parse_args()
     args.world_size = 1
-    args.num_workers = 4
+    args.num_workers = 1
     return args
 
 
@@ -196,6 +196,7 @@ def main(args):
         dataloader_cfg=dataloader_cfg,
         is_distributed=False,
         defineSeqIdx=args.seq_idx_toselect,
+        num_repeat=1,
         isDisableLmdbRead=True
     )
     data_iter = iter(data_loader)
@@ -252,9 +253,7 @@ def main(args):
                     leftEvents = leftEvents.astype("int8")
                     rightEvents = rightEvents.astype("int8")
                 else:
-                    # hack, FIXME!!: in the unitree dataset, left and right camera are already corrected, but the calib file is not fixed.
-                    # leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents, rightEvents, stereo_calib_dict)
-                    rightEvents, leftEvents = UndistortAndRectifyStereoEvents(rightEvents, leftEvents, stereo_calib_dict)
+                    leftEvents, rightEvents = UndistortAndRectifyStereoEvents(leftEvents.transpose(1, 2, 0), rightEvents.transpose(1, 2, 0), stereo_calib_dict)
 
                 lmdb_writer.write(code_l, leftEvents)
                 lmdb_writer.write(code_r, rightEvents)
