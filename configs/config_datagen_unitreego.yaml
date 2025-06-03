@@ -8,11 +8,11 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 640
-      randomhorizontalflip: False
+      randomcropflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -23,11 +23,11 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 640
-      randomhorizontalflip: False
+      randomcropflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -38,11 +38,11 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 640
-      randomhorizontalflip: False
+      randomcropflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False

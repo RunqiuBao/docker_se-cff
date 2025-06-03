@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 500
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -8,11 +8,13 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 672
+      randomcrop: True
       randomhorizontalflip: False
+      randomverticalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -23,11 +25,10 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 672
-      randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -38,11 +39,10 @@ DATASET:
       sampling_ratio: 1
       crop_height: 480
       crop_width: 672
-      randomhorizontalflip: False
       event_cfg:
         NAME: sbn
         PARAMS:
-          num_of_event: 500000
+          num_of_event: 200000
           stack_method: MixedDensityEventStacking
           stack_size: 10
           use_preprocessed_image: False
@@ -115,10 +115,13 @@ MODEL:
       # region proposal
       nms_pre: 100
       nms_iou_threshold: 0.5
+      # inference param
+      nms_iou_threshold_inference: 0.3
+      confidence_threshold_inference: 0.5
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # detection
       num_classes: 1
