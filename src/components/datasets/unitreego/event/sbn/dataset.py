@@ -16,8 +16,6 @@ class EventDataset(torch.utils.data.Dataset):
     sequence_length = None
 
     # image meta data
-    event_h = None
-    event_w = None
     event_channels = None
 
     def __init__(
@@ -39,8 +37,6 @@ class EventDataset(torch.utils.data.Dataset):
         self.stack_size = stack_size
         self.num_of_future_event = num_of_future_event
         self.use_preprocessed_image = use_preprocessed_image
-        self.event_h = constant.EVENT_HEIGHT
-        self.event_w = constant.EVENT_WIDTH
         self.event_channels = constant.EVENT_CHANNELS
         self.sequence_length = sequence_length
         self.NO_VALUE = constant.STACK_NO_VALUE
@@ -66,6 +62,20 @@ class EventDataset(torch.utils.data.Dataset):
                 **kwargs,
             )
 
+    @property
+    def event_h(self):
+        if self.lmdb_txn is not None:
+            return constant.EVENT_HEIGHT_RECTIFY
+        else:
+            return constant.EVENT_HEIGHT
+    
+    @property
+    def event_w(self):
+        if self.lmdb_txn is not None:
+            return constant.EVENT_WIDTH_RECTIFY
+        else:
+            return constant.EVENT_WIDTH
+
     def __len__(self):
         return self.sequence_length
 
@@ -75,16 +85,20 @@ class EventDataset(torch.utils.data.Dataset):
             code = "%03d_%06d_l" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             left_events = self.lmdb_txn.get(code)
-            left_events = np.frombuffer(left_events, dtype="int8")
+            try:
+                left_events = np.frombuffer(left_events, dtype="int8")
+            except:
+                print("error code: ", code)
+                raise
             left_events = left_events.reshape(
-                constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS
+                constant.EVENT_HEIGHT_RECTIFY, constant.EVENT_WIDTH_RECTIFY, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
             code = "%03d_%06d_r" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             right_events = self.lmdb_txn.get(code)
             right_events = np.frombuffer(right_events, dtype="int8")
             right_events = right_events.reshape(
-                constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS
+                constant.EVENT_HEIGHT_RECTIFY, constant.EVENT_WIDTH_RECTIFY, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
             event_data = {"left": left_events, "right": right_events}
         else:

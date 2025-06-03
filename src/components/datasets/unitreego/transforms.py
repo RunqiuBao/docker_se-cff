@@ -33,32 +33,42 @@ class ToTensor:
 
 
 class RandomCrop:
-    def __init__(self, event_module, crop_height, crop_width, disparity_module=None):
+    def __init__(self, event_module, objdet_module, disparity_module, crop_height, crop_width, no_value):
         self.crop_height = crop_height
         self.crop_width = crop_width
-        self.event_transform = event_module.transforms.Crop(crop_height, crop_width)
+        self.event_transform = event_module.transforms.Crop(crop_height, crop_width, no_value)
+        self.objdet_transform = objdet_module.transforms.Crop()
         if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.Crop(
-                crop_height, crop_width
-            )
+            self.disparity_transform = disparity_module.transforms.Crop(crop_height, crop_width, no_value)
 
     def __call__(self, sample):
         if "event" in sample:
-            ori_height, ori_width = sample["event"]["left"].shape[:2]
+            ori_height, ori_width = sample["event"]["left"].shape[1:]
         else:
             raise NotImplementedError
 
-        assert self.crop_height <= ori_height and self.crop_width <= ori_width
+        offset_x = np.random.randint(ori_width - self.crop_width + 1) if (ori_width - self.crop_width) >= 0 else np.random.randint(ori_width - self.crop_width, 0)
+        offset_y = np.random.randint(ori_height - self.crop_height + 1) if (ori_height - self.crop_height) >= 0 else np.random.randint(ori_height - self.crop_height, 0)
 
-        offset_x = np.random.randint(ori_width - self.crop_width + 1)
-        offset_y = np.random.randint(ori_height - self.crop_height + 1)
+        if "objdet" in sample.keys():
+            sample["objdet"] = self.objdet_transform(
+                sample["objdet"],
+                offset_x,
+                offset_y
+            )
 
         if "event" in sample.keys():
-            sample["event"] = self.event_transform(sample["event"], offset_x, offset_y)
+            sample["event"] = self.event_transform(
+                sample["event"],
+                offset_x,
+                offset_y
+            )
 
         if "disparity" in sample.keys():
             sample["disparity"] = self.disparity_transform(
-                sample["disparity"], offset_x, offset_y
+                sample["disparity"],
+                offset_x,
+                offset_y
             )
 
         return sample

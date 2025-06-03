@@ -6,8 +6,6 @@ class ToTensor:
     def __call__(self, sample):
         sample["bboxes"] = torch.from_numpy(sample["bboxes"])
         sample["labels"] = torch.from_numpy(sample["labels"])
-        sample["keypt1_masks"] = torch.from_numpy(sample["keypt1_masks"])
-        sample["keypt2_masks"] = torch.from_numpy(sample["keypt2_masks"])
         sample["keypts"] = torch.from_numpy(sample["keypts"])
         return sample
 
@@ -19,10 +17,10 @@ def ChangeBboxFormatToCenterBased(
     y_br,
     x_tl_r,
     x_br_r,
-    delta_x_keypt1,
-    delta_y_keypt1,
-    delta_x_keypt2,
-    delta_y_keypt2,
+    x_keypt1,
+    y_keypt1,
+    x_keypt2,
+    y_keypt2,
 ):
     """
     Returns:
@@ -43,10 +41,6 @@ def ChangeBboxFormatToCenterBased(
     h_l = y_br - y_tl
     x_c_r = (x_tl_r + x_br_r) / 2
     w_r = x_br_r - x_tl_r
-    x_keypt1 = delta_x_keypt1 * w_l + x_tl
-    y_keypt1 = delta_y_keypt1 * h_l + y_tl
-    x_keypt2 = delta_x_keypt2 * w_l + x_tl
-    y_keypt2 = delta_y_keypt2 * h_l + y_tl
     return np.concatenate(
         [
             column.reshape(-1, 1)
@@ -76,10 +70,6 @@ def ChangeBboxFormatToCornerBased(
     y_br = y_c + h_l / 2
     x_tl_r = x_c_r - w_r / 2
     x_br_r = x_c_r + w_r / 2
-    delta_x_keypt1 = (x_keypt1 - x_tl) / w_l
-    delta_y_keypt1 = (y_keypt1 - y_tl) / h_l
-    delta_x_keypt2 = (x_keypt2 - x_tl) / w_l
-    delta_y_keypt2 = (y_keypt2 - y_tl) / h_l
     return np.concatenate(
         [
             column.reshape(-1, 1)
@@ -90,10 +80,10 @@ def ChangeBboxFormatToCornerBased(
                 y_br,
                 x_tl_r,
                 x_br_r,
-                delta_x_keypt1,
-                delta_y_keypt1,
-                delta_x_keypt2,
-                delta_y_keypt2,
+                x_keypt1,
+                y_keypt1,
+                x_keypt2,
+                y_keypt2,
             ]
         ],
         axis=1,
@@ -125,6 +115,9 @@ class VerticalFlip:
             bboxes_cformat[:, 8],
             y_keypt2_new,
         )
+        keypts = np.copy(sample["keypts"])
+        keypts[:, :, 1] = self.img_height - keypts[:, :, 1]
+        sample["keypts"] = keypts
         return sample
 
 
@@ -159,4 +152,31 @@ class HorizontalFlip:
                 bboxes_cformat[:, 9],
             ]
         )
+        keypts = np.copy(sample["keypts"])
+        keypts[:, :, 0] = self.img_width - keypts[:, :, 0]
+        sample["keypts"] = keypts
+        return sample
+
+
+class Crop:
+    def __init__(self):
+        pass
+
+    def __call__(self, sample, offset_x, offset_y):
+        start_y = offset_y
+        start_x = offset_x
+
+        sample["bboxes"][:, 0] -= start_x
+        sample["bboxes"][:, 1] -= start_y
+        sample["bboxes"][:, 2] -= start_x
+        sample["bboxes"][:, 3] -= start_y
+        sample["bboxes"][:, 4] -= start_x
+        sample["bboxes"][:, 5] -= start_x
+        sample["bboxes"][:, 6] -= start_x
+        sample["bboxes"][:, 7] -= start_y
+        sample["bboxes"][:, 8] -= start_x
+        sample["bboxes"][:, 9] -= start_y
+
+        sample["keypts"][:, :, 0] -= start_x
+        sample["keypts"][:, :, 1] -= start_y
         return sample

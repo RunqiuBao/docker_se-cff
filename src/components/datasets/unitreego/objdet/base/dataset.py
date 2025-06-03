@@ -57,10 +57,10 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     Y_br,  # bottom right corner Y at left image
                     X_tl_r,  # top left corner X at right image
                     X_br_r,  # bottom right corner X at right image
-                    delta_x_keypt1,  # normalized X distance of keypt1 from top left corner at left image
-                    delta_y_keypt1,  # normalized Y distance of keypt1 from top left corner at left image
-                    delta_x_keypt2,  # normalized X distance of keypt2 from top left corner at left image
-                    delta_y_keypt2,  # normalized Y distance of keypt2 from top left corner at left image
+                    x_keypt1,  # X distance of keypt1 from top left corner at left image
+                    y_keypt1,  # Y distance of keypt1 from top left corner at left image
+                    x_keypt2,  # X distance of keypt2 from top left corner at left image
+                    y_keypt2,  # Y distance of keypt2 from top left corner at left image
                     index_box  # index in N bboxes.
                 ]
             - 'labels': (N,) tensor. classes of the bboxes
@@ -81,10 +81,10 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                         oneInstance["leftPoints"][1][1],
                         oneInstance["rightPoints"][0][0],
                         oneInstance["rightPoints"][1][0],
-                        (oneInstance["keypt1"][0] - oneInstance["leftPoints"][0][0]) / (oneInstance["leftPoints"][1][0] - oneInstance["leftPoints"][0][0]),
-                        (oneInstance["keypt1"][1] - oneInstance["leftPoints"][0][1]) / (oneInstance["leftPoints"][1][1] - oneInstance["leftPoints"][0][1]),
-                        (x_keypt2 - oneInstance["leftPoints"][0][0]) / (oneInstance["leftPoints"][1][0] - oneInstance["leftPoints"][0][0]),
-                        (y_keypt2 - oneInstance["leftPoints"][0][1]) / (oneInstance["leftPoints"][1][1] - oneInstance["leftPoints"][0][1]),
+                        oneInstance["keypt1"][0],
+                        oneInstance["keypt1"][1],
+                        x_keypt2,
+                        y_keypt2,
                         indexInstance
                     ]
                 )[numpy.newaxis, :]
@@ -98,13 +98,9 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         bboxes = numpy.concatenate(bboxes, axis=0)
         labels = numpy.concatenate(labels)
         keypts = numpy.concatenate(keypts, axis=0)
-        keypt1_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 1)
-        keypt2_masks = self.GetGtKeyptDistanceMasks(bboxes[:, :4], bboxes[:, 6:10], 2)
         return {
             "bboxes": bboxes,
             "labels": labels,
-            "keypt1_masks": keypt1_masks,
-            "keypt2_masks": keypt2_masks,
             "keypts": keypts
         }
     

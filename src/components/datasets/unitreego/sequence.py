@@ -76,17 +76,15 @@ class SequenceDataset(torch.utils.data.Dataset):
         objdet_module = getattr(objdet, "base")
         self.objdet_dataset = objdet_module.StereoObjDetDataset(
             root=os.path.join(root, self._PATH_DICT["objdet"]),
-            img_height=crop_height,
-            img_width=crop_width
+            img_height=self.event_dataset.event_h,
+            img_width=self.event_dataset.event_w
         )
 
         # Disparity Dataset
         disparity_module = getattr(disparity, "base")
         img_metadata = {
-            # 'h': self.event_dataset.event_h,
-            # 'w': self.event_dataset.event_w,
-            "h": crop_height,
-            "w": crop_width
+            'h': self.event_dataset.event_h,
+            'w': self.event_dataset.event_w,
         }
         self.disparity_dataset = disparity_module.DisparityDataset(
             img_metadata=img_metadata
@@ -98,8 +96,31 @@ class SequenceDataset(torch.utils.data.Dataset):
         print("split: {}".format(split))
         if split in ["train", "trainval"]:
             transformsList = []
-            if kwargs.get("randomhorizontalflip", False):
+            if kwargs.get("randomcrop", False):
                 transformsList.append(
+                    transforms.RandomCrop(
+                        event_module=event_module,
+                        disparity_module=disparity_module,
+                        objdet_module=objdet_module,
+                        crop_height=crop_height,
+                        crop_width=crop_width,
+                        no_value=self.event_dataset.NO_VALUE
+                    )
+                )
+            else:
+                transformsList.append(
+                    transforms.Padding(
+                        event_module=event_module,
+                        img_height=crop_height,
+                        img_width=crop_width,
+                        no_event_value=self.event_dataset.NO_VALUE,
+                        no_disparity_value=self.disparity_dataset.NO_VALUE,
+                        disparity_module=disparity_module,
+                    )
+                )
+
+            if kwargs.get("randomhorizontalflip", False):
+                transformsList.append(  # Note: horizonal flip will mess up the stereo disparity.
                     transforms.RandomHorizontalFlip(
                         event_module=event_module,
                         disparity_module=disparity_module,
@@ -108,16 +129,16 @@ class SequenceDataset(torch.utils.data.Dataset):
                         img_width=crop_width,
                     )
                 )
-            transformsList.append(
-                transforms.Padding(
-                    event_module=event_module,
-                    img_height=crop_height,
-                    img_width=crop_width,
-                    no_event_value=self.event_dataset.NO_VALUE,
-                    no_disparity_value=self.disparity_dataset.NO_VALUE,
-                    disparity_module=disparity_module,
+            if kwargs.get("randomverticalflip", False):
+                transformsList.append(
+                    transforms.RandomVerticalFlip(
+                        event_module=event_module,
+                        disparity_module=disparity_module,
+                        objdet_module=objdet_module,
+                        img_height=crop_height,
+                        img_width=crop_width,
+                    )
                 )
-            )
             transformsList.append(
                 transforms.ToTensor(
                     event_module=event_module,

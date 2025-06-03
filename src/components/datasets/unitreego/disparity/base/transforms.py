@@ -33,18 +33,39 @@ class Padding:
 
 
 class Crop:
-    def __init__(self, crop_height, crop_width):
+    def __init__(self, crop_height, crop_width, no_value):
         self.crop_height = crop_height
         self.crop_width = crop_width
+        self.no_value = no_value
 
     def __call__(self, sample, offset_x, offset_y):
         start_y, end_y = offset_y, offset_y + self.crop_height
         start_x, end_x = offset_x, offset_x + self.crop_width
-
-        sample = sample[start_y:end_y, start_x:end_x]
+        h_orig, w_orig = sample.shape[:2]
+        # print("h_orig: {}, w_orig: {}, start_x: {}, start_y: {}".format(h_orig, w_orig, start_x, start_y))
+        if start_y < 0:
+            sample = np.pad(
+                sample,
+                ((-start_y, offset_y + self.crop_height - h_orig), (0, 0)),
+                mode="constant",
+                constant_values=self.no_value,
+            )
+            if start_x >= 0:
+                sample = sample[:, start_x:end_x]
+        if start_x < 0:
+            sample = np.pad(
+                sample,
+                ((0, 0), (-start_x, offset_x + self.crop_width - w_orig)),
+                mode="constant",
+                constant_values=self.no_value,
+            )
+            if start_y >= 0:
+                sample = sample[start_y:end_y, :]
+        if start_x >= 0 and start_y >=0:
+            sample = sample[start_y:end_y, start_x:end_x]
+        # print("sample shape: {}".format(sample.shape))
 
         return sample
-
 
 class VerticalFlip:
     def __call__(self, sample):

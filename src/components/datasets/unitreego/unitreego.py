@@ -35,6 +35,7 @@ class UnitreegoDataset(torch.utils.data.Dataset):
         self.crop_width = crop_width
         self.num_workers = num_workers
         assert split in DATA_SPLIT.keys()
+        self.num_repeat = kwargs["num_repeat"] if split == "train" else 1
 
         # moving events into lmdb
         if not isDisableLmdbRead and os.path.isdir(os.path.join(root, split, "lmdb")) and os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb")) > 1024**2:  # Note: the dataset need to be larger than 1MB
@@ -72,9 +73,10 @@ class UnitreegoDataset(torch.utils.data.Dataset):
             self.dataset = torch.utils.data.ConcatDataset(self.sequence_data_list)            
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.dataset) * self.num_repeat
 
     def __getitem__(self, idx):
+        idx = idx % len(self.dataset)
         data = self.dataset[idx]
 
         return data
@@ -177,7 +179,7 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False
+    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False, num_repeat=3
 ):
     """
     Args:
@@ -189,6 +191,7 @@ def get_dataloader(
         num_workers=args.num_workers,
         defineSeqIdx=defineSeqIdx,
         isDisableLmdbRead=isDisableLmdbRead,
+        num_repeat=num_repeat,
         **dataset_cfg.PARAMS,
     )
 
