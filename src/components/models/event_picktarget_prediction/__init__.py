@@ -1,1 +1,0 @@
-from .event_picktarget_prediction import EventPickTargetPredictionNetwork
