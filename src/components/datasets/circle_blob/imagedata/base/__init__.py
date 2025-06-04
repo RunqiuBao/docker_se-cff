@@ -1,2 +1,2 @@
-from .dataset import ObjDetDataset
+from .dataset import ImageDataset
 from . import transforms

@@ -12,54 +12,34 @@ class Compose:
 
 
 class ToTensor:
-    def __init__(self, event_module, disparity_module=None, objdet_module=None):
-        self.event_transform = event_module.transforms.ToTensor()
-        if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.ToTensor()
-        if objdet_module is not None:
-            self.objdet_transform = objdet_module.transforms.ToTensor()
+    def __init__(self, imagedata_module, objdet_module):
+        self.imagedata_module = imagedata_module.transforms.ToTensor()
+        self.objdet_transform = objdet_module.transforms.ToTensor()
 
     def __call__(self, sample):
-        if "event" in sample.keys():
-            sample["event"] = self.event_transform(sample["event"])
-
-        if "disparity" in sample.keys():
-            sample["disparity"] = self.disparity_transform(sample["disparity"])
+        if "imagedata" in sample.keys():
+            sample["imagedata"] = self.imagedata_module(sample["imagedata"])
 
         if "objdet" in sample.keys():
             sample["objdet"] = self.objdet_transform(sample["objdet"])
-
         return sample
 
 
 class RandomCrop:
-    def __init__(self, event_module, crop_height, crop_width, disparity_module=None):
+    def __init__(self, imagedata_module, objdet_module, crop_height, crop_width, no_value):
         self.crop_height = crop_height
         self.crop_width = crop_width
-        self.event_transform = event_module.transforms.Crop(crop_height, crop_width)
-        if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.Crop(
-                crop_height, crop_width
-            )
+        self.imagedata_transform = imagedata_module.transforms.Crop(crop_height, crop_width, no_value)
+        self.objdet_transform = objdet_module.transforms.Crop()
 
     def __call__(self, sample):
-        if "event" in sample:
-            ori_height, ori_width = sample["event"]["left"].shape[:2]
-        else:
-            raise NotImplementedError
+        ori_height, ori_width = sample["imagedata"].shape[:2]
 
-        assert self.crop_height <= ori_height and self.crop_width <= ori_width
+        offset_x = np.random.randint(ori_width - self.crop_width + 1) if (ori_width - self.crop_width) >= 0 else np.random.randint(ori_width - self.crop_width, 0)
+        offset_y = np.random.randint(ori_height - self.crop_height + 1) if (ori_height - self.crop_height) >= 0 else np.random.randint(ori_width - self.crop_width, 0)
 
-        offset_x = np.random.randint(ori_width - self.crop_width + 1)
-        offset_y = np.random.randint(ori_height - self.crop_height + 1)
-
-        if "event" in sample.keys():
-            sample["event"] = self.event_transform(sample["event"], offset_x, offset_y)
-
-        if "disparity" in sample.keys():
-            sample["disparity"] = self.disparity_transform(
-                sample["disparity"], offset_x, offset_y
-            )
+        sample["imagedata"] = self.imagedata_transform(sample["imagedata"], offset_x, offset_y)
+        sample["objdet"] = self.objdet_transform(sample["objdet"], offset_x, offset_y)
 
         return sample
 
@@ -67,60 +47,39 @@ class RandomCrop:
 class Padding:
     def __init__(
         self,
-        event_module,
+        imagedata_module,
         img_height,
         img_width,
-        no_event_value=0,
-        no_disparity_value=0,
-        disparity_module=None,
+        no_value=0,
     ):
         self.img_height = img_height
         self.img_width = img_width
-        self.event_transform = event_module.transforms.Padding(
-            img_height, img_width, no_event_value
+        self.imagedata_transform = imagedata_module.transforms.Padding(
+            img_height,
+            img_width,
+            no_value
         )
-        if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.Padding(
-                img_height, img_width, no_disparity_value
-            )
 
     def __call__(self, sample):
-        if "event" in sample.keys():
-            sample["event"] = self.event_transform(sample["event"])
-
-        if "disparity" in sample.keys():
-            sample["disparity"] = self.disparity_transform(sample["disparity"])
-
+        sample["imagedata"] = self.imagedata_transform(sample["imagedata"])
         return sample
 
 
 class RandomVerticalFlip:
     def __init__(
         self,
-        event_module,
-        disparity_module=None,
-        objdet_module=None,
-        img_height=None,
-        img_width=None,
+        imagedata_module,
+        objdet_module,
+        img_height,
+        img_width,
     ):
-        self.event_transform = event_module.transforms.VerticalFlip()
-        if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.VerticalFlip()
-        if objdet_module is not None:
-            self.objdet_transform = objdet_module.transforms.VerticalFlip(
-                img_height, img_width
-            )
+        self.imagedata_transform = imagedata_module.transforms.VerticalFlip()
+        self.objdet_transform = objdet_module.transforms.VerticalFlip(img_height, img_width)
 
     def __call__(self, sample):
         if np.random.random() < 0.5:
-            if "event" in sample.keys():
-                sample["event"] = self.event_transform(sample["event"])
-
-            if "disparity" in sample.keys():
-                sample["disparity"] = self.disparity_transform(sample["disparity"])
-
-            if "objdet" in sample.keys():
-                sample["objdet"] = self.objdet_transform(sample["objdet"])
+            sample["imagedata"] = self.imagedata_transform(sample["imagedata"])
+            sample["objdet"] = self.objdet_transform(sample["objdet"])
 
         return sample
 
@@ -128,29 +87,33 @@ class RandomVerticalFlip:
 class RandomHorizontalFlip:
     def __init__(
         self,
-        event_module,
-        disparity_module=None,
-        objdet_module=None,
-        img_height=None,
-        img_width=None,
+        imagedata_module,
+        objdet_module,
+        img_height,
+        img_width,
     ):
-        self.event_transform = event_module.transforms.HorizontalFlip()
-        if disparity_module is not None:
-            self.disparity_transform = disparity_module.transforms.HorizontalFlip()
-        if objdet_module is not None:
-            self.objdet_transform = objdet_module.transforms.HorizontalFlip(
-                img_height, img_width
-            )
+        self.imagedata_transform = imagedata_module.transforms.HorizontalFlip()
+        self.objdet_transform = objdet_module.transforms.HorizontalFlip(img_height, img_width)
 
     def __call__(self, sample):
         if np.random.random() < 0.5:
-            if "event" in sample.keys():
-                sample["event"] = self.event_transform(sample["event"])
+            sample["imagedata"] = self.imagedata_transform(sample["imagedata"])
+            sample["objdet"] = self.objdet_transform(sample["objdet"])
 
-            if "disparity" in sample.keys():
-                sample["disparity"] = self.disparity_transform(sample["disparity"])
+        return sample
 
-            if "objdet" in sample.keys():
-                sample["objdet"] = self.objdet_transform(sample["objdet"])
 
+class Resize:
+    def __init__(
+        self,
+        imagedata_module,
+        objdet_module,
+        downsample_ratio
+    ):
+        self.imagedata_transform = imagedata_module.transforms.Resize(downsample_ratio)
+        self.objdet_transform = objdet_module.transforms.Resize(downsample_ratio)
+    
+    def __call__(self, sample):
+        sample["imagedata"] = self.imagedata_transform(sample["imagedata"])
+        sample["objdet"] = self.objdet_transform(sample["objdet"])
         return sample

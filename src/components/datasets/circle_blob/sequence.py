@@ -16,7 +16,6 @@ class SequenceDataset(torch.utils.data.Dataset):
     _PATH_DICT = {
         "objdet": "objdet",
         "imagedata": "imagedata",
-        "datalist": "datalist.txt",
     }
 
     def __init__(
@@ -34,31 +33,32 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.crop_width = crop_width
         self.num_workers = num_workers
 
-        self.datalist = np.loadtxt(
-            os.path.join(root, self._PATH_DICT["datalist"]), dtype="string"
-        )
-
         # objdet dataset
         objdet_module = getattr(objdet, "base")
         self.objdet_dataset = objdet_module.ObjDetDataset(
             root=os.path.join(root, self._PATH_DICT["objdet"]),
-            img_height=crop_height,
-            img_width=crop_width
-        )
+            num_repeat=5 if split == "train" else 1)
 
         # image dataset
         imagedata_module = getattr(imagedata, "base")
         self.image_dataset = imagedata_module.ImageDataset(
             root=os.path.join(root, self._PATH_DICT["imagedata"]),
-            img_height=crop_height,
-            img_width=crop_width
-        )
+            num_repeat=5 if split == "train" else 1)
 
         # Transforms
         print("split: {}".format(split))
         if split in ["train", "trainval"]:
             transformsList = []
-            if kwargs.get("randomhorizontalflip", False):
+            if kwargs.get("randomcropflip", False):
+                transformsList.append(
+                    transforms.RandomCrop(
+                        imagedata_module=imagedata_module,
+                        objdet_module=objdet_module,
+                        crop_height=crop_height,
+                        crop_width=crop_width,
+                        no_value=self.image_dataset.NO_VALUE
+                    )
+                )
                 transformsList.append(
                     transforms.RandomHorizontalFlip(
                         imagedata_module=imagedata_module,
@@ -67,14 +67,21 @@ class SequenceDataset(torch.utils.data.Dataset):
                         img_width=crop_width,
                     )
                 )
-            transformsList.append(
-                transforms.Padding(
-                    imagedata_module=imagedata_module,
-                    img_height=crop_height,
-                    img_width=crop_width,
-                    no_value=self.image_dataset.NO_VALUE,
+                transformsList.append(
+                    transforms.RandomVerticalFlip(
+                        imagedata_module=imagedata_module,
+                        objdet_module=objdet_module,
+                        img_height=crop_height,
+                        img_width=crop_width,
+                    )
                 )
-            )
+                transformsList.append(
+                    transforms.Resize(
+                        imagedata_module=imagedata_module,
+                        objdet_module=objdet_module,
+                        downsample_ratio=kwargs["downsample_ratio"]
+                    )
+                )
             transformsList.append(
                 transforms.ToTensor(
                     imagedata_module=imagedata_module,
@@ -89,19 +96,24 @@ class SequenceDataset(torch.utils.data.Dataset):
                         imagedata_module=imagedata_module,
                         img_height=crop_height,
                         img_width=crop_width,
-                        no_value=self.image_dataset.NO_VALUE,
+                        no_value=self.image_dataset.NO_VALUE
+                    ),
+                    transforms.Resize(
+                        imagedata_module=imagedata_module,
+                        objdet_module=objdet_module,
+                        downsample_ratio=kwargs["downsample_ratio"]
                     ),
                     transforms.ToTensor(
                         imagedata_module=imagedata_module,
                         objdet_module=objdet_module
-                    ),
+                    )
                 ]
             )
         else:
             raise NotImplementedError
 
     def __len__(self):
-        return len(self.timestamps)
+        return len(self.image_dataset)
 
     def __getitem__(self, idx):
         data = self.load_data(idx)
@@ -113,7 +125,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         # imagedata
         domain = "imagedata"
         if domain in batch[0].keys():
-            output[domain] = self.event_dataset.collate_fn(
+            output[domain] = self.image_dataset.collate_fn(
                 [sample[domain] for sample in batch]
             )
 
@@ -139,35 +151,19 @@ class SequenceDataset(torch.utils.data.Dataset):
         }
         if 'imagedata' in output and 'objdet' in output:
             output["gt_labels"] = {
-                "imagedata": output['imagedata'],
                 "objdet": output["objdet"]
             }
         return output
 
     def load_data(self, idx):
         data = {}
-        image_data = self.image_dataset[(idx, self.timestamps[idx])]
-        objdet_data = self.objdet_dataset[self.timestamps[idx]]
+        image_data = self.image_dataset[idx]
+        objdet_data = self.objdet_dataset[idx]
 
-        data["file_index"] = idx
-        data["end_timestamp"] = self.timestamps[idx]
+        data["data_index"] = idx
         if objdet_data is not None:
             data["objdet"] = objdet_data
         if image_data is not None:
             data["imagedata"] = image_data
 
         return data
-
-
-def read_csv(csv_file):
-    timestamps = []
-    timestamp_to_index = {}
-    with open(csv_file) as csvfile:
-        data_reader = csv.reader(csvfile)
-        for row in data_reader:
-            assert row[0] not in timestamps
-            if row[0].isnumeric():
-                timestamps.append(int(row[0]))
-                timestamp_to_index[int(row[0])] = int(row[1])
-
-    return np.asarray(timestamps), timestamp_to_index

@@ -1,2 +1,2 @@
-from .dataset import StereoObjDetDataset
+from .dataset import ObjDetDataset
 from . import transforms
