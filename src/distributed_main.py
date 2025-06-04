@@ -12,6 +12,7 @@ baodebug.debugutils.ConfigureRootLogger("info")  # config logger format
 
 
 print("baodebug: {}".format(os.environ["LOCAL_RANK"]))
+torch.cuda.set_per_process_memory_fraction(0.95, device='cuda:0')  # capping the GPU memory usage to 95%
 # Argument Parser
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, default="/root/code/configs/config.yaml")
