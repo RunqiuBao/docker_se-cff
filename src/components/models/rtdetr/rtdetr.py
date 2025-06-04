@@ -49,7 +49,7 @@ class RTDETR(nn.Module):
 
     @property
     def input_shape(self):
-        return (1, 10, 480, 672)
+        return (1, 1, 1216, 1440)
 
     def predict_single(self, x, targets=None):
         x = self._backbone(x)
@@ -57,21 +57,27 @@ class RTDETR(nn.Module):
         x = self._decoder(x, targets)
         return x
     
-    def predict(self, x, x_right, targets=None):
+    def predict(self, x, targets=None, is_test=True):
         x = self._backbone(x)
-        x_right = self._backbone(x_right)
         x = self._encoder(x)
-        x_right = self._encoder(x_right)
         x = self._decoder(x, targets)
-        return x, x_right
+        if is_test:
+            return (x["pred_logits"], x["pred_boxes"])
+        else:
+            return x
 
-    def forward(self, x, x_right, labels=None, **kwargs):
-        x, x_right = self.predict(x, x_right, targets=labels)
+    def forward(self, x, labels=None, **kwargs):
+        x = self.predict(x, targets=labels, is_test=kwargs.get("is_test", True))
         losses = None
         if labels is not None:
-            losses, selected_leftdetections, corresponding_gt_labels, indices = self.compute_loss(x, labels, **kwargs)
-        artifacts = [x_right]
+            if kwargs.get("is_test", True):
+                x_dict = {"pred_logits": x[0], "pred_boxes": x[1]}
+            else:
+                x_dict = x
+            losses, selected_leftdetections, corresponding_gt_labels, indices = self.compute_loss(x_dict, labels, **kwargs)
+        artifacts = None
         if labels is not None:
+            artifacts = []
             artifacts.append(selected_leftdetections)
             artifacts.append(corresponding_gt_labels)
             artifacts.append(indices)
@@ -108,7 +114,6 @@ class RTDETR(nn.Module):
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         input_tensor1 = torch.randn(model.input_shape).to(device)
-        input_tensor2 = torch.randn(model.input_shape).to(device)
         model = model.to(device)
-        flops, numParams = profile(model, inputs=(input_tensor1, input_tensor2), verbose=False)
+        flops, numParams = profile(model, inputs=(input_tensor1), verbose=False)
         return flops, numParams
