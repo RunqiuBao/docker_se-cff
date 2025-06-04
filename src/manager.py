@@ -57,7 +57,7 @@ class DLManager:
 
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
-            checkpoint = torch.load(self.args.resume_cpt, map_location=device)
+            checkpoint = torch.load(self.args.resume_cpt, map_location=device, weights_only=False)
             if self.logger:
                 self.logger.write(
                     "loading checkpoint {} ...".format(self.args.resume_cpt)
@@ -136,7 +136,7 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
-            
+
             train_log_dict = self.method.train(
                 models=self.models,
                 data_loader=train_loader,
@@ -200,11 +200,10 @@ class DLManager:
         self.logger.test()
 
         for sequence_dataloader in test_loader:            
-            sequence_name = sequence_dataloader.dataset.sequence_name
             self.method.test(
-                model=self.model,
+                models={key: model.module for key, model in self.models.items()},
                 data_loader=sequence_dataloader,
-                sequence_name=sequence_name,  # Note: for saving debug images
+                dataset_name=self.cfg.DATASET.TEST.NAME,
                 save_root=self.args.save_root,
                 is_save_onnx=self.args.is_save_onnx
             )
@@ -389,7 +388,7 @@ def _prepare_scaler(learning_cfg):
         return scaler
     else:
         return None
-    
+
 
 def _prepare_ema(learning_cfg, models):
     """
