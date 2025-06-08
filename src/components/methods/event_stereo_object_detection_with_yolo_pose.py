@@ -601,15 +601,44 @@ def test(
 ):
     for model in models.values():
         model.eval()
+
+    if is_save_onnx:
+        logger.info(
+            '''
+            # how to do inference with the exported onnx model:
+            # providers = [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+            import onnxruntime
+            providers = ["CPUExecutionProvider"]
+            ort_session = onnxruntime.InferenceSession(os.path.join(save_root, "concentration_net.onnx"), providers=providers)
+            ort_inputs = {"left_event": oneInputs["event"]["left"].cpu().numpy(), "right_event": oneInputs["event"]["right"].cpu().numpy()}
+            ort_outs = ort_session.run(["left_event_sharp", "right_event_sharp"], ort_inputs)
+            '''
+        )
     
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
+        if indexBatch < 18:
+            continue
         starttime = time.time()
         # ---------- concentration net ----------
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
         right_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["right"])
+        if is_save_onnx:
+            torch.onnx.export(
+                models['concentration_net'].module,
+                (
+                    batch_data["event"]["left"],
+                    batch_data["event"]["right"]
+                ),
+                os.path.join(save_root, "concentration_net.onnx"),
+                export_params=True,
+                opset_version=16,
+                do_constant_folding=True,
+                input_names=["left_img", "right_img"],
+                output_names=["left_preds", "right_preds"]
+            )
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
         batch_img_metas = {"h": imageHeight, "w": imageWidth}
@@ -617,10 +646,38 @@ def test(
 
         # ---------- disp pred net ----------
         pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
+        if is_save_onnx:
+            torch.onnx.export(
+                models['disp_head'].module,
+                (
+                    left_event_sharp,
+                    right_event_sharp
+                ),
+                os.path.join(save_root, "disp_head.onnx"),
+                export_params=True,
+                opset_version=16,
+                do_constant_folding=True,
+                input_names=["left_img", "right_img"],
+                output_names=["preds"]
+            )
 
         # ---------- objdet net ----------
         left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
         right_feature = models["objdet_head"].module.predict(batch_data["event"]["right"], isRightFeatures=True)
+        if is_save_onnx:
+            torch.onnx.export(
+                models['objdet_head'].module,
+                (
+                    batch_data["event"]["left"],
+                    batch_data["event"]["right"]
+                ),
+                os.path.join(save_root, "objdet_head.onnx"),
+                export_params=True,
+                opset_version=16,
+                do_constant_folding=True,
+                input_names=["left_event_voxel", "right_event_voxel"],
+                output_names=["preds0", "preds100", "preds101", "preds102", "preds11", "artifacts00", "artifacts01", "artifacts02"]
+            )
 
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
         left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
@@ -647,12 +704,32 @@ def test(
                 models["stereo_detection_head"].module.config["bbox_expand_factor"],
                 True
             )
+            if is_save_onnx:
+                torch.onnx.export(
+                    models['stereo_detection_head'].module,
+                    (
+                        right_feature,
+                        left_bboxes_nmsed_topked,
+                        pred_disparity_pyramid[-1],
+                        batch_img_metas,
+                    ),
+                    os.path.join(save_root, "stereo_detection_head.onnx"),
+                    export_params=True,
+                    opset_version=16,
+                    do_constant_folding=True,
+                    input_names=["right_feat", "left_bboxes", "disp_prior", "batch_img_metas"],
+                    output_names=["batch_sbboxes_pred", "batch_refined_right_bboxes", "batch_right_scores_refine", "right_pred_kpts", "right_scores_keypts"]
+                )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
             batch_refined_right_bboxes_selected = ExtractRefinedInstance(batch_refined_right_bboxes[0], batch_right_scores_refine[0])
             batch_refined_right_keypts_selected = ExtractRefinedInstance(right_pred_kpts[0], right_scores_keypts[0])
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
+
+        if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0):
+            print("==================================== finished onnx model (event_stereo_object_detection_with_yolo_pose) export! ====================================")
+            break
 
         if batch_refined_right_bboxes_selected is not None:
             # (l_tl_x, l_tl_y, r_br_x, r_br_y,
@@ -670,8 +747,8 @@ def test(
                     torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
                     torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
                 ], dim=1),
-                imageHeight=imageHeight,
-                imageWidth=imageWidth,
+                imageHeight=batch_data["image_metadata"]["h_cam"],
+                imageWidth=batch_data["image_metadata"]["w_cam"],
                 margin=20
             )
             if preds is not None:
