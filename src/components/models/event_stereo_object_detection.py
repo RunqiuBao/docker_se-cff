@@ -375,6 +375,9 @@ class StereoDetectionHead(nn.Module):
         decode_keypts = False
         if "decode_keypts" in kwargs:
             decode_keypts = kwargs["decode_keypts"]
+        if batch_img_metas is None:
+            batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
+
         preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_factor"], decode_keypts)
         losses = None
         artifacts = None
