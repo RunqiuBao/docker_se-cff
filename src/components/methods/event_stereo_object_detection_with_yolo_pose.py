@@ -221,6 +221,16 @@ def train(
             disp_map = pred_disparity_pyramid[-1].detach().cpu()
             disp_map *= 255 / disp_map.max()
             tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
+            viz_left_sharp = left_event_sharp[0].detach().squeeze().cpu()
+            viz_left_sharp -= viz_left_sharp.min()
+            viz_left_sharp /= viz_left_sharp.max()
+            viz_left_sharp *= 255
+            tensorBoardLogger.add_image("left_sharp", viz_left_sharp.to(torch.uint8).squeeze())
+            viz_right_sharp = right_event_sharp[0].detach().squeeze().cpu()
+            viz_right_sharp -= viz_right_sharp.min()
+            viz_right_sharp /= viz_right_sharp.max()
+            viz_right_sharp *= 255
+            tensorBoardLogger.add_image("right_sharp", viz_right_sharp.to(torch.uint8).squeeze())
 
         if models["disp_head"].module.is_freeze:
             objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, False)
@@ -262,6 +272,17 @@ def train(
                     }
                 )
                 tensorBoardLogger.add_image("(train) left sharp with bboxes", leftimage_visz)
+                leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    {
+                        "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy(),
+                        "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
+                        "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
+                        "keypts1": batch_data["gt_labels"]["objdet"][0]["keypts"][:, 0, :2].detach().cpu().numpy(),
+                        "keypts2": batch_data["gt_labels"]["objdet"][0]["keypts"][:, 1, :2].detach().cpu().numpy()
+                    }
+                )
+                tensorBoardLogger.add_image("(train) left sharp with GT bboxes", leftimage_gt_visz)
 
             if models["objdet_head"].module.is_freeze:
                 left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
@@ -776,6 +797,7 @@ def test(
 def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int):
     """
     delete objects whose bboxes are within 4 edges' margin of the image.
+    delete objects whose keypoints are outside of the bbox.
     """
     new_preds = []
     num_objects = preds.shape[0]
@@ -783,12 +805,39 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
         if (
             preds[i][0] < margin
             or preds[i][1] < margin
+            or preds[i][0] > (imageWidth - margin)
+            or preds[i][1] > (imageWidth - margin)
             or preds[i][4] < margin
             or preds[i][5] < margin
+            or preds[i][4] > (imageWidth - margin)
+            or preds[i][5] > (imageWidth - margin)
+            or preds[i][2] < margin
+            or preds[i][3] < margin
             or preds[i][2] > (imageWidth - margin)
             or preds[i][3] > (imageHeight - margin)
+            or preds[i][6] < margin
+            or preds[i][7] < margin
             or preds[i][6] > (imageWidth - margin)
             or preds[i][7] > (imageWidth - margin)
+        ):
+            continue
+        if (
+            preds[i][8] < preds[i][0]
+            or preds[i][8] > preds[i][2]
+            or preds[i][10] < preds[i][0]
+            or preds[i][10] > preds[i][2]
+            or preds[i][9] < preds[i][1]
+            or preds[i][9] > preds[i][3]
+            or preds[i][11] < preds[i][1]
+            or preds[i][11] > preds[i][3]
+            or preds[i][12] < preds[i][4]
+            or preds[i][12] > preds[i][6]
+            or preds[i][14] < preds[i][4]
+            or preds[i][14] > preds[i][6]
+            or preds[i][13] < preds[i][5]
+            or preds[i][13] > preds[i][7]
+            or preds[i][15] < preds[i][5]
+            or preds[i][15] > preds[i][7]
         ):
             continue
         new_preds.append(preds[i].unsqueeze(0))
@@ -796,6 +845,7 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
         return torch.concat(new_preds, dim=0)
     else:
         return None
+
 
 @torch.no_grad
 def CollectPredsTargetsForEvaluation(
@@ -820,6 +870,8 @@ def CollectPredsTargetsForEvaluation(
     for ii in range(num_gt):
         mask_for_this_gt = selected_target_gt_idx == ii
         selected_score_for_this_gt = selected_scores[mask_for_this_gt]
+        if mask_for_this_gt.sum() == 0:
+            continue
         index_highest_score = torch.argmax(selected_score_for_this_gt)
         preds_bboxes.append(selected_boxes[mask_for_this_gt][index_highest_score].unsqueeze(0))
         preds_scores.append(selected_score_for_this_gt[index_highest_score].view(1))
@@ -911,5 +963,4 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
         cv2.imwrite(os.path.join(path_concentrate_left_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), left_concentrated)
         cv2.imwrite(os.path.join(path_concentrate_right_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), right_concentrated)
-
     return
