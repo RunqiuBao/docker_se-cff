@@ -14,11 +14,14 @@ from .warp import disp_warp
 #     numpy.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
 #     / 10.0
 # )
+# OKS_SIGMA = (
+    # numpy.array([0.26, 0.25])
+    # / 10.0
+# )
 OKS_SIGMA = (
-    numpy.array([0.26, 0.25])
+    numpy.array([0.26, 0.25, 0.25, 0.35])
     / 10.0
 )
-
 
 class DisparityLoss(nn.Module):
 
@@ -389,12 +392,12 @@ def calculate_keypoints_loss(
 class v8PoseLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""
 
-    def __init__(self, model):  # model must be de-paralleled
+    def __init__(self, model, keyptsShape):  # model must be de-paralleled
         """Initializes v8PoseLoss with model, sets keypoint variables and declares a keypoint loss instance."""
         super().__init__(model)
         self.kpt_shape = model.model[-1].kpt_shape
         self.bce_pose = nn.BCEWithLogitsLoss()
-        is_pose = self.kpt_shape == [2, 3]
+        is_pose = self.kpt_shape == keyptsShape
         nkpt = self.kpt_shape[0]  # number of keypoints
         sigmas = torch.from_numpy(OKS_SIGMA).to(self.device) if is_pose else torch.ones(nkpt, device=self.device) / nkpt
         self.keypoint_loss = KeypointLoss(sigmas=sigmas)
@@ -479,9 +482,9 @@ class v8PoseLoss(v8DetectionLoss):
         
         selected_bboxes = (pred_bboxes.detach().clone() * stride_tensor)[fg_mask]
         pred_kpts_clone = pred_kpts.detach().clone()[..., :2]
-        stride_tensor_expand = (stride_tensor.unsqueeze(0).unsqueeze(-1)).expand(batch_size, -1, 2, 2)
+        stride_tensor_expand = (stride_tensor.unsqueeze(0).unsqueeze(-1)).expand(batch_size, -1, self.kpt_shape[0], 2)
         selected_keypts = (pred_kpts_clone * stride_tensor_expand)[fg_mask]
-        selected_confidences, selected_cls= torch.max(pred_scores[fg_mask].detach().clone(), dim=1)
+        selected_confidences, selected_cls = torch.max(pred_scores[fg_mask].detach().clone(), dim=1)
         device = pred_bboxes.device
         num_instances = pred_bboxes.shape[1]
         selected_batchidx = torch.arange(batch_size, dtype=torch.int, device=device).unsqueeze(1).expand(batch_size, num_instances)[fg_mask]

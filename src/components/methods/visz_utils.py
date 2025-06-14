@@ -210,15 +210,15 @@ def DrawResultBboxesAndKeyptsOnEventFrame(
     boxes,
     classes,
     confidences,
-    keypts1=None,
-    keypts2=None,
+    keypts=None,
     facets=None,
     enlarge_facet_factor=None,
     indexBatch=None,
 ):
-    if keypts1 is not None and keypts1.ndim == 1:
-        keypts1 = keypts1.unsqueeze(0)
-        keypts2 = keypts2.unsqueeze(0)
+    if keypts is not None:
+        numKeypts = keypts.shape[1]
+        colors = numpy.random.randint(0, 256, size=(numKeypts, 3), dtype="uint8")
+        colors = [tuple(color.tolist()) for color in colors]
     if isinstance(facets, torch.Tensor):
         facets = facets.numpy()
     
@@ -239,16 +239,11 @@ def DrawResultBboxesAndKeyptsOnEventFrame(
         textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
-        if keypts1 is not None:
-            keypt1, keypt2 = keypts1[ii], keypts2[ii]
-            if keypt1[0] < 1.0:
-                keypt1_int = (int(keypt1[0] * w + top_left[0]), int(keypt1[1] * h + top_left[1]))
-                keypt2_int = (int(keypt2[0] * w + top_left[0]), int(keypt2[1] * h + top_left[1]))
-            else:
-                keypt1_int = keypt1.astype("int")
-                keypt2_int = keypt2.astype("int")
-            cv2.circle(left_event_sharp, keypt1_int, radius=5, color=(0, 255, 0), thickness=-1)
-            cv2.circle(left_event_sharp, keypt2_int, radius=5, color=(0, 0, 255), thickness=-1)
+        if keypts is not None:
+            keyptsOneObj = keypts[ii]
+            for iKeypt in range(numKeypts):
+                keyptsOneObjOnePt_int = keyptsOneObj[iKeypt].astype("int")
+                cv2.circle(left_event_sharp, keyptsOneObjOnePt_int, radius=5, color=colors[iKeypt], thickness=-1)
         if facets is not None:
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
             # instances_facets = draw_featmap_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor)
@@ -279,9 +274,8 @@ def RenderImageWithBboxesAndKeypts(
     """
     boxes, classes, confidences = obj_preds['bboxes'], obj_preds['classes'], obj_preds['confidences']
     keyptsAndFeats = {}
-    if 'keypts1' in obj_preds:
-        keyptsAndFeats['keypts1'] = obj_preds['keypts1']
-        keyptsAndFeats['keypts2'] = obj_preds['keypts2']
+    if 'keypts' in obj_preds:
+        keyptsAndFeats['keypts'] = obj_preds['keypts']
     if 'facets' in obj_preds:
         keyptsAndFeats["facets"] = obj_preds["facets"]
     if 'facets_right' in obj_preds:

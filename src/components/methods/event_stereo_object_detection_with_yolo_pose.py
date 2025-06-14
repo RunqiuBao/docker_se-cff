@@ -267,8 +267,7 @@ def train(
                         "bboxes": left_selected_boxes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                        "keypts1": left_selected_keypts[left_selected_batchidx == 0][:, 0, :].detach().cpu().numpy(),
-                        "keypts2": left_selected_keypts[left_selected_batchidx == 0][:, 1, :].detach().cpu().numpy()
+                        "keypts": left_selected_keypts[left_selected_batchidx == 0][:, :, :].detach().cpu().numpy(),
                     }
                 )
                 tensorBoardLogger.add_image("(train) left sharp with bboxes", leftimage_visz)
@@ -278,8 +277,7 @@ def train(
                         "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy(),
                         "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
                         "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
-                        "keypts1": batch_data["gt_labels"]["objdet"][0]["keypts"][:, 0, :2].detach().cpu().numpy(),
-                        "keypts2": batch_data["gt_labels"]["objdet"][0]["keypts"][:, 1, :2].detach().cpu().numpy()
+                        "keypts": batch_data["gt_labels"]["objdet"][0]["keypts"][:, :, :2].detach().cpu().numpy(),
                     }
                 )
                 tensorBoardLogger.add_image("(train) left sharp with GT bboxes", leftimage_gt_visz)
@@ -340,8 +338,7 @@ def train(
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
                                     "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                                     "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "keypts1": artifacts[-1][0][:, 0, :2].detach().cpu().numpy(),
-                                    "keypts2": artifacts[-1][0][:, 1, :2].detach().cpu().numpy()
+                                    "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
                             tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
@@ -505,8 +502,7 @@ def valid(
                         "bboxes": left_selected_boxes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                        "keypts1": left_selected_keypts[left_selected_batchidx == 0][:, 0, :].detach().cpu().numpy(),
-                        "keypts2": left_selected_keypts[left_selected_batchidx == 0][:, 1, :].detach().cpu().numpy()
+                        "keypts": left_selected_keypts[left_selected_batchidx == 0][:, :, :].detach().cpu().numpy(),
                     }
                 )
                 tensorBoardLogger.add_image("(valid) left sharp with bboxes", leftimage_visz)
@@ -567,8 +563,7 @@ def valid(
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
                                     "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
                                     "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "keypts1": artifacts[-1][0][:, 0, :2].detach().cpu().numpy(),
-                                    "keypts2": artifacts[-1][0][:, 1, :2].detach().cpu().numpy()
+                                    "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
                             tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)

@@ -267,7 +267,7 @@ class YoloPose(nn.Module):
             [128, 128, 3, 2],
             [1],
             [384, 128, 1, True],
-            [1, [2, 3], [128, 128, 128]]
+            [self._config["num_classes"], [self._config["max_num_keypoints"], 3], [128, 128, 128]]
         ]
         froms = [
             -1,
@@ -327,7 +327,7 @@ class YoloPose(nn.Module):
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""        
-        self._criterion = v8PoseLoss(self)
+        self._criterion = v8PoseLoss(self, keyptsShape=[self._config["max_num_keypoints"], 3])
         return
     
     @property
@@ -442,6 +442,3 @@ class YoloPose(nn.Module):
         labels: Dict
     ):
         return self._criterion(preds, labels)
-
-
-
