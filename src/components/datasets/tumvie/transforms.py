@@ -163,6 +163,26 @@ class RandomHorizontalFlip:
         return sample
 
 
+class RandomCrop:
+    def __init__(self, event_module, objdet_module, crop_height, crop_width, no_value):
+        self.crop_height = crop_height
+        self.crop_width = crop_width
+        self.event_transform = event_module.transforms.Crop(crop_height, crop_width, no_value)
+        self.objdet_transform = objdet_module.transforms.Crop()
+        # self.disparity_transform = disparity_module.transforms.Crop(crop_height, crop_width, no_value)
+
+    def __call__(self, sample):
+        ori_height, ori_width = sample["event"]["left"].shape[-2:]
+
+        offset_x = np.random.randint(ori_width - self.crop_width + 1) if (ori_width - self.crop_width) >= 0 else np.random.randint(ori_width - self.crop_width, 0)
+        offset_y = np.random.randint(ori_height - self.crop_height + 1) if (ori_height - self.crop_height) >= 0 else np.random.randint(ori_height - self.crop_height, 0)
+        sample["event"] = self.event_transform(sample["event"], offset_x, offset_y)
+        sample["objdet"] = self.objdet_transform(sample["objdet"], offset_x, offset_y)
+        # sample["disparity"] = self.disparity_transform(sample["disparity"], offset_x, offset_y)  # Note: disparity is based on objdet after randomcrop
+
+        return sample
+
+
 class ConvertBboxes:
     def __init__(
         self,

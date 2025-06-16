@@ -29,10 +29,12 @@ class EventDataset(torch.utils.data.Dataset):
         num_of_future_event=0,
         use_preprocessed_image=False,
         sequence_name="0",
-        sequence_length=0,
+        timestamps=None,
         lmdb_txn=None,
+        num_repeat=1,
         **kwargs,
     ):
+        self._num_repeat = num_repeat
         self.root = root
         self.num_of_event = num_of_event
         self.stack_method = stack_method
@@ -42,7 +44,8 @@ class EventDataset(torch.utils.data.Dataset):
         self.event_h = constant.EVENT_HEIGHT
         self.event_w = constant.EVENT_WIDTH
         self.event_channels = constant.EVENT_CHANNELS
-        self.sequence_length = sequence_length
+        self.sequence_length = len(timestamps)
+        self._timestamps = timestamps
         self.NO_VALUE = constant.STACK_NO_VALUE
 
         # moving events into lmdb
@@ -67,10 +70,11 @@ class EventDataset(torch.utils.data.Dataset):
             )
 
     def __len__(self):
-        return self.sequence_length
+        return self.sequence_length * self._num_repeat  # Note: data augmentation by repeat and random crop
 
-    def __getitem__(self, x):
-        idx, timestamp = x
+    def __getitem__(self, idx):
+        idx = idx % self.sequence_length
+        timestamp = self._timestamps[idx]
         if self.lmdb_txn is not None:
             code = "%03d_%06d_l" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()

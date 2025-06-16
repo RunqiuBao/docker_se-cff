@@ -41,16 +41,41 @@ class Padding:
 
 
 class Crop:
-    def __init__(self, crop_height, crop_width):
+    def __init__(self, crop_height, crop_width, no_value):
         self.crop_height = crop_height
         self.crop_width = crop_width
+        self.no_value = no_value
 
     def __call__(self, sample, offset_x, offset_y):
         start_y, end_y = offset_y, offset_y + self.crop_height
         start_x, end_x = offset_x, offset_x + self.crop_width
-
+        h_orig, w_orig = sample["left"].shape[-2:]
         for location in ["left", "right"]:
-            sample[location] = sample[location][start_y:end_y, start_x:end_x]
+            try:
+                if start_y < 0:
+                    sample[location] = np.pad(
+                        sample[location],
+                        ((0, 0), (-start_y, offset_y + self.crop_height - h_orig), (0, 0)),
+                        mode="constant",
+                        constant_values=self.no_value,
+                    )
+                    if start_x >= 0:
+                        sample[location] = sample[location][:, start_x:end_x]
+            except:
+                print("start_y: {}, offset_y: {}, self.crop_height: {}, h_orig: {}".format(start_y, offset_y, self.crop_height, h_orig))
+                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            if start_x < 0:
+                sample[location] = np.pad(
+                    sample[location],
+                    ((0, 0), (0, 0), (-start_x, offset_x + self.crop_width - w_orig)),
+                    mode="constant",
+                    constant_values=self.no_value,
+                )
+                if start_y >= 0:
+                    sample[location] = sample[location][start_y:end_y, :]
+            if start_x >= 0 and start_y >=0:
+                sample[location] = sample[location][start_y:end_y, start_x:end_x]
+        # print("sample shape: {}".format(sample.shape))
 
         return sample
 

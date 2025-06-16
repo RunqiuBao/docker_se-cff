@@ -47,18 +47,21 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
     _isLoadCOCOFormat = None
     _imageSize = None
 
-    def __init__(self, root: str, imageHeight: int, imageWidth: int, isLoadCOCOFormat: bool=False):
+    def __init__(self, root: str, imageHeight: int, imageWidth: int, isLoadCOCOFormat: bool=False, num_repeat: int=1):
+        self._num_repeat = num_repeat  # for data augmentation. Repeating the data sequence and do randomcrop.
         self.NO_VALUE = 0
         self.path_to_labels = os.path.join(root, "annotations.json")
         # Note: need customized torchvision.coco support.
         self._cocoDataset = CocoSegmentation(root=root, annFile=self.path_to_labels, imageHeight=imageHeight, imageWidth=imageWidth * 2)
         self._isLoadCOCOFormat = isLoadCOCOFormat
         self._imageSize = numpy.array([imageWidth, imageHeight])
+        self._num_data_files = len(self._cocoDataset)
 
     def __len__(self):
-        return len(self._cocoDataset)
+        return len(self._cocoDataset) * self._num_repeat  # Note: data augmentation by random crop and repeat
 
     def __getitem__(self, indexFrame):
+        indexFrame = indexFrame % self._num_data_files
         try:
             labels_data = self._cocoDataset[indexFrame][1]
             # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))

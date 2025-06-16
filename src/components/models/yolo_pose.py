@@ -376,7 +376,7 @@ class YoloPose(nn.Module):
         for indexModule, m in enumerate(self._model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-                
+
             x = m(x)  # run
             if isRightFeatures:
                 if indexModule in indicesToRetrieveFeatures:

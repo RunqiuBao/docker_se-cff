@@ -326,3 +326,22 @@ class ConvertBboxes:
         if normalize:
             bboxes = bboxes / torch.tensor(spatial_size[::-1]).tile(2)[None]
         return bboxes.float()
+
+
+class Crop:
+    def __init__(self):
+        pass
+
+    def __call__(self, sample, offset_x, offset_y):
+        start_y = offset_y
+        start_x = offset_x
+
+        sample["bboxes"][:, 0] -= start_x
+        sample["bboxes"][:, 1] -= start_y
+        sample["bboxes"][:, 2] -= start_x
+        sample["bboxes"][:, 3] -= start_y
+
+        sample["keypts"][..., 0] -= start_x
+        sample["keypts"][..., 1] -= start_y
+
+        return sample

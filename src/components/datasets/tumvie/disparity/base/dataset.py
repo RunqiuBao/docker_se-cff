@@ -12,12 +12,14 @@ class DisparityDataset(torch.utils.data.Dataset):
     img_metadata = None  # {'h', 'w'}
     disparity_cache = None  # cache disparity in memory
 
-    def __init__(self, img_metadata):
+    def __init__(self, img_metadata, event_data_sequence_length, num_repeat=1):
         self.img_metadata = img_metadata
         self.disparity_cache = dict()
+        self._data_sequence_length = event_data_sequence_length
+        self._num_repeat = num_repeat
 
     def __len__(self):
-        return 0  # Note: length depends on the length of the event dataset.
+        return self._data_sequence_length  # Note: length depends on the length of the event dataset.
 
     def __getitem__(self, x):
         """
@@ -28,6 +30,7 @@ class DisparityDataset(torch.utils.data.Dataset):
             disparity: h*w image
         """
         idx, objdet_data = x
+        idx = idx % int(self._data_sequence_length / self._num_repeat)
         if objdet_data is None:
             return
         if idx in self.disparity_cache.keys():

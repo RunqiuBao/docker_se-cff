@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 500
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -9,6 +9,8 @@ DATASET:
       crop_height: 768
       crop_width: 1344
       randomhorizontalflip: False
+      randomcrop: True
+      num_repeat: 5
       isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
@@ -25,6 +27,8 @@ DATASET:
       crop_height: 768
       crop_width: 1344
       randomhorizontalflip: False
+      randomcrop: False
+      num_repeat: 1
       isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
@@ -41,6 +45,8 @@ DATASET:
       crop_height: 768
       crop_width: 1344
       randomhorizontalflip: False
+      randomcrop: False
+      num_repeat: 1
       isLoadCOCOFormat: True
       event_cfg:
         NAME: sbn
@@ -53,13 +59,13 @@ DATALOADER:
   TRAIN:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   VALID:
     NAME: get_multi_epochs_dataloader
     PARAMS:
-      batch_size: 1
+      batch_size: 4
       shuffle: False
       drop_last: True
   TEST:
@@ -99,7 +105,7 @@ MODEL:
   objdet_head_cfg:
     DICTKEY: objdet_head
     CLASSNAME: YoloPose
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       min_bbox_size: 5
       # detection
@@ -125,7 +131,7 @@ MODEL:
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # detection
       num_classes: 5

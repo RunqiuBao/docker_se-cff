@@ -56,7 +56,6 @@ class RandomCrop:
                 offset_x,
                 offset_y
             )
-
         if "event" in sample.keys():
             sample["event"] = self.event_transform(
                 sample["event"],
