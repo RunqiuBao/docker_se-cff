@@ -110,7 +110,7 @@ def _backward_and_optimize(
     return
 
 
-def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: bool):
+def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: bool, max_num_keypoints: int=1):
     """
     Prepare the batch_labels as the YoloPose required.
     """
@@ -131,7 +131,7 @@ def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: 
     keypts_tensor = torch.cat(keypts_tensor, dim=0)
     if is_stereo_bbox:
         keypoints_right = keypts_tensor.clone()
-        keypoints_right[:, :, 0] = keypts_tensor[:, :, 0] - disparity.unsqueeze(-1).expand(-1, 2)
+        keypoints_right[:, :, 0] = keypts_tensor[:, :, 0] - disparity.unsqueeze(-1).expand(-1, max_num_keypoints)
         # Note: do not normalize for keypoints_right
     keypts_tensor[:, :, 0] /= batch_img_metas["w"]
     keypts_tensor[:, :, 1] /= batch_img_metas["h"]
@@ -218,6 +218,7 @@ def train(
 
         # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
         if tensorBoardLogger is not None:
+            logger.debug("data timestamp: {}, {}".format(batch_data["event"]["timestamp"][0], batch_data["objdet"][0]["timestamp"]))
             disp_map = pred_disparity_pyramid[-1].detach().cpu()
             disp_map *= 255 / disp_map.max()
             tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
@@ -225,11 +226,28 @@ def train(
             viz_left_sharp -= viz_left_sharp.min()
             viz_left_sharp /= viz_left_sharp.max()
             viz_left_sharp *= 255
+            viz_left_sharp = RenderImageWithBboxes(
+                viz_left_sharp.squeeze().cpu().numpy(),
+                {
+                    "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu(),
+                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu(),
+                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).detach().cpu()
+                }
+            )[0]
             tensorBoardLogger.add_image("left_sharp", viz_left_sharp.to(torch.uint8).squeeze())
             viz_right_sharp = right_event_sharp[0].detach().squeeze().cpu()
             viz_right_sharp -= viz_right_sharp.min()
             viz_right_sharp /= viz_right_sharp.max()
             viz_right_sharp *= 255
+            gt_bboxes_right =  batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu()[:, [4, 1, 5, 3]]
+            viz_right_sharp = RenderImageWithBboxes(
+                viz_right_sharp.squeeze().cpu().numpy(),
+                {
+                    "bboxes": gt_bboxes_right,
+                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu(),
+                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).detach().cpu()
+                }
+            )[0]
             tensorBoardLogger.add_image("right_sharp", viz_right_sharp.to(torch.uint8).squeeze())
 
         if models["disp_head"].module.is_freeze:
@@ -289,7 +307,7 @@ def train(
                     conf_thres=0.1,
                     iou_thres=0.7,
                     labels=[],
-                    nc=1,
+                    nc=models["objdet_head"].module.config["num_classes"],
                     multi_label=True,
                     agnostic=False,
                     max_det=models["objdet_head"].module.config["num_topk_candidates"],
@@ -299,7 +317,12 @@ def train(
 
                 if num_pos > 0:
                     # ---------- stereo detection head ----------
-                    stereo_objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, True)
+                    stereo_objdet_targets = preprocess_batch(
+                        batch_data["gt_labels"]["objdet"],
+                        batch_img_metas,
+                        True,
+                        models["stereo_detection_head"].module.config["max_num_keypoints"]
+                    )
                     left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
                     stereo_preds, lossDictAll, artifacts = _forward_one_batch(
                         models["stereo_detection_head"],
@@ -336,8 +359,8 @@ def train(
                                 right_event_sharp[0].detach().squeeze().cpu().numpy(),
                                 {
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
-                                    "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
+                                    "classes": -1 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
+                                    "confidences": 1.0 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
                                     "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
@@ -452,7 +475,6 @@ def valid(
             disp_map *= 255 / disp_map.max()
             tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
 
-
         if models["disp_head"].is_freeze:
             objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, False)
             # ---------- objdet net ----------
@@ -511,10 +533,10 @@ def valid(
                 left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
                 left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
                     left_detections_multilevels_detachcopy,
-                    conf_thres=0.001,
+                    conf_thres=0.1,
                     iou_thres=0.7,
                     labels=[],
-                    nc=1,
+                    nc=models["objdet_head"].config["num_classes"],
                     multi_label=True,
                     agnostic=False,
                     max_det=models["objdet_head"].config["num_topk_candidates"],
@@ -561,8 +583,8 @@ def valid(
                                 right_event_sharp[0].detach().squeeze().cpu().numpy(),
                                 {
                                     "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
-                                    "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
-                                    "confidences": left_selected_confidences[left_selected_batchidx == 0].detach().cpu().numpy(),
+                                    "classes": -1 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
+                                    "confidences": 1.0 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
                                     "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
@@ -701,7 +723,7 @@ def test(
             conf_thres=models["objdet_head"].module.config["confidence_threshold_inference"],
             iou_thres=models["objdet_head"].module.config["nms_iou_threshold_inference"],
             labels=[],
-            nc=1,
+            nc=models["objdet_head"].module.config["num_classes"],
             multi_label=True,
             agnostic=False,
             max_det=models["objdet_head"].module.config["num_topk_candidates"],
@@ -748,24 +770,22 @@ def test(
             break
 
         if batch_refined_right_bboxes_selected is not None:
-            # (l_tl_x, l_tl_y, r_br_x, r_br_y,
+            # (l_tl_x, l_tl_y, l_br_x, l_br_y,
             #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
-            #                                                                  l_kpt0_x, l_kpt0_y, l_kpt1_x, l_kpt1_y,
-            #                                                                                                          r_kpt0_x, r_kpt0_y, r_kpt1_x, r_kpt1_y, class_label, confidence)
+            #                                                                 class_label, confidence,
+            #                                                                                        l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
             preds = FilterBadDetections(
                 torch.concat([
                     left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
                     batch_refined_right_bboxes_selected[0],
-                    left_bboxesClsKeypts_nmsed_topked[0][:, 5:7],
-                    left_bboxesClsKeypts_nmsed_topked[0][:, 8:10],
-                    batch_refined_right_keypts_selected[0][:, 0:2],
-                    batch_refined_right_keypts_selected[0][:, 3:5],
-                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1),
-                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)].unsqueeze(-1), dim=-1)[0],
+                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1),
+                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1),
+                    left_bboxesClsKeypts_nmsed_topked[0][:, 9:],
+                    batch_refined_right_keypts_selected[0][:, :],
                 ], dim=1),
                 imageHeight=batch_data["image_metadata"]["h_cam"],
                 imageWidth=batch_data["image_metadata"]["w_cam"],
-                margin=20
+                margin=0
             )
             if preds is not None:
                 prediction_dict = {
@@ -796,6 +816,7 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
     """
     new_preds = []
     num_objects = preds.shape[0]
+    max_num_keypoints = (preds.shape[1] - 10) // 3 // 2
     for i in range(num_objects):
         if (
             preds[i][0] < margin
@@ -816,24 +837,23 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
             or preds[i][7] > (imageWidth - margin)
         ):
             continue
-        if (
-            preds[i][8] < preds[i][0]
-            or preds[i][8] > preds[i][2]
-            or preds[i][10] < preds[i][0]
-            or preds[i][10] > preds[i][2]
-            or preds[i][9] < preds[i][1]
-            or preds[i][9] > preds[i][3]
-            or preds[i][11] < preds[i][1]
-            or preds[i][11] > preds[i][3]
-            or preds[i][12] < preds[i][4]
-            or preds[i][12] > preds[i][6]
-            or preds[i][14] < preds[i][4]
-            or preds[i][14] > preds[i][6]
-            or preds[i][13] < preds[i][5]
-            or preds[i][13] > preds[i][7]
-            or preds[i][15] < preds[i][5]
-            or preds[i][15] > preds[i][7]
-        ):
+        isKeyptsOutsideBbox = False
+        for indexKeypt in range(max_num_keypoints):
+            if preds[i][10 + indexKeypt * 3 + 2] > 0:
+                # keypoint is visible
+                if (
+                    preds[i][10 + indexKeypt * 3] < preds[i][0]
+                    or preds[i][10 + indexKeypt * 3] > preds[i][2]
+                    or preds[i][10 + indexKeypt * 3 + 1] < preds[i][1]
+                    or preds[i][10 + indexKeypt * 3 + 1] > preds[i][3]
+                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3] < preds[i][4]
+                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3] > preds[i][6]
+                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3 + 1] < preds[i][5]
+                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3 + 1] > preds[i][7]
+                ):
+                    isKeyptsOutsideBbox = True
+                    break
+        if isKeyptsOutsideBbox:
             continue
         new_preds.append(preds[i].unsqueeze(0))
     if len(new_preds) > 0:
@@ -890,7 +910,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     for EventStereoObjectDetectionNetwork.
     Args:
         pred:
-            objdet: List[Tensor]. Each tensor is a (NumInstance, 18) shape.
+            objdet: List[Tensor]. Each tensor is a (NumInstance, 10 + 3*numKeypts*2) shape.
             concentrate: Dict[Tensor]. "left" and "right", each is a (B, 1, H, W) shape tensor.
         indexBatch: index of the batch in dataset.
         timestamp: timestamp of the batch.
@@ -923,6 +943,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
     facets_info_batch = []
     for indexInBatch, detection in enumerate(pred['objdet']):
+        max_num_keypoints = (detection.shape[1] - 10) // 3 // 2
         left_bboxes = detection[:, 0:4].cpu().numpy()
         tl_x = numpy.clip(left_bboxes[:, 0], 0, imgWidth)
         tl_y = numpy.clip(left_bboxes[:, 1], 0, imgHeight)
@@ -934,11 +955,11 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         br_x_r = numpy.clip(right_bboxes[:, 2], 0, imgWidth)
         right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
         sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
-        classes = detection[:, -2].cpu().numpy().astype('int')
-        confidences = detection[:, -1].cpu().numpy()
-        if detection.shape[-1] > 11:
-            keypts_left = detection[:, 8:12].cpu().numpy()
-            keypts_right = detection[:, 12:16].cpu().numpy()
+        classes = detection[:, 8].cpu().numpy().astype('int')
+        confidences = detection[:, 9].cpu().numpy()
+        if detection.shape[-1] > 10:
+            keypts_left = detection[:, 10:(10+max_num_keypoints*3)].cpu().numpy()
+            keypts_right = detection[:, (10+max_num_keypoints*3):].cpu().numpy()
             visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
                 pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
                 pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],

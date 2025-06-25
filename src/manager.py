@@ -34,8 +34,6 @@ class DLManager:
         if self.cfg is not None:
             self._init_from_cfg(cfg)
 
-        self.current_epoch = 0
-
     def _init_from_cfg(self, cfg):
         assert cfg is not None
         self.cfg = cfg
@@ -98,8 +96,7 @@ class DLManager:
                 for key, scheduler in self.scheduler.items():
                     self.scheduler[key].load_state_dict(checkpoint["scheduler"][key])
                 self.args.start_epoch = checkpoint["epoch"] + 1
-                self.current_epoch = self.args.start_epoch
-                logger.info("resumed old training states.")  
+                logger.info("resumed old training states at epoch {}".format(self.args.start_epoch - 1))
 
         self.get_train_loader = getattr(
             datasets, self.cfg.DATASET.TRAIN.NAME
@@ -189,8 +186,6 @@ class DLManager:
             if valid_log_dict["Loss"].avg < smallestValidEPE:
                 smallestValidEPE = valid_log_dict["Loss"].avg
 
-            self.current_epoch += 1
-
     def test(self):
         test_loader = self.get_test_loader(
             args=self.args,
@@ -210,9 +205,9 @@ class DLManager:
                 is_save_onnx=self.args.is_save_onnx
             )
 
-    def save(self, name):
-        checkpoint = self._make_checkpoint()
-        self.logger.save_checkpoint(checkpoint, name)
+    # def save(self, name):
+    #     checkpoint = self._make_checkpoint()
+    #     self.logger.save_checkpoint(checkpoint, name)
 
     def load(self, name):
         checkpoint = self.logger.load_checkpoint(name)
@@ -220,12 +215,12 @@ class DLManager:
 
         self.model.module.load_state_dict(checkpoint["model"])
 
-    def _make_checkpoint(self):
+    def _make_checkpoint(self, epoch):
         models_checkpoint = {key: model.module.state_dict() for key, model in self.models.items()}
         optimizers_checkpoint = {key: optimizer.state_dict() for key, optimizer in self.optimizer.items()}
         schedulers_checkpoint = {key: scheduler.state_dict() for key, scheduler in self.scheduler.items()}
         checkpoint = {
-            "epoch": self.current_epoch,
+            "epoch": epoch,
             "args": self.args,
             "cfg": self.cfg,
             "models": models_checkpoint,
@@ -285,7 +280,7 @@ class DLManager:
 
         if isSaveFinal:
             # Make Checkpoint
-            checkpoint = self._make_checkpoint()
+            checkpoint = self._make_checkpoint(epoch)
 
             # Save Checkpoint
             self.logger.save_checkpoint(checkpoint, "final.pth")

@@ -263,6 +263,8 @@ def batch_to_cuda(batch_data, dtype=torch.float32):
                 batch_data[ii] = _batch_to_cuda(oneElement, dtype)
         elif batch_data is None:
             batch_data = batch_data
+        elif isinstance(batch_data, float) or isinstance(batch_data, int) or isinstance(batch_data, str):
+            pass
         else:
             raise NotImplementedError
 

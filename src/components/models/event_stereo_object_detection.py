@@ -86,6 +86,8 @@ class StereoDetectionHead(nn.Module):
         self._init_layers()
         self._init_weights()
 
+        self.logger = kwargs.get("logger", None)
+
     @property
     def is_freeze(self):
         return self._config["is_freeze"]
@@ -115,7 +117,7 @@ class StereoDetectionHead(nn.Module):
         self.right_keypts_predictor = self._build_bbox_refiner_convs(
             self._config['in_channels'],
             self._config['feat_channels'],
-            output_logits=6,
+            output_logits=self._config["max_num_keypoints"] * 3,
             norm_eps=self._config["norm_cfg"]["eps"],
             norm_momentum=self._config["norm_cfg"]["momentum"],
             act_type=self._config["act_cfg"]["type"]
@@ -228,20 +230,22 @@ class StereoDetectionHead(nn.Module):
     
     def _right_keypts_decode(self, sbboxes_pred: Tensor, right_keypts_pred: Tensor) -> Tensor:
         """
-        Decode right keypts prediction [B, 100, 6, ker_h, ker_w] whose '6' dimension is (delta_keypt0_x, delta_keypt0_y, visibility, delta_keypt1_x, delta_keypt1_y, visibility) to same shape whose '6'
+        Decode right keypts prediction [B, 100, 3*num_keypts, ker_h, ker_w] whose '6' dimension is (delta_keypt0_x, delta_keypt0_y, visibility, delta_keypt1_x, delta_keypt1_y, visibility) to same shape whose '6'
         dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
         Args:
             sbboxes_pred: [B, 100, 6]
-            right_keypts_pred: [B, 100, 6, ker_h, ker_w]
+            right_keypts_pred: [B, 100, 3*num_keypts, ker_h, ker_w]
 
         Return:
-            decoded_right_keypts: [B, 100, ker_h, ker_w, 6] whose '6' dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
+            decoded_right_keypts: [B, 100, ker_h, ker_w, 3*num_keypts] whose '3*num_keypts' dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility, ...).
         """
+        max_num_keypoints = self._config["max_num_keypoints"]
+
         # ----------------- this part is same as _right_bbox_decode. TODO: reuse this part more -----------------
         batch_size, num_samples = sbboxes_pred.shape[:2]
         ker_h, ker_w = right_keypts_pred.shape[-2:]
         sbboxes_pred = sbboxes_pred.view(-1, 6)
-        right_keypts_pred = right_keypts_pred.view(-1, 6, ker_h, ker_w)
+        right_keypts_pred = right_keypts_pred.view(-1, 3*max_num_keypoints, ker_h, ker_w)
 
         strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
         strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
@@ -258,11 +262,13 @@ class StereoDetectionHead(nn.Module):
         grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
         # ----------------- this part is same as _right_bbox_decode -----------------
 
-        keypt0_xys = right_keypts_pred[:, 0:2, :, :] * strides + grids
-        keypt1_xys = right_keypts_pred[:, 3:5, :, :] * strides + grids
-
-        decoded_right_keypts = torch.cat([keypt0_xys, right_keypts_pred[:, 2, :, :].unsqueeze(1), keypt1_xys, right_keypts_pred[:, 5, :, :].unsqueeze(1)], dim=1).permute(0, 2, 3, 1)
-        return decoded_right_keypts.view(batch_size, num_samples, ker_h * ker_w, 6)
+        keypts_list = []
+        for iKeypt in range(max_num_keypoints):
+            keypt_xys = right_keypts_pred[:, (3*iKeypt):(2+3*iKeypt), :, :] * strides + grids
+            keypts_list.append(keypt_xys)
+            keypts_list.append(right_keypts_pred[:, 2+3*iKeypt, :, :].unsqueeze(1))  # visibility
+        decoded_right_keypts = torch.cat(keypts_list, dim=1).permute(0, 2, 3, 1)
+        return decoded_right_keypts.view(batch_size, num_samples, ker_h * ker_w, 3 * max_num_keypoints)
 
     def predict(
         self,
@@ -328,11 +334,11 @@ class StereoDetectionHead(nn.Module):
             # print("----- time sub sub2: {}".format(time.time() - starttime))
 
             # starttime = time.time()
-            # if self.logger is not None:
-            #     roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
-            #     roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
-            #     roi_feat_sample /= roi_feat_sample.max()
-            #     self.logger.add_image("roi_feat_sample", roi_feat_sample)
+            if self.logger is not None:
+                roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
+                roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
+                roi_feat_sample /= roi_feat_sample.max()
+                self.logger.add_image("roi_feat_sample", roi_feat_sample)
             # print("----- time sub sub2.5: {}".format(time.time() - starttime))
 
             starttime = time.time()
@@ -492,16 +498,16 @@ class StereoDetectionHead(nn.Module):
             )
             num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
             num_total_samples_timesk = max(num_pos_timesk, 1.0)
-            kpt_mask = keypts_targets_selected.view(-1, 2, 3)[..., 2] != 0
+            kpt_mask = keypts_targets_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2] != 0
             rbboxes_roi = bboxes[:, [4, 1, 5, 3]].unsqueeze(1).repeat(1, self._config["candidates_k"], 1)[pos_masks_one].view(-1, 4)
             area = xyxy2xywh(rbboxes_roi)[:, 2:].prod(1, keepdim=True)
             loss_rkeypts = self.loss_keypoint(
-                keypts_preds_selected.view(-1, 2, 3),
-                keypts_targets_selected.view(-1, 2, 3),
+                keypts_preds_selected.view(-1, self._config["max_num_keypoints"], 3),
+                keypts_targets_selected.view(-1, self._config["max_num_keypoints"], 3),
                 kpt_mask,
                 area
             ) / num_total_samples_timesk
-            loss_rkeypts_obj = self.loss_bce_pose(keypts_preds_selected.view(-1, 2, 3)[..., 2], kpt_mask.float()) / num_total_samples_timesk
+            loss_rkeypts_obj = self.loss_bce_pose(keypts_preds_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2], kpt_mask.float()) / num_total_samples_timesk
             # right keypts scores
             rkeypts_scores = list_right_scores_keypts[indexInBatch].view(-1, num_grids, 1)[pos_masks_one][rkeypts_select_mask].sigmoid()
             rkeypts_scores_targets = torch.ones_like(rkeypts_scores)
@@ -524,7 +530,7 @@ class StereoDetectionHead(nn.Module):
                     35.0,  # distance_threshold
                     1
                 )[1]
-                list_right_selected_keypts.append(right_keypts_selected_best.squeeze(1).view(-1, 2, 3))
+                list_right_selected_keypts.append(right_keypts_selected_best.squeeze(1).view(-1, self._config["max_num_keypoints"], 3))
 
         loss_dict["loss_rbbox"] /= num_batch
         loss_dict["loss_rscore"] /= num_batch
@@ -667,8 +673,8 @@ class StereoDetectionHead(nn.Module):
         """
         compute euclidian distances between each pair of keypoints and the only ref pair of keypoints.
         Args:
-            keypts_preds: [B. num_grids, 6]. keypts format(keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility,)
-            keypts_ref: [B, 1, 6].
+            keypts_preds: [B. num_grids, 3*num_keypts]. keypts format(keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility, ...)
+            keypts_ref: [B, 1, 3*num_keypts].
 
         Returns:
             distances: [B, num_grids]
@@ -677,7 +683,13 @@ class StereoDetectionHead(nn.Module):
         assert keypts_ref.shape[1] == 1, "keypts_ref should have only one at each instance."
         num_grids = keypts_preds.shape[1]
         keypts_ref = keypts_ref.expand(-1, num_grids, -1)
-        distances = torch.norm(keypts_ref[..., [0, 1]] - keypts_preds[..., [0, 1]], dim=-1) + torch.norm(keypts_ref[..., [3, 4]] - keypts_preds[..., [3, 4]], dim=-1)
+        num_keypts = self._config['max_num_keypoints']
+        distances = None
+        for iKeypt in range(num_keypts):
+            if distances is None:
+                distances = torch.norm(keypts_ref[..., [0, 1]] - keypts_preds[..., [0, 1]], dim=-1)
+            else:
+                distances += torch.norm(keypts_ref[..., [3 * iKeypt, 1 + 3 * iKeypt]] - keypts_preds[..., [3 * iKeypt, 1 + 3 * iKeypt]], dim=-1)
         return distances, torch.min(distances, dim=-1)[1]
 
     @torch.no_grad()
@@ -750,15 +762,17 @@ class StereoDetectionHead(nn.Module):
         If candidates within distance_threshold are less than candidates_k, 0 pad them.
 
         Args:
-            keypts_preds: shape (B, numGrids, 6)
+            keypts_preds: shape (B, numGrids, 3*num_keypts)
             distances: shape (B, numGrids)
-            batch_gt_keypts: shape (B, 6)
+            batch_gt_keypts: shape (B, 3*num_keypts)
         Returns:
             candidates_mask: shape (B, numGrids). boolean mask.
-            keypts_preds_selected: shape (B, k, 6). Note some of the k elemenets can be just 0s.
-            bboxes_targets_selected: shape (B, k, 6). Note some of the k elements can be just 0s.
+            keypts_preds_selected: shape (B, k, 3*num_keypts). Note some of the k elemenets can be just 0s.
+            bboxes_targets_selected: shape (B, k, 3*num_keypts). Note some of the k elements can be just 0s.
         """
-        keypts_targets_selected = batch_gt_keypts.view(-1, 1, 6).repeat(1, candidates_k, 1)
+        dim_keypts_preds = self._config['max_num_keypoints'] * 3
+
+        keypts_targets_selected = batch_gt_keypts.view(-1, 1, dim_keypts_preds).repeat(1, candidates_k, 1)
         batch_size, num_grids = keypts_preds.shape[:2]
 
         with torch.no_grad():
@@ -769,10 +783,10 @@ class StereoDetectionHead(nn.Module):
             valid_mask = topk_distances < float('inf')
             valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
             topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)
-        pseudo_keypts = torch.zeros(batch_size, 1, 6, dtype=keypts_preds.dtype, device=keypts_preds.device)
+        pseudo_keypts = torch.zeros(batch_size, 1, dim_keypts_preds, dtype=keypts_preds.dtype, device=keypts_preds.device)
         keypts_preds_padded = torch.cat([keypts_preds, pseudo_keypts], dim=1)
-        keypts_preds_selected = torch.gather(keypts_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 6))
-        keypts_targets_selected = keypts_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 6), 0)
+        keypts_preds_selected = torch.gather(keypts_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, dim_keypts_preds))
+        keypts_targets_selected = keypts_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, dim_keypts_preds), 0)
 
         # make sure at least one candidate for each gt
         candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True

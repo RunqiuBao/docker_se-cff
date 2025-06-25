@@ -235,7 +235,10 @@ def DrawResultBboxesAndKeyptsOnEventFrame(
         bottom_right = (int(bbox[2]), int(bbox[3]))
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-        text = 'cf:{:.4f},cl:{}'.format(confidence.item(), classindex)
+        try:
+            text = 'cf:{:.4f},cl:{}'.format(float(confidence), classindex)
+        except:
+            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
         textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
@@ -387,11 +390,11 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
         if keypts_left is not None:
-            keypt1, keypt2 = keypts_left[ii][:2], keypts_left[ii][2:]
-            keypt1_int = (int(keypt1[0]), int(keypt1[1]))
-            keypt2_int = (int(keypt2[0]), int(keypt2[1]))        
-            cv2.circle(left_event_sharp, keypt1_int, radius=5, color=(0, 255, 0), thickness=-1)
-            cv2.circle(left_event_sharp, keypt2_int, radius=5, color=(0, 0, 255), thickness=-1)
+            max_num_keypts = keypts_left.shape[1] // 3
+            for iKeypt in range(max_num_keypts):
+                if keypts_left[ii, iKeypt * 3 + 2] > 0:
+                    keypt_int = (int(keypts_left[ii, iKeypt * 3 + 0]), int(keypts_left[ii, iKeypt * 3 + 1]))
+                    cv2.circle(left_event_sharp, keypt_int, radius=5, color=(0, 255, 0), thickness=-1)
         if facets is not None:
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
             # instances_facets = draw_featmap_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor)
@@ -416,11 +419,11 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
         if keypts_right is not None:
-            keypt1, keypt2 = keypts_right[ii][:2], keypts_right[ii][2:]
-            keypt1_int_r = (int(keypt1[0]), int(keypt1[1]))
-            keypt2_int_r = (int(keypt2[0]), int(keypt2[1]))        
-            cv2.circle(right_event_sharp, keypt1_int_r, radius=5, color=(0, 255, 0), thickness=-1)
-            cv2.circle(right_event_sharp, keypt2_int_r, radius=5, color=(0, 0, 255), thickness=-1)
+            max_num_keypts = keypts_right.shape[1] // 3
+            for iKeypt in range(max_num_keypts):
+                if keypts_right[ii, iKeypt * 3 + 2] > 0:
+                    keypt_int = (int(keypts_right[ii, iKeypt * 3 + 0]), int(keypts_right[ii, iKeypt * 3 + 1]))
+                    cv2.circle(right_event_sharp, keypt_int, radius=5, color=(0, 255, 0), thickness=-1)
         if facets_right is not None:
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_BGR2GRAY)
             # instances_facets_right = draw_featmap_on_view(top_left, bottom_right, facets_right[ii], instances_facets_right, enlarge_facet_factor)
