@@ -9,17 +9,17 @@ import numpy as np
 
 import torch.utils.data
 
-from .constant import EVENT_HEIGHT, EVENT_WIDTH
-
 
 class EventSlicer(torch.utils.data.Dataset):
     def __init__(
-        self, event_root, rectify_map_root, num_of_event, num_of_future_event=0
+        self, event_root, rectify_map_root, num_of_event, num_of_future_event=0, event_h=None, event_w=None
     ):
         self.event_root = event_root
         self.rectify_map_root = rectify_map_root
         self.num_of_event = num_of_event
         self.num_of_future_event = num_of_future_event
+        self.event_h = event_h  # original size from camera
+        self.event_w = event_w
 
         with h5py.File(event_root, "r") as h5f:
             self.ms_to_idx = np.asarray(h5f["ms_to_idx"], dtype="int64").squeeze()
@@ -225,9 +225,9 @@ class EventSlicer(torch.utils.data.Dataset):
 
         mask = (
             (0 <= x_rect)
-            & (x_rect < EVENT_WIDTH)
+            & (x_rect < self.event_w)
             & (0 <= y_rect)
-            & (y_rect < EVENT_HEIGHT)
+            & (y_rect < self.event_h)
         )
 
         return {

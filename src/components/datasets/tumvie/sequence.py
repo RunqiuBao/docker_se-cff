@@ -63,13 +63,15 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         # Event Dataset
         event_module = getattr(event, event_cfg.NAME)
-        event_root = os.path.join(root, self._PATH_DICT["event"])        
+        event_root = os.path.join(root, self._PATH_DICT["event"])
         self.event_dataset = event_module.EventDataset(
             root=event_root,
             sequence_name=self.sequence_name,
             timestamps=self.timestamps,
             lmdb_txn=lmdb_txn,
             num_repeat=self._num_repeat if split == "train" else 1,
+            event_h=kwargs["event_height"],
+            event_w=kwargs["event_width"],
             **event_cfg.PARAMS,
         )
 
@@ -187,6 +189,8 @@ class SequenceDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         data = self.load_data(idx)
         data = self.transforms(data)
+        # print("baodebug: event timestamp: ", data['event']['timestamp'])
+        # print("baodebug2: objdet timestamp: ", data['objdet']['timestamp'])
         return data
 
     def collate_fn(self, batch):

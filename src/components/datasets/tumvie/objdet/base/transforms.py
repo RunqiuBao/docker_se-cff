@@ -340,8 +340,12 @@ class Crop:
         sample["bboxes"][:, 1] -= start_y
         sample["bboxes"][:, 2] -= start_x
         sample["bboxes"][:, 3] -= start_y
+        sample["bboxes"][:, 4] -= start_x
+        sample["bboxes"][:, 5] -= start_x
 
         sample["keypts"][..., 0] -= start_x
         sample["keypts"][..., 1] -= start_y
+        sample["keypts_right"][..., 0] -= start_x
+        sample["keypts_right"][..., 1] -= start_y
 
         return sample
