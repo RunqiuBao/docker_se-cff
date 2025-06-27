@@ -299,6 +299,8 @@ class StereoDetectionHead(nn.Module):
                 list_sbboxes_pred.append(None)
                 list_refined_right_bboxes.append(None)
                 list_right_scores_refine.append(None)
+                list_predicted_right_keypts.append(None)
+                list_right_scores_keypts.append(None)
                 continue
             starttime = time.time()
             bboxes_pred = torch.unsqueeze(bboxes_pred, dim=0)
@@ -424,6 +426,13 @@ class StereoDetectionHead(nn.Module):
         list_right_selected_keypts = []
         # right bboxes related loss
         for indexInBatch in range(num_batch):
+            if list_sbboxes_pred[indexInBatch] is None:
+                # No detections in left
+                list_sbboxes_pred_refined.append(None)
+                pos_masks.append(None)
+                num_batch -= 1
+                print("{}-th image in batch has no detections, skip.".format(indexInBatch))
+                continue
             bbox_targetset_one = stereo_objdet_targets["bboxes"][stereo_objdet_targets["batch_idx"] == indexInBatch]
             bbox_targets_one = bbox_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]]
             pos_masks_one = left_fg_mask[indexInBatch][left_nms_topk_mask[indexInBatch]]
@@ -486,7 +495,10 @@ class StereoDetectionHead(nn.Module):
             # loss for right keypts
             keypts_targetset_one = stereo_objdet_targets["keypoints_right"][stereo_objdet_targets["batch_idx"] == indexInBatch]
             keypts_targets_one = keypts_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]].view(num_priors, -1)[pos_masks_one]
-            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
+            try:
+                right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
+            except:
+                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
             keypts_distances, indices_best_right_keypts = self.batch_keypts_distance_calculator_simple(right_keypts, keypts_targets_one.unsqueeze(1))
 
             rkeypts_select_mask, keypts_preds_selected, keypts_targets_selected = self.batch_assigner_keypts(
