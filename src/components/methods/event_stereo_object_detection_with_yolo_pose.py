@@ -780,7 +780,7 @@ def test(
                     batch_refined_right_bboxes_selected[0],
                     torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1),
                     torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1),
-                    left_bboxesClsKeypts_nmsed_topked[0][:, 9:],
+                    left_bboxesClsKeypts_nmsed_topked[0][:, (4 + models["objdet_head"].module.config["num_classes"]):],
                     batch_refined_right_keypts_selected[0][:, :],
                 ], dim=1),
                 imageHeight=batch_data["image_metadata"]["h_cam"],
