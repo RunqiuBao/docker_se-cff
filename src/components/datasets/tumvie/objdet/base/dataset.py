@@ -82,22 +82,23 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             groupedAnnotations[idx].append(annotation)
         for oneGroup in groupedAnnotations.values():
             for oneTargetInOneGroup in oneGroup:
-                if oneTargetInOneGroup.get_bbox()[0] < self._imageSize[0]:
+                bboxThisGroup = oneTargetInOneGroup.get_bbox()
+                if (bboxThisGroup[0] + bboxThisGroup[2] / 2) < self._imageSize[0]:
                     left_targets.append(oneTargetInOneGroup)
                 else:
                     right_targets.append(oneTargetInOneGroup)
         
-        # -------- test code --------
-        debug_path = "/root/data/debug_tumvie_dataload/"
-        os.makedirs(debug_path, exist_ok=True)
-        for indexTarget in range(len(left_targets)):
-            color = tuple(numpy.random.randint(0, 256, size=3).tolist())
-            left_bbox = numpy.array(left_targets[indexTarget].get_bbox()).astype('int')
-            right_bbox = numpy.array(right_targets[indexTarget].get_bbox()).astype('int')
-            cv2.rectangle(imageData, (left_bbox[0], left_bbox[1]), (left_bbox[0] + left_bbox[2], left_bbox[1] + left_bbox[3]) , color, 2)
-            cv2.rectangle(imageData, (right_bbox[0], right_bbox[1]), (right_bbox[0] + right_bbox[2], right_bbox[1] + right_bbox[3]) , color, 2)
-        cv2.imwrite(os.path.join(debug_path, "frame_{}_{}_left.png".format(indexFrame, imageId)), imageData)
-        # -------- test code --------
+        # # -------- test code --------
+        # debug_path = "/root/data/debug_tumvie_dataload/"
+        # os.makedirs(debug_path, exist_ok=True)
+        # for indexTarget in range(len(left_targets)):
+        #     color = tuple(numpy.random.randint(0, 256, size=3).tolist())
+        #     left_bbox = numpy.array(left_targets[indexTarget].get_bbox()).astype('int')
+        #     right_bbox = numpy.array(right_targets[indexTarget].get_bbox()).astype('int')
+        #     cv2.rectangle(imageData, (left_bbox[0], left_bbox[1]), (left_bbox[0] + left_bbox[2], left_bbox[1] + left_bbox[3]) , color, 2)
+        #     cv2.rectangle(imageData, (right_bbox[0], right_bbox[1]), (right_bbox[0] + right_bbox[2], right_bbox[1] + right_bbox[3]) , color, 2)
+        # cv2.imwrite(os.path.join(debug_path, "frame_{}_{}_left.png".format(indexFrame, imageId)), imageData)
+        # # -------- test code --------
 
         try:
             assert len(left_targets) == len(right_targets)

@@ -177,7 +177,7 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False
+    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False,
 ):
     """
     Args:
