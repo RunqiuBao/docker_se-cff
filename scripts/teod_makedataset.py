@@ -196,7 +196,6 @@ def main(args):
         dataloader_cfg=dataloader_cfg,
         is_distributed=False,
         defineSeqIdx=args.seq_idx_toselect,
-        num_repeat=1,
         isDisableLmdbRead=True
     )
     data_iter = iter(data_loader)
