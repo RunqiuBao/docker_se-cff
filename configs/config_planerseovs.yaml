@@ -11,8 +11,8 @@ DATASET:
       crop_height: 480
       crop_width: 672
       randomhorizontalflip: False
-      randomcrop: False
-      num_repeat: 1
+      randomcrop: True
+      num_repeat: 5
       isLoadCOCOFormat: False
       event_cfg:
         NAME: sbn
