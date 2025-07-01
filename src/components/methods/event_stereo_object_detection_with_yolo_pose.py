@@ -365,16 +365,19 @@ def train(
                                 }
                             )
                             tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
-
-                            left_bboxes_one = left_bboxes_nmsed_topked[0][pos_masks_one]
-                            leftimage_visz = RenderImageWithBboxes(
-                                left_event_sharp[0].detach().squeeze(1).cpu().numpy(),
+                            
+                            right_bboxes = batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy()
+                            right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
+                            rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
                                 {
-                                    "bboxes": left_bboxes_one,
-                                    "classes": left_selected_classes[left_selected_batchidx == 0],
+                                    "bboxes": right_bboxes,
+                                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
+                                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
+                                    "keypts": batch_data["gt_labels"]["objdet"][0]["keypts_right"][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
-                            tensorBoardLogger.add_image("(train) left sharp preds", leftimage_visz[0])
+                            tensorBoardLogger.add_image("(train) right sharp with GT bboxes", rightimage_gt_visz)
 
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
@@ -589,16 +592,18 @@ def valid(
                                 }
                             )
                             tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)
-
-                            left_bboxes_one = left_bboxes_nmsed_topked[0][pos_masks_one]
-                            leftimage_visz = RenderImageWithBboxes(
-                                left_event_sharp[0].detach().squeeze(1).cpu().numpy(),
+                            right_bboxes = batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy()
+                            right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
+                            rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
                                 {
-                                    "bboxes": left_bboxes_one,
-                                    "classes": left_selected_classes[left_selected_batchidx == 0],
+                                    "bboxes": right_bboxes,
+                                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
+                                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
+                                    "keypts": batch_data["gt_labels"]["objdet"][0]["keypts_right"][:, :, :2].detach().cpu().numpy(),
                                 }
                             )
-                            tensorBoardLogger.add_image("(valid) left sharp preds", leftimage_visz[0])
+                            tensorBoardLogger.add_image("(valid) right sharp with GT bboxes", rightimage_gt_visz)
 
         batchSize = batch_data["event"]["left"].shape[0]
         loss = 0
@@ -638,7 +643,7 @@ def test(
     is_save_onnx = False
 ):
     for model in models.values():
-        model.eval()
+        model.module.eval()
 
     if is_save_onnx:
         logger.info(
@@ -657,8 +662,6 @@ def test(
     data_iter = iter(data_loader)
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
-        if indexBatch < 18:
-            continue
         starttime = time.time()
         # ---------- concentration net ----------
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
@@ -803,6 +806,10 @@ def test(
                     save_root,
                     batch_data["image_metadata"]
                 )
+            else:
+                logger.error("batch {} has no valid detections.".format(indexBatch))
+        else:
+            logger.error("batch {} has no valid detections.".format(indexBatch))
 
         pbar.update(1)
     pbar.close()
@@ -836,6 +843,7 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
             or preds[i][6] > (imageWidth - margin)
             or preds[i][7] > (imageWidth - margin)
         ):
+            print("{}-th object is filtered out due to inside image edge margin.".format(i))
             continue
         isKeyptsOutsideBbox = False
         for indexKeypt in range(max_num_keypoints):
@@ -854,8 +862,10 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
                     isKeyptsOutsideBbox = True
                     break
         if isKeyptsOutsideBbox:
+            print("{}-th object is filtered out due to keypoints outside bbox.".format(i))
             continue
         new_preds.append(preds[i].unsqueeze(0))
+        print("{}-th object is kept.".format(i))
     if len(new_preds) > 0:
         return torch.concat(new_preds, dim=0)
     else:
