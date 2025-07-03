@@ -80,8 +80,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         objdet_module = getattr(objdet, "base")
         self.objdet_dataset = objdet_module.StereoObjDetDataset(
             root=os.path.join(root, self._PATH_DICT["objdet"]),
-            imageHeight=self.event_dataset.event_h,
-            imageWidth=self.event_dataset.event_w,
+            imageHeight=kwargs["event_rectified_height"],
+            imageWidth=kwargs["event_rectified_width"],
             isLoadCOCOFormat=isLoadCOCOFormat,
             num_repeat=self._num_repeat if split == "train" else 1
         )
@@ -260,7 +260,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         disparity_data = self.disparity_dataset[(idx, objdet_data)]
 
         data["file_index"] = idx
-        data["end_timestamp"] = self.timestamps[idx % self._num_repeat]
+        data["end_timestamp"] = self.timestamps[idx // self._num_repeat]
         if event_data is not None:
             data["event"] = event_data
         if objdet_data is not None:

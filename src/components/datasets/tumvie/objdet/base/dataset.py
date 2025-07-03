@@ -104,6 +104,12 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             assert len(left_targets) == len(right_targets)
         except:
             print("baodebug: frame (" + str(indexFrame) + ") left targets " + str(len(left_targets)) + ", right targets " + str(len(right_targets)))
+            print("left_targets:\n")
+            for left_target in left_targets:
+                print(left_target)
+            print("right_targets:\n")
+            for right_target in right_targets:
+                print(right_target)
             raise
         try:
             for indexTarget in range(len(left_targets)):
@@ -141,7 +147,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                 )
 
                 if isinstance(left_targets[indexTarget], Polygon):
-                    left_corners = numpy.array(left_targets[indexTarget].points).reshape(-1, 2)
+                    left_corners = numpy.array(left_targets[indexTarget].points).reshape(-1, 2)  # Note: format [x_min, y_min, w, h]
                     leftcorners.append(
                         numpy.mean(
                             numpy.array([
@@ -153,21 +159,21 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                             axis=0
                         )[None, None, :]
                     )
-                    right_corners = numpy.array(right_targets[indexTarget].points).reshape(-1, 2)
+                    right_corners = numpy.array(right_targets[indexTarget].points).reshape(-1, 2)  # Note: format [x_min, y_min, w, h]
                     rightcorners.append(
                         numpy.mean(
                             numpy.array([
-                                [right_corners[0][0], right_corners[0][1], 2],
-                                [right_corners[1][0], right_corners[1][1], 2],
-                                [right_corners[2][0], right_corners[2][1], 2],
-                                [right_corners[3][0], right_corners[3][1], 2]
+                                [right_corners[0][0] - self._imageSize[0], right_corners[0][1], 2],
+                                [right_corners[1][0] - self._imageSize[0], right_corners[1][1], 2],
+                                [right_corners[2][0] - self._imageSize[0], right_corners[2][1], 2],
+                                [right_corners[3][0] - self._imageSize[0], right_corners[3][1], 2]
                             ]),
                             axis=0
                         )[None, None, :]
                     )
                 else:
                     # Bbox
-                    left_bbox = left_targets[indexTarget].get_bbox()
+                    left_bbox = left_targets[indexTarget].get_bbox()  # Note: format [x_min, y_min, w, h]
                     leftcorners.append(
                         numpy.array([
                             left_bbox[0] + left_bbox[2] / 2, left_bbox[1] + left_bbox[3] / 2, 2
@@ -176,7 +182,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     right_bbox = right_targets[indexTarget].get_bbox()
                     rightcorners.append(
                         numpy.array([
-                            right_bbox[0] + right_bbox[2] / 2, right_bbox[1] + right_bbox[3] / 2, 2
+                            right_bbox[0] + right_bbox[2] / 2 - self._imageSize[0], right_bbox[1] + right_bbox[3] / 2, 2
                         ])[None, None, :]
                     )
                     
