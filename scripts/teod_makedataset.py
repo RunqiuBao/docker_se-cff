@@ -218,6 +218,7 @@ def main(args):
     CreatePath(args.lmdb_dir, isOverwrite=False)
     CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_left".format(args.seq_idx)))
     CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_right".format(args.seq_idx)))
+    CreatePath(os.path.join(args.view4label_dir, "{}".format(args.seq_idx), "{}_stereo".format(args.seq_idx)))
     lmdb_writer = LmdbWriter(args.lmdb_dir, isDummyMode=False)
     with open(
         os.path.join(args.lmdb_dir, "{}_timestamp.txt".format(args.seq_idx)), "w"
@@ -229,7 +230,7 @@ def main(args):
                 ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
                 tsFile.write(str(ts) + "\n")
                 
-                print("seq_idx: {}, index frame: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch))
+                print("seq_idx: {}, index frame: {}, ts: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch, ts))
                 code_l = "%03d_%06d_l" % (
                     args.seq_idx,
                     indexSavedBatch * batch_size + indexInBatch,
@@ -264,8 +265,8 @@ def main(args):
                 code_ts = code_ts.encode()
                 lmdb_writer.write(code_ts, numpy.array([ts], dtype="int"))
 
-                leftView = ConvertEventsToImage(leftEvents[..., 0])
-                rightView = ConvertEventsToImage(rightEvents[..., 0])
+                leftView = ConvertEventsToImage(leftEvents[..., 1])
+                rightView = ConvertEventsToImage(rightEvents[..., 1])
                 leftViewPath = os.path.join(
                     args.view4label_dir,
                     "{}".format(args.seq_idx),
@@ -278,8 +279,15 @@ def main(args):
                     "{}_right".format(args.seq_idx),
                     "{}.png".format(str(ts).zfill(12)),
                 )
+                stereoViewPath = os.path.join(
+                    args.view4label_dir,
+                    "{}".format(args.seq_idx),
+                    "{}_stereo".format(args.seq_idx),
+                    "{}.png".format(str(ts).zfill(12)),
+                )
                 cv2.imwrite(leftViewPath, leftView)
                 cv2.imwrite(rightViewPath, rightView)
+                cv2.imwrite(stereoViewPath, numpy.hstack([leftView, rightView]))
             pbar.update(1)
             indexSavedBatch += 1
         log.info("commiting dataset...")
