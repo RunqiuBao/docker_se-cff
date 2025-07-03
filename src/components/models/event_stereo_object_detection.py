@@ -473,7 +473,6 @@ class StereoDetectionHead(nn.Module):
             ## dynamic targets
             rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
             rbboxes_scores_targets[rselect_mask] = 1
-            
             loss_rscore_one = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples_timesk
             if "loss_rscore" not in loss_dict:
                 loss_dict["loss_rscore"] = loss_rscore_one
@@ -521,8 +520,9 @@ class StereoDetectionHead(nn.Module):
             ) / num_total_samples_timesk
             loss_rkeypts_obj = self.loss_bce_pose(keypts_preds_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2], kpt_mask.float()) / num_total_samples_timesk
             # right keypts scores
-            rkeypts_scores = list_right_scores_keypts[indexInBatch].view(-1, num_grids, 1)[pos_masks_one][rkeypts_select_mask].sigmoid()
-            rkeypts_scores_targets = torch.ones_like(rkeypts_scores)
+            rkeypts_scores = list_right_scores_keypts[indexInBatch].view(-1, num_grids, 1)[pos_masks_one].sigmoid()
+            rkeypts_scores_targets = torch.zeros_like(rkeypts_scores)
+            rkeypts_scores_targets[rkeypts_select_mask] = 1
             loss_rkeypts_score_one = self.loss_rscore(rkeypts_scores, rkeypts_scores_targets) / num_total_samples_timesk
             if "loss_rkeypts" not in loss_dict:
                 loss_dict["loss_rkeypts"] = loss_rkeypts
