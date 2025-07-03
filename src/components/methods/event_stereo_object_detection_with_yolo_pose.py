@@ -32,9 +32,9 @@ def ExtractRefinedInstance(refined_instances: Tensor, refined_scores: Tensor):
         refined_scores: (B, NumInstance, ker_h * ker_w, 1).
     """
     logits_length = refined_instances.shape[-1]
-    indices_highest_score = torch.argmax(refined_scores.squeeze(-1), dim=-1)
+    highest_scores, indices_highest_score = torch.max(refined_scores.squeeze(-1), dim=-1)
     refined_instances_selected = torch.gather(refined_instances, -2, indices_highest_score.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, logits_length)).squeeze(-2)
-    return refined_instances_selected
+    return highest_scores, refined_instances_selected
 
 
 def freeze_static_components(models: dict):
@@ -763,8 +763,8 @@ def test(
                 )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
-            batch_refined_right_bboxes_selected = ExtractRefinedInstance(batch_refined_right_bboxes[0], batch_right_scores_refine[0])
-            batch_refined_right_keypts_selected = ExtractRefinedInstance(right_pred_kpts[0], right_scores_keypts[0])
+            right_bboxes_best_scores, batch_refined_right_bboxes_selected = ExtractRefinedInstance(batch_refined_right_bboxes[0], batch_right_scores_refine[0])
+            right_keypts_best_scores, batch_refined_right_keypts_selected = ExtractRefinedInstance(right_pred_kpts[0], right_scores_keypts[0])
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
 
@@ -775,8 +775,9 @@ def test(
         if batch_refined_right_bboxes_selected is not None:
             # (l_tl_x, l_tl_y, l_br_x, l_br_y,
             #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
-            #                                                                 class_label, confidence,
-            #                                                                                        l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
+            #                                                                 class_label, confidence, confidence_right,
+            #                                                                                                           l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
+            # TODO: mark right confidences on the result visz image.
             preds = FilterBadDetections(
                 torch.concat([
                     left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
@@ -821,6 +822,7 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
     delete objects whose bboxes are within 4 edges' margin of the image.
     delete objects whose keypoints are outside of the bbox.
     """
+    return preds
     new_preds = []
     num_objects = preds.shape[0]
     max_num_keypoints = (preds.shape[1] - 10) // 3 // 2
