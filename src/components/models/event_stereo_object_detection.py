@@ -742,12 +742,9 @@ class StereoDetectionHead(nn.Module):
         batch_size, num_grids = bboxes_preds.shape[:2]
 
         with torch.no_grad():
-            candidates_mask = iou_scores.squeeze(-1) > iou_thres
-            iou_scores_masked = iou_scores.squeeze(-1).clone().masked_fill(~candidates_mask, float('-inf'))
-            topk_scores, topk_indices = torch.topk(iou_scores_masked, candidates_k, dim=1)
-
-            valid_mask = topk_scores > float('-inf')
-            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
+            topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=1)
+            valid_mask = topk_scores > iou_thres
+            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt; torch.topk sorted topk_scores and the first one is the best.
             topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (B, k)
         
         pseudo_bboxes = torch.zeros(batch_size, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
@@ -756,7 +753,11 @@ class StereoDetectionHead(nn.Module):
         bboxes_targets_selected = bboxes_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
 
         # make sure at least one candidate for each gt
-        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
+        # candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
+        candidates_mask = torch.zeros_like(iou_scores, dtype=torch.bool)  # build a new mask with only topk being True.
+        valid_mask = topk_indices < num_grids
+        for indexInBatch in range(batch_size):
+            candidates_mask[indexInBatch, topk_indices[indexInBatch][valid_mask[indexInBatch]]] = True
 
         return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
     
@@ -780,20 +781,22 @@ class StereoDetectionHead(nn.Module):
         batch_size, num_grids = keypts_preds.shape[:2]
 
         with torch.no_grad():
-            candidates_mask = distances < distance_threshold
-            distances_masked = distances.clone().masked_fill(~candidates_mask, float('inf'))
-            topk_distances, topk_indices = torch.topk(distances_masked, candidates_k, dim=1, largest=False)
-
-            valid_mask = topk_distances < float('inf')
+            topk_distances, topk_indices = torch.topk(distances, candidates_k, dim=1, largest=False)
+            valid_mask = topk_distances < distance_threshold
             valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt.
             topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)
+
         pseudo_keypts = torch.zeros(batch_size, 1, dim_keypts_preds, dtype=keypts_preds.dtype, device=keypts_preds.device)
         keypts_preds_padded = torch.cat([keypts_preds, pseudo_keypts], dim=1)
         keypts_preds_selected = torch.gather(keypts_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, dim_keypts_preds))
         keypts_targets_selected = keypts_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, dim_keypts_preds), 0)
 
         # make sure at least one candidate for each gt
-        candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
+        # candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
+        candidates_mask = torch.zeros_like(distances, dtype=torch.bool)  # build a new mask with only topk being True.
+        valid_mask = topk_indices < num_grids
+        for indexInBatch in range(batch_size):
+            candidates_mask[indexInBatch, topk_indices[indexInBatch][valid_mask[indexInBatch]]] = True
         
         return candidates_mask, keypts_preds_selected, keypts_targets_selected
 
