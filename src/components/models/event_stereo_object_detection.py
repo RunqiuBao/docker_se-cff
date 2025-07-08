@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 import numpy
 from typing import List, Dict, Tuple, Optional
@@ -15,12 +14,11 @@ from mmdet.structures.mask import mask_target, BitmapMasks
 
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
-from .yolo_pose_blocks import Conv
-from .yolo_pose_utils import make_anchors, xyxy2xywh
+from .yolo_pose_utils import xyxy2xywh
 from .objectdetection import StereoEventDetectionHead
 
 from . import losses
-from .utils.misc import freeze_module_grads, unfreeze_module_grads, multi_apply, convert_tensor_to_numpy
+from .utils.misc import freeze_module_grads, multi_apply, convert_tensor_to_numpy
 from ..methods.visz_utils import RenderImageWithBboxes, RenderImageWithBboxesAndKeypts
 
 
