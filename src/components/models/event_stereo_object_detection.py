@@ -532,14 +532,9 @@ class StereoDetectionHead(nn.Module):
 
             # select best keypts for visualization
             with torch.no_grad():
-                right_keypts_selected_best = self.batch_assigner_keypts(
-                    right_keypts,
-                    keypts_distances,
-                    keypts_targets_one,
-                    35.0,  # distance_threshold
-                    1
-                )[1]
-                list_right_selected_keypts.append(right_keypts_selected_best.squeeze(1).view(-1, self._config["max_num_keypoints"], 3))
+                batchIndices = torch.arange(right_keypts.size(0))
+                right_keypts_selected_best = right_keypts[batchIndices, torch.argmax(rkeypts_scores, dim=1).squeeze(-1)]
+                list_right_selected_keypts.append(right_keypts_selected_best.view(-1, self._config["max_num_keypoints"], 3))
 
         loss_dict["loss_rbbox"] /= num_batch
         loss_dict["loss_rscore"] /= num_batch
