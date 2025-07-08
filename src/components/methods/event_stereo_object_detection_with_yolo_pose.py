@@ -299,6 +299,8 @@ def train(
                     }
                 )
                 tensorBoardLogger.add_image("(train) left sharp with GT bboxes", leftimage_gt_visz)
+                right_feature_map = torch.mean(right_feature[0][0].detach(), dim=0).cpu().numpy()
+                tensorBoardLogger.add_image("(train) right feature map", torch.from_numpy(right_feature_map))
 
             if models["objdet_head"].module.is_freeze:
                 left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)

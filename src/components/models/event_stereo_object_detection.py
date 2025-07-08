@@ -335,10 +335,11 @@ class StereoDetectionHead(nn.Module):
 
             # starttime = time.time()
             if self.logger is not None:
-                roi_feat_sample = right_roi_feats[0, 0, :, :].detach().cpu()
-                roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
-                roi_feat_sample /= roi_feat_sample.max()
-                self.logger.add_image("roi_feat_sample", roi_feat_sample)
+                for indexInstance in range(right_roi_feats.shape[0]):
+                    roi_feat_sample = torch.mean(right_roi_feats[indexInstance, :, :, :], dim=0).detach().cpu()
+                    roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
+                    roi_feat_sample /= roi_feat_sample.max()
+                    self.logger.add_image("roi_feat_sample{}".format(indexInstance), roi_feat_sample)
             # print("----- time sub sub2.5: {}".format(time.time() - starttime))
 
             starttime = time.time()
@@ -505,6 +506,7 @@ class StereoDetectionHead(nn.Module):
                 self._config["keypts_distance_threshold"],  # distance_threshold
                 self._config["candidates_k"]
             )
+            print("num_pos_timesk: {}, num_pos_timesk_keypts: {}".format(num_pos_timesk, torch.sum(rkeypts_select_mask.to(torch.float))))
             num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
             num_total_samples_timesk = max(num_pos_timesk, 1.0)
             kpt_mask = keypts_targets_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2] != 0
