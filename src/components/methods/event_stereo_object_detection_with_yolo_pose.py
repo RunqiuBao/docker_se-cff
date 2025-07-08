@@ -74,6 +74,7 @@ def _backward_and_optimize(
     optimizer: dict,  # dict containing sub optimzers
     lossRecords: dict,
     batchSize: int,
+    device: str,
     clip_max_norm: Optional[float] = None,  # param used for amp
     scaler: Optional[torch.cuda.amp.grad_scaler.GradScaler] = None,
 ):
@@ -87,7 +88,7 @@ def _backward_and_optimize(
     lossRecords["Loss"].update(loss.item() if loss != 0 else 0, batchSize)
 
     if loss.grad_fn is None:
-        logger.error("no valid loss. skipping backward.")
+        logger.error("no valid loss. skipping backward. lossDictCurrentStep:  {}".format(lossDictCurrentStep))
         return
 
     if scaler is not None:
@@ -190,6 +191,8 @@ def train(
         for indexObj in range(len(batch_data['gt_labels']['objdet'])):
             batch_data['gt_labels']['objdet'][indexObj]['labels'] = batch_data['gt_labels']['objdet'][indexObj]['labels'].to(torch.long)
             batch_data['objdet'][indexObj]['labels'] = batch_data['objdet'][indexObj]['labels'].to(torch.long)
+        
+        deviceThisProcess = batch_data["event"]["left"].device
 
         for key, suboptimizer in optimizer.items():
             if not models[key].module.is_freeze:
@@ -383,13 +386,19 @@ def train(
 
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
-        _backward_and_optimize(
-            models,
-            lossDictAll,
-            optimizer,  # dict containing sub optimzers
-            log_dict,
-            batchSize
-        )
+        try:
+            _backward_and_optimize(
+                models,
+                lossDictAll,
+                optimizer,  # dict containing sub optimzers
+                log_dict,
+                batchSize,
+                deviceThisProcess
+            )
+            lossDictAll = {}
+        except Exception as e:
+            print("Note: one image in the batch might have no valid detection.")
+            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
         if ema is not None:
             # exponential moving average
