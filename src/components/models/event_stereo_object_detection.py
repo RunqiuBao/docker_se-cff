@@ -352,9 +352,8 @@ class StereoDetectionHead(nn.Module):
             # print("----- time sub sub3: {}".format(time.time() - starttime))
 
             # right keypts prediction
-            right_roi_feats_clone = right_roi_feats.detach().clone()
-            right_keypts_pred = self.right_keypts_predictor(right_roi_feats_clone)  # Note: shape [B*100, 6, 7, 7]
-            right_scores_pred = self.right_keypts_predictor_scorer(right_roi_feats_clone)  # Note: shape [B*100, 1, 7, 7]
+            right_keypts_pred = self.right_keypts_predictor(right_roi_feats)  # Note: shape [B*100, 6, 7, 7]
+            right_scores_pred = self.right_keypts_predictor_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
             logits, ker_h, ker_w = right_keypts_pred.shape[-3:]
             right_keypts_pred = right_keypts_pred.view(1, -1, logits, ker_h, ker_w)
             predicted_right_keypts = self._right_keypts_decode(sbboxes_pred, right_keypts_pred)  # Note: shape [B, 100, 49, 6]
@@ -479,24 +478,22 @@ class StereoDetectionHead(nn.Module):
                 loss_dict["loss_rscore"] += loss_rscore_one
 
             # substitute right bboxes in sbboxes for visualization.
-            bboxes = bboxes.view(-1, 6)
-            selected_sbboxes = bboxes[pos_masks_one]
-            indices_highest_score = torch.argmax(rbboxes_scores.squeeze(-1), dim=1)
-            rbboxes_highest_score = torch.gather(rbboxes_refined, 1, indices_highest_score.view(num_positive, 1, 1).expand(-1, -1, 4)).squeeze(1)            
-            selected_sbboxes[:, 4] = rbboxes_highest_score[:, 0]
-            selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
-            bboxes[pos_masks_one] = selected_sbboxes
-            bboxes = bboxes.view(num_priors, 6)
-            list_sbboxes_pred_refined.append(bboxes)
-            pos_masks.append(pos_masks_one)
+            with torch.no_grad():
+                bboxes = bboxes.view(-1, 6)
+                selected_sbboxes = bboxes[pos_masks_one]
+                indices_highest_score = torch.argmax(rbboxes_scores.squeeze(-1), dim=1)
+                rbboxes_highest_score = torch.gather(rbboxes_refined, 1, indices_highest_score.view(num_positive, 1, 1).expand(-1, -1, 4)).squeeze(1)            
+                selected_sbboxes[:, 4] = rbboxes_highest_score[:, 0]
+                selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
+                bboxes[pos_masks_one] = selected_sbboxes
+                bboxes = bboxes.view(num_priors, 6)
+                list_sbboxes_pred_refined.append(bboxes)
+                pos_masks.append(pos_masks_one)
 
             # loss for right keypts
             keypts_targetset_one = stereo_objdet_targets["keypoints_right"][stereo_objdet_targets["batch_idx"] == indexInBatch]
             keypts_targets_one = keypts_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]].view(num_priors, -1)[pos_masks_one]
-            try:
-                right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
-            except:
-                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
             keypts_distances, indices_best_right_keypts = self.batch_keypts_distance_calculator_simple(right_keypts, keypts_targets_one.unsqueeze(1))
 
             rkeypts_select_mask, keypts_preds_selected, keypts_targets_selected = self.batch_assigner_keypts(
