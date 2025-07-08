@@ -76,7 +76,7 @@ class StereoDetectionHead(nn.Module):
                                          'loss_weight': 1.0})
         self.loss_bce_pose = nn.BCEWithLogitsLoss()
         OKS_SIGMA = (
-            numpy.array([0.26, 0.25])  # Note: hard-coded values
+            numpy.array(self._config['OKS_SIGMA'])  # Note: hard-coded values
             / 10.0
         )
         self.loss_keypoint = losses.KeypointLoss(oks_sigmas=OKS_SIGMA)
@@ -502,7 +502,7 @@ class StereoDetectionHead(nn.Module):
                 right_keypts,
                 keypts_distances,
                 keypts_targets_one,
-                35.0,  # distance_threshold
+                self._config["keypts_distance_threshold"],  # distance_threshold
                 self._config["candidates_k"]
             )
             num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
