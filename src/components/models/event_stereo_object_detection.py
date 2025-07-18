@@ -2,14 +2,18 @@ import torch.nn as nn
 import torch
 from torch import Tensor
 import numpy
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Sequence
 from thop import profile
 import cv2
 import time
 import math
+import torch.nn.functional as F
 
-from mmdet.registry import MODELS
+from mmdet.registry import MODELS, TASK_UTILS
 from mmengine.config import Config
+from mmengine.model import initialize
+from mmcv.cnn import ConvModule
+from .yolo_pose_utils import initialize_weights
 from mmdet.structures.mask import mask_target, BitmapMasks
 
 from .concentration import ConcentrationNet
@@ -20,6 +24,58 @@ from .objectdetection import StereoEventDetectionHead
 from . import losses
 from .utils.misc import freeze_module_grads, multi_apply, convert_tensor_to_numpy
 from ..methods.visz_utils import RenderImageWithBboxes, RenderImageWithBboxesAndKeypts
+
+
+def EncodeKeypts(
+    bbox_priors: Tensor,
+    keypts_gt: Tensor,
+    means: Optional[Sequence] = [0.0, 0.0],
+    stds: Optional[Sequence] = [0.1, 0.1]
+) -> Tensor:
+    """
+    Encode keypoints to the format of [delta_keypt0_x, delta_keypt0_y], wrt. bbox_priors.
+    Args:
+        bbox_priors: [N, 4] shape.
+        keypts_gt: [N, 2] shape.
+
+    Returns:
+        encoded_right_keypts: [N, 2] shape.
+    """
+    px = (bbox_priors[..., 0] + bbox_priors[..., 2]) * 0.5
+    py = (bbox_priors[..., 1] + bbox_priors[..., 3]) * 0.5
+    pw = bbox_priors[..., 2] - bbox_priors[..., 0]
+    ph = bbox_priors[..., 3] - bbox_priors[..., 1]
+
+    dx = (keypts_gt[..., 0] - px) / pw
+    dy = (keypts_gt[..., 1] - py) / ph
+    deltas = torch.stack([dx, dy], dim=-1)
+    means = deltas.new_tensor(means).unsqueeze(0)
+    stds = deltas.new_tensor(stds).unsqueeze(0)
+    deltas = deltas.sub_(means).div_(stds)
+    return deltas
+
+def DecodeKeypts(
+    bbox_priors: Tensor,
+    keypts_pred: Tensor,
+    means: Optional[Sequence] = [0.0, 0.0],
+    stds: Optional[Sequence] = [0.1, 0.1]
+) -> Tensor:
+    """
+    Decode keypoints given bbox_priors and keypts_pred (deltas).
+    """
+    deltas = keypts_pred.view(-1, 2)
+
+    means = deltas.new_tensor(means).view(1, -1)
+    stds = deltas.new_tensor(stds).view(1, -1)
+    denorm_deltas = deltas * stds + means
+
+    dxy = denorm_deltas[:, :2]
+    pxy = ((bbox_priors[:, :2] + bbox_priors[:, 2:]) * 0.5)
+    pwh = (bbox_priors[:, 2:] - bbox_priors[:, :2])
+
+    dxy_wh = pwh * dxy
+    decoded_keypts = pxy + dxy_wh
+    return decoded_keypts
 
 
 class OnnxStyleNetwork(nn.Module):
@@ -55,34 +111,102 @@ class StereoDetectionHead(nn.Module):
         self._config["loss_cfg"] = loss_cfg
 
         # objdet tools
+        self.backbone = MODELS.build(
+            {
+                'type': 'ResNeXt',
+                'depth': 101,
+                'num_stages': 4,
+                'out_indices': (0, 1, 2, 3),
+                'frozen_stages': 1,
+                'norm_cfg': {'type': 'BN', 'requires_grad': True},
+                'norm_eval': True,
+                'style': 'pytorch',
+                'groups': 64,
+                'base_width': 4,
+                'in_channels': self._config['in_channels'],
+            }
+        )
+        self.neck = MODELS.build(
+            {
+                'type': 'FPN',
+                'in_channels': [256, 512, 1024, 2048],
+                'out_channels': self._config['channels_roi_extraction'],
+                'num_outs': 5
+            }
+        )
+
         self.bbox_roi_extractor = MODELS.build(
             {
                 'type': 'SingleRoIExtractor',
                 'roi_layer': {'type': 'RoIAlign', 'output_size': self._config['right_roi_feat_size'], 'sampling_ratio': 0},
-                'out_channels': self._config['in_channels'],
-                'featmap_strides': [8, 16, 32]
+                'out_channels': self._config['channels_roi_extraction'],
+                'featmap_strides': [4, 8, 16, 32]
             }
         )
 
+        self.bbox_coder = TASK_UTILS.build(
+            {
+                'type': 'DeltaXYWHBBoxCoder',
+                'target_means': [0.0, 0.0, 0.0, 0.0],
+                'target_stds': [0.1, 0.1, 0.2, 0.2]
+            }
+        )
+
+        (
+            self.shared_convs,
+            self.shared_fcs,
+            last_layer_dim
+        ) = self._add_conv_fc_branch(
+            num_branch_convs=0,
+            num_branch_fcs=2,
+            in_channels=self._config['channels_roi_extraction'],
+            conv_out_channels=256,
+            num_shared_fcs=2,
+            with_avg_pool=False,
+            fc_out_channels=1024,
+            roi_feat_area=self._config['right_roi_feat_size'] ** 2,
+            is_shared=True
+        )
+        self.shared_out_channels = last_layer_dim
+
+        # output fc layers
+        box_dim = 4
+        out_dim_reg = box_dim * self._config['num_classes']  # Note: classify again in the right side.
+        reg_last_dim = last_layer_dim
+        self.fc_reg = MODELS.build({'type': 'Linear', 'in_features': reg_last_dim, 'out_features': out_dim_reg})
+        cls_last_dim = last_layer_dim  # 1024
+        cls_channels = self._config['num_classes'] + 1  # Note: the last class is background. It will be ignored in current implementation.
+        self.fc_cls = MODELS.build({'type': 'Linear', 'in_features': cls_last_dim, 'out_features': cls_channels})
+        keypts_dim = 3  # only one keypts for these objects for now.
+        keypts_out_dim = keypts_dim * self._config['num_classes']
+        keypts_last_dim = last_layer_dim
+        self.fc_keypts = MODELS.build({'type': 'Linear', 'in_features': keypts_last_dim, 'out_features': keypts_out_dim})
+
+        self.relu = nn.ReLU(inplace=True)
+
+        init_cfg = [
+            dict(
+                type='Xavier',
+                distribution='uniform',
+                override=[
+                    dict(name='shared_fcs'),
+                ]
+            )
+        ]
+        initialize(self, init_cfg)
+        
         # loss
-        self.loss_rbbox = MODELS.build({'type': 'IoULoss',  # Right side bbox
-                                        'mode': 'square',
-                                        'eps': 1e-16,
-                                        'reduction': 'sum',
-                                        'loss_weight': 5.0})
-        self.loss_rscore = MODELS.build({'type': 'CrossEntropyLoss',
-                                         'use_sigmoid': True,
-                                         'reduction': 'sum',
-                                         'loss_weight': 1.0})
+        self.loss_rcls = MODELS.build({'type': 'CrossEntropyLoss', 'use_sigmoid': False, 'loss_weight': 1.0})
+        self.loss_rbbox = MODELS.build({'type': 'L1Loss', 'loss_weight': 1.0})
         self.loss_bce_pose = nn.BCEWithLogitsLoss()
         OKS_SIGMA = (
-            numpy.array(self._config['OKS_SIGMA'])  # Note: hard-coded values
+            numpy.array(self._config['OKS_SIGMA'][:self._config['max_num_keypoints']])  # Note: hard-coded values
             / 10.0
         )
         self.loss_keypoint = losses.KeypointLoss(oks_sigmas=OKS_SIGMA)
 
-        self._init_layers()
-        self._init_weights()
+        # self._init_layers()
+        # self._init_weights()
 
         self.logger = kwargs.get("logger", None)
 
@@ -93,82 +217,141 @@ class StereoDetectionHead(nn.Module):
     @property
     def config(self):
         return self._config
-
-    def _init_layers(self):
-        self.right_bbox_refiner = self._build_bbox_refiner_convs(
-            self._config['in_channels'],
-            self._config['feat_channels'],
-            output_logits=4,
-            norm_eps=self._config["norm_cfg"]["eps"],
-            norm_momentum=self._config["norm_cfg"]["momentum"],
-            act_type=self._config["act_cfg"]["type"]
-        )
-        self.right_bbox_refiner_scorer = self._build_bbox_refiner_convs(
-            self._config['in_channels'],
-            self._config['feat_channels'],
-            output_logits=1,
-            norm_eps=self._config["norm_cfg"]["eps"],
-            norm_momentum=self._config["norm_cfg"]["momentum"],
-            act_type=self._config["act_cfg"]["type"]
-        )
-
-        self.right_keypts_predictor = self._build_bbox_refiner_convs(
-            self._config['in_channels'],
-            self._config['feat_channels'],
-            output_logits=self._config["max_num_keypoints"] * 3,
-            norm_eps=self._config["norm_cfg"]["eps"],
-            norm_momentum=self._config["norm_cfg"]["momentum"],
-            act_type=self._config["act_cfg"]["type"]
-        )
-        self.right_keypts_predictor_scorer = self._build_bbox_refiner_convs(
-            self._config['in_channels'],
-            self._config['feat_channels'],
-            output_logits=1,
-            norm_eps=self._config["norm_cfg"]["eps"],
-            norm_momentum=self._config["norm_cfg"]["momentum"],
-            act_type=self._config["act_cfg"]["type"]
-        )
-
-    def _init_weights(self):
-        """
-        all conv2d need weights initialization
-        """
-        for subnet in [self.right_bbox_refiner, self.right_keypts_predictor]:
-            for module in subnet.modules():
-                if isinstance(module, (nn.Conv2d, nn.Linear)):
-                    nn.init.kaiming_uniform_(
-                        module.weight,
-                        a=math.sqrt(5),
-                        mode="fan_in",
-                        nonlinearity="leaky_relu"
-                    )
-
-    @staticmethod
-    def _build_bbox_refiner_convs(
+    
+    def _add_conv_fc_branch(
+        self,
+        num_branch_convs: int,
+        num_branch_fcs: int,
         in_channels: int,
-        feat_channels: int,
-        output_logits: int,
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-        norm_eps: float = 1e-5,
-        norm_momentum: float = 0.1,
-        act_type: str = "ReLU"
-    ) -> nn.Sequential:
+        conv_out_channels: int,
+        num_shared_fcs: int,
+        with_avg_pool: bool,
+        fc_out_channels: int,
+        roi_feat_area: int,
+        is_shared: bool = False
+    ) -> tuple:
+        """Add shared or separable branch.
+
+        convs -> avg pool (optional) -> fcs
         """
-        For left, output logits are [delta_x, delta_y, w, h], w and h are relative values to bbox size;
-        For right, output two logits are [delta_x, w].
-        """
-        bbox_refiner = nn.Sequential(
-            nn.Conv2d(in_channels, feat_channels, kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
-            getattr(nn, act_type)(),
-            nn.Conv2d(feat_channels, feat_channels, kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
-            getattr(nn, act_type)(),
-            nn.Conv2d(feat_channels, output_logits, 1)
-        )
-        return bbox_refiner
+        last_layer_dim = in_channels
+        # add branch specific conv layers
+        branch_convs = nn.ModuleList()
+        if num_branch_convs > 0:
+            for i in range(num_branch_convs):
+                conv_in_channels = (
+                    last_layer_dim if i == 0 else conv_out_channels)
+                branch_convs.append(
+                    ConvModule(
+                        conv_in_channels,
+                        conv_out_channels,
+                        3,
+                        padding=1,
+                        conv_cfg=self.conv_cfg,
+                        norm_cfg=self.norm_cfg
+                    )
+                )
+            last_layer_dim = conv_out_channels
+        # add branch specific fc layers
+        branch_fcs = nn.ModuleList()
+        if num_branch_fcs > 0:
+            # for shared branch, only consider self.with_avg_pool
+            # for separated branches, also consider self.num_shared_fcs
+            if (is_shared or num_shared_fcs == 0) and not with_avg_pool:
+                last_layer_dim *= roi_feat_area
+            for i in range(num_branch_fcs):
+                fc_in_channels = (last_layer_dim if i == 0 else fc_out_channels)
+                branch_fcs.append(
+                    nn.Linear(fc_in_channels, fc_out_channels)
+                )
+            last_layer_dim = fc_out_channels
+        return branch_convs, branch_fcs, last_layer_dim
+
+    # def _init_layers(self):
+    #     # self.backbone_net = torch.nn.Sequential(
+    #     #     Conv(10, 16, 3, 2),
+    #     #     C3k2(16, 32, 1, False, 0.25),
+    #     #     Conv(32, 64, 3, 2),
+    #     #     C3k2(64, 128, 1, False, 0.25),
+    #     #     Conv(128, 128, 1, 1)
+    #     # )
+    #     # self.downsample_layer = Conv(128, 128, 3, 2)
+    #     self.right_bbox_refiner = self._build_bbox_refiner_convs(
+    #         self._config['in_channels'],
+    #         self._config['feat_channels'],
+    #         output_logits=4,
+    #         norm_eps=self._config["norm_cfg"]["eps"],
+    #         norm_momentum=self._config["norm_cfg"]["momentum"],
+    #         act_type=self._config["act_cfg"]["type"]
+    #     )
+    #     self.right_bbox_refiner_scorer = self._build_bbox_refiner_convs(
+    #         self._config['in_channels'],
+    #         self._config['feat_channels'],
+    #         output_logits=1,
+    #         norm_eps=self._config["norm_cfg"]["eps"],
+    #         norm_momentum=self._config["norm_cfg"]["momentum"],
+    #         act_type=self._config["act_cfg"]["type"]
+    #     )
+
+    #     self.right_keypts_predictor = self._build_bbox_refiner_convs(
+    #         self._config['in_channels'],
+    #         self._config['feat_channels'],
+    #         output_logits=self._config["max_num_keypoints"] * 3,
+    #         norm_eps=self._config["norm_cfg"]["eps"],
+    #         norm_momentum=self._config["norm_cfg"]["momentum"],
+    #         act_type=self._config["act_cfg"]["type"]
+    #     )
+    #     self.right_keypts_predictor_scorer = self._build_bbox_refiner_convs(
+    #         self._config['in_channels'],
+    #         self._config['feat_channels'],
+    #         output_logits=1,
+    #         norm_eps=self._config["norm_cfg"]["eps"],
+    #         norm_momentum=self._config["norm_cfg"]["momentum"],
+    #         act_type=self._config["act_cfg"]["type"]
+    #     )
+
+    # def _init_weights(self):
+    #     """
+    #     all conv2d need weights initialization
+    #     """
+    #     for subnet in [self.right_bbox_refiner, self.right_keypts_predictor]:
+    #         for module in subnet.modules():
+    #             if isinstance(module, (nn.Conv2d, nn.Linear)):
+    #                 nn.init.kaiming_uniform_(
+    #                     module.weight,
+    #                     a=math.sqrt(5),
+    #                     mode="fan_in",
+    #                     nonlinearity="leaky_relu"
+    #                 )
+    #     # initialize_weights(self.backbone_net)
+    #     # initialize_weights(self.downsample_layer)
+
+    # @staticmethod
+    # def _build_bbox_refiner_convs(
+    #     in_channels: int,
+    #     feat_channels: int,
+    #     output_logits: int,
+    #     kernel_size: int = 3,
+    #     stride: int = 1,
+    #     padding: int = 1,
+    #     norm_eps: float = 1e-5,
+    #     norm_momentum: float = 0.1,
+    #     act_type: str = "ReLU"
+    # ) -> nn.Sequential:
+    #     """
+    #     For left, output logits are [delta_x, delta_y, w, h], w and h are relative values to bbox size;
+    #     For right, output two logits are [delta_x, w].
+    #     """
+    #     bbox_refiner = nn.Sequential(
+    #         nn.Conv2d(in_channels, feat_channels, kernel_size, stride=stride, padding=padding),
+    #         nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+    #         getattr(nn, act_type)(),
+    #         nn.Conv2d(feat_channels, feat_channels, kernel_size, stride=stride, padding=padding),
+    #         nn.BatchNorm2d(feat_channels, eps=norm_eps, momentum=norm_momentum),
+    #         getattr(nn, act_type)(),
+    #         nn.Conv2d(feat_channels, output_logits, 1)
+    #     )
+    #     return bbox_refiner
 
     @staticmethod
     def ComputeCostProfile(model):
@@ -186,189 +369,202 @@ class StereoDetectionHead(nn.Module):
         flops, numParams = profile(model, inputs=(input_feats,  bboxes, disp_prior, batch_img_metas), verbose=False)
         return flops, numParams
     
-    def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
-        """
-        Decode right bbox refine result [B, 100, 4, ker_h, ker_w] whose '4' dimension is (delta_x, delta_y, w_factor, h_factor) to
-        same shape whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r).
-        Args:
-            sbboxes_pred:  [B, 100, 6]
-            right_boxes_refine: [B, 100, 4, ker_h, ker_w]
+    # def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
+    #     """
+    #     Decode right bbox refine result [B, 100, 4, ker_h, ker_w] whose '4' dimension is (delta_x, delta_y, w_factor, h_factor) to
+    #     same shape whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r).
+    #     Args:
+    #         sbboxes_pred:  [B, 100, 6]
+    #         right_boxes_refine: [B, 100, 4, ker_h, ker_w]
         
-        Return:
-            decoded_right_bboxes: [B, 100, ker_h, ker_w, 4] whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r)
-        """
-        batch_size, num_samples = sbboxes_pred.shape[:2]
-        ker_h, ker_w = right_boxes_refine.shape[-2:]
-        sbboxes_pred = sbboxes_pred.view(-1, 6)
-        right_boxes_refine = right_boxes_refine.view(-1, 4, ker_h, ker_w)
+    #     Return:
+    #         decoded_right_bboxes: [B, 100, ker_h, ker_w, 4] whose '4' dimension is (tl_x_r, tl_y_r, br_x_r, br_y_r)
+    #     """
+    #     batch_size, num_samples = sbboxes_pred.shape[:2]
+    #     ker_h, ker_w = right_boxes_refine.shape[-2:]
+    #     sbboxes_pred = sbboxes_pred.view(-1, 6)
+    #     right_boxes_refine = right_boxes_refine.view(-1, 4, ker_h, ker_w)
         
-        strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
-        strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
-        strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
-        strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
-        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
-        grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
-        grid_x = grid_x.unsqueeze(1)
-        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
-        grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
-        grid_y = grid_y.unsqueeze(1)
+    #     strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
+    #     strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
+    #     strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+    #     strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+    #     grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
+    #     grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+    #     grid_x = grid_x.unsqueeze(1)
+    #     grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
+    #     grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+    #     grid_y = grid_y.unsqueeze(1)
 
-        strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
-        grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
-        xys = right_boxes_refine[:, :2, :, :] * strides + grids
-        whs = right_boxes_refine[:, 2:, :, :].exp() * strides
+    #     strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+    #     grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+    #     xys = right_boxes_refine[:, :2, :, :] * strides + grids
+    #     whs = right_boxes_refine[:, 2:, :, :].exp() * strides
 
-        tl_x = (xys[:, 0, :, :] - whs[:, 0, :, :] / 2).unsqueeze(-1)
-        tl_y = (xys[:, 1, :, :] - whs[:, 1, :, :] / 2).unsqueeze(-1)
-        br_x = (xys[:, 0, :, :] + whs[:, 0, :, :] / 2).unsqueeze(-1)
-        br_y = (xys[:, 1, :, :] + whs[:, 1, :, :] / 2).unsqueeze(-1)
+    #     tl_x = (xys[:, 0, :, :] - whs[:, 0, :, :] / 2).unsqueeze(-1)
+    #     tl_y = (xys[:, 1, :, :] - whs[:, 1, :, :] / 2).unsqueeze(-1)
+    #     br_x = (xys[:, 0, :, :] + whs[:, 0, :, :] / 2).unsqueeze(-1)
+    #     br_y = (xys[:, 1, :, :] + whs[:, 1, :, :] / 2).unsqueeze(-1)
 
-        decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
-        return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
+    #     decoded_right_bboxes = torch.cat([tl_x, tl_y, br_x, br_y], dim=-1)
+    #     return decoded_right_bboxes.view(batch_size, num_samples, ker_h * ker_w, 4)
     
-    def _right_keypts_decode(self, sbboxes_pred: Tensor, right_keypts_pred: Tensor) -> Tensor:
-        """
-        Decode right keypts prediction [B, 100, 3*num_keypts, ker_h, ker_w] whose '6' dimension is (delta_keypt0_x, delta_keypt0_y, visibility, delta_keypt1_x, delta_keypt1_y, visibility) to same shape whose '6'
-        dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
-        Args:
-            sbboxes_pred: [B, 100, 6]
-            right_keypts_pred: [B, 100, 3*num_keypts, ker_h, ker_w]
+    # def _right_keypts_decode(self, sbboxes_pred: Tensor, right_keypts_pred: Tensor) -> Tensor:
+    #     """
+    #     Decode right keypts prediction [B, 100, 3*num_keypts, ker_h, ker_w] whose '6' dimension is (delta_keypt0_x, delta_keypt0_y, visibility, delta_keypt1_x, delta_keypt1_y, visibility) to same shape whose '6'
+    #     dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility).
+    #     Args:
+    #         sbboxes_pred: [B, 100, 6]
+    #         right_keypts_pred: [B, 100, 3*num_keypts, ker_h, ker_w]
 
-        Return:
-            decoded_right_keypts: [B, 100, ker_h, ker_w, 3*num_keypts] whose '3*num_keypts' dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility, ...).
-        """
-        max_num_keypoints = self._config["max_num_keypoints"]
+    #     Return:
+    #         decoded_right_keypts: [B, 100, ker_h, ker_w, 3*num_keypts] whose '3*num_keypts' dimension is (keypt0_x, keypt0_y, visibility, keypt1_x, keypt1_y, visibility, ...).
+    #     """
+    #     max_num_keypoints = self._config["max_num_keypoints"]
 
-        # ----------------- this part is same as _right_bbox_decode. TODO: reuse this part more -----------------
-        batch_size, num_samples = sbboxes_pred.shape[:2]
-        ker_h, ker_w = right_keypts_pred.shape[-2:]
-        sbboxes_pred = sbboxes_pred.view(-1, 6)
-        right_keypts_pred = right_keypts_pred.view(-1, 3*max_num_keypoints, ker_h, ker_w)
+    #     # ----------------- this part is same as _right_bbox_decode. TODO: reuse this part more -----------------
+    #     batch_size, num_samples = sbboxes_pred.shape[:2]
+    #     ker_h, ker_w = right_keypts_pred.shape[-2:]
+    #     sbboxes_pred = sbboxes_pred.view(-1, 6)
+    #     right_keypts_pred = right_keypts_pred.view(-1, 3*max_num_keypoints, ker_h, ker_w)
 
-        strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
-        strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
-        strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
-        strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
-        grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
-        grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
-        grid_x = grid_x.unsqueeze(1)
-        grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
-        grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
-        grid_y = grid_y.unsqueeze(1)
+    #     strides_x = (sbboxes_pred[:, 5] - sbboxes_pred[:, 4]) / ker_w
+    #     strides_y = (sbboxes_pred[:, 3] - sbboxes_pred[:, 1]) / ker_h
+    #     strides_x = strides_x.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+    #     strides_y = strides_y.view(-1, 1, 1).expand(-1, ker_h, ker_w).unsqueeze(1)
+    #     grid_x = torch.arange(0, ker_w, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, 1, -1).expand(batch_size * num_samples, ker_h, -1) * strides_x.squeeze(1)
+    #     grid_x += sbboxes_pred[:, 4].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+    #     grid_x = grid_x.unsqueeze(1)
+    #     grid_y = torch.arange(0, ker_h, device=sbboxes_pred.device, dtype=sbboxes_pred.dtype).view(1, -1, 1).expand(batch_size * num_samples, -1, ker_w) * strides_y.squeeze(1)
+    #     grid_y += sbboxes_pred[:, 1].clone().view(-1, 1, 1).expand(-1, ker_h, ker_w)
+    #     grid_y = grid_y.unsqueeze(1)
 
-        strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
-        grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
-        # ----------------- this part is same as _right_bbox_decode -----------------
+    #     strides = torch.cat([strides_x, strides_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+    #     grids = torch.cat([grid_x, grid_y], dim=1)  # [B*100, 2, ker_h, ker_w]
+    #     # ----------------- this part is same as _right_bbox_decode -----------------
 
-        keypts_list = []
-        for iKeypt in range(max_num_keypoints):
-            keypt_xys = right_keypts_pred[:, (3*iKeypt):(2+3*iKeypt), :, :] * strides + grids
-            keypts_list.append(keypt_xys)
-            keypts_list.append(right_keypts_pred[:, 2+3*iKeypt, :, :].unsqueeze(1))  # visibility
-        decoded_right_keypts = torch.cat(keypts_list, dim=1).permute(0, 2, 3, 1)
-        return decoded_right_keypts.view(batch_size, num_samples, ker_h * ker_w, 3 * max_num_keypoints)
+    #     keypts_list = []
+    #     for iKeypt in range(max_num_keypoints):
+    #         keypt_xys = right_keypts_pred[:, (3*iKeypt):(2+3*iKeypt), :, :] * strides + grids
+    #         keypts_list.append(keypt_xys)
+    #         keypts_list.append(right_keypts_pred[:, 2+3*iKeypt, :, :].unsqueeze(1))  # visibility
+    #     decoded_right_keypts = torch.cat(keypts_list, dim=1).permute(0, 2, 3, 1)
+    #     return decoded_right_keypts.view(batch_size, num_samples, ker_h * ker_w, 3 * max_num_keypoints)
+
+    # def extract_pyramid_featuremaps(self, input_feat: Tensor) -> List[Tensor]:
+    #     """
+    #     Extract feature maps from backbone network.
+    #     Args:
+    #         input_feat: shape [B, 10, h, w]
+        
+    #     Returns:
+    #         pyramid_feats: [[B,128, h/4, w/4], [B,128, h/8, w/8], [B,128, h/16, w/16]]
+    #     """
+    #     pyramid_feats = []
+    #     pyramid_feats.append(self.backbone_net(input_feat))
+    #     pyramid_feats.append(self.downsample_layer(pyramid_feats[-1]))
+    #     pyramid_feats.append(self.downsample_layer(pyramid_feats[-1]))
+    #     return pyramid_feats
 
     def predict(
         self,
-        right_feat: Tensor,
+        right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
-        bbox_expand_factor: float,
-        decode_keypts: bool
+        bbox_expand_anchor_ticks: float,
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
-            right_feat: multi level features from left. max shape is [B, 3, h/8, w/8]
+            right_event_voxel: shape is [B, 10, h, w]
             bboxes_pred: list of B tensors of shape [?, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
             disp_prior: [B, h, w] shape.
-            bbox_expand_factor: ratio to enlarge bbox due to inaccurate disp prior.
-            decode_keypts: whether to decode the keypts prediction in the end.
+            bbox_expand_anchor_ticks: from 0.5 to 2.0, use multiple ticks to resize the bboxes horizontally and increase hypotheses.
 
         Returns:
             sbboxes_pred: shape [B, N, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
             refined_right_bboxes: shape [B, N, ker_h * ker_w, 4]. Corresponding refined right bboxes.
             right_scores_refine: shape [B, N, ker_h * ker_w, 1]. Corresponding scores.
         """
-        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts = [], [], [], [], []
+        list_sbboxes_priors, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts = [], [], [], []
+        
+        right_feats = self.backbone(right_event_voxel)
+        right_feats = self.neck(right_feats)
         for indexInBatch, bboxes_pred in enumerate(left_bboxes):
+            # starttime = time.time()
             if bboxes_pred.shape[0] == 0:
                 # No detections in left
-                list_sbboxes_pred.append(None)
+                list_sbboxes_priors.append(None)
                 list_refined_right_bboxes.append(None)
-                list_right_scores_refine.append(None)
+                list_refined_right_scores.append(None)
                 list_predicted_right_keypts.append(None)
-                list_right_scores_keypts.append(None)
                 continue
-            starttime = time.time()
             bboxes_pred = torch.unsqueeze(bboxes_pred, dim=0)
 
             # enlarge bboxes
             _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
-            dwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) * (bbox_expand_factor - 1.)
-            # dhboxes = (_bboxes_pred[..., 3] - _bboxes_pred[..., 1]) * (bbox_expand_factor - 1.)
-            _bboxes_pred[..., 0] -= dwboxes / 2  # Note: only need to enlarge x direction, because we assume for stereo y is aligned.
-            _bboxes_pred[..., 2] += dwboxes / 2
-            # _bboxes_pred[..., 1] -= dhboxes / 2
-            # _bboxes_pred[..., 3] += dhboxes / 2
+            variation_size = len(bbox_expand_anchor_ticks)
+            variation_srclist = torch.tensor(bbox_expand_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
+            col1 = -1 * variation_srclist.repeat(variation_size)
+            col2 = variation_srclist.repeat_interleave(variation_size)
+            variations = torch.stack([col1, col2], dim=1)
+            
+            hdwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) / 2.0
+            cwbboxes = (_bboxes_pred[..., 2] + _bboxes_pred[..., 0]) / 2.0
+            hdwboxes = hdwboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
+            cwbboxes = cwbboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
+            wbboxes = cwbboxes + variations * hdwboxes
 
+            _bboxes_pred = _bboxes_pred.unsqueeze(2).repeat(1, 1, variation_size**2, 1)  # [1, N, variation_size, 4]
+            right_priors = _bboxes_pred.clone().view(1, -1, 4)  # [1, N * variation_size, 4]
+            left_priors = right_priors.clone()
+
+            _bboxes_pred[:, :, :, [0, 2]] = wbboxes[:, :, :, [0,1]]
+            _bboxes_pred = _bboxes_pred.view(1, -1, 4)
+            
             num_detections = bboxes_pred.shape[1]
-            batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).expand(-1, num_detections).flatten().unsqueeze(-1).to(_bboxes_pred.device)
-            # print("----- time sub sub1: {}".format(time.time() - starttime))
+            batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).repeat(1, num_detections * variation_size**2).flatten().unsqueeze(-1).to(_bboxes_pred.device)
 
-            starttime = time.time()
             # extract right bbox roi feature
-            xindi = ((_bboxes_pred[..., 0] + _bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
-            yindi = ((_bboxes_pred[..., 1] + _bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1).squeeze()
-            bbox_disps = disp_prior[indexInBatch][yindi, xindi].unsqueeze(0)
-            _bboxes_pred[..., 0] -= bbox_disps  # warp to more left side.
-            _bboxes_pred[..., 2] -= bbox_disps
+            xindi = ((bboxes_pred[..., 0] + bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
+            yindi = ((bboxes_pred[..., 1] + bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1).squeeze()
+            bbox_disps = disp_prior[indexInBatch][yindi, xindi].unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, -1)
+            _bboxes_pred[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
+            right_priors[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
             rois_right = _bboxes_pred.reshape(-1, 4)
             rois_right = torch.cat((batch_number, rois_right), dim=1)
 
-            right_roi_feats = self.bbox_roi_extractor(right_feat, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
+            right_roi_feats = self.bbox_roi_extractor(right_feats, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
+            # print("stereoNet time cost (until roi extract): {}".format(time.time() - starttime))
+            # starttime = time.time()
 
-            right_boxes_refine = self.right_bbox_refiner(right_roi_feats)  # Note: shape [B*100, 4, 7, 7]
-            right_scores_refine = self.right_bbox_refiner_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
-            logits, ker_h, ker_w = right_boxes_refine.shape[-3:]
-            # print("----- time sub sub2: {}".format(time.time() - starttime))
+            feats_hidden = right_roi_feats.flatten(1)
+            for fc in self.shared_fcs:
+                feats_hidden = self.relu(fc(feats_hidden))
+            cls_score = self.fc_cls(feats_hidden)
+            right_bboxes_refine = self.fc_reg(feats_hidden)
+            right_keypts_pred = self.fc_keypts(feats_hidden)
 
             # starttime = time.time()
-            if self.logger is not None:
-                for indexInstance in range(right_roi_feats.shape[0]):
-                    roi_feat_sample = torch.mean(right_roi_feats[indexInstance, :, :, :], dim=0).detach().cpu()
-                    roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
-                    roi_feat_sample /= roi_feat_sample.max()
-                    self.logger.add_image("roi_feat_sample{}".format(indexInstance), roi_feat_sample)
-            # print("----- time sub sub2.5: {}".format(time.time() - starttime))
+            # if self.logger is not None:
+            #     for indexInstance in range(right_roi_feats.shape[0]):
+            #         roi_feat_sample = torch.mean(right_roi_feats[indexInstance, :, :, :], dim=0).detach().cpu()
+            #         roi_feat_sample = roi_feat_sample - roi_feat_sample.min()
+            #         roi_feat_sample /= roi_feat_sample.max()
+            #         self.logger.add_image("roi_feat_sample{}".format(indexInstance), roi_feat_sample)
 
-            starttime = time.time()
-            batch_size = 1
-            x_tl_r = _bboxes_pred[..., 0].view(batch_size, -1).unsqueeze(-1)
-            x_br_r = _bboxes_pred[..., 2].view(batch_size, -1).unsqueeze(-1)
-            sbboxes_pred = torch.cat([bboxes_pred, x_tl_r, x_br_r], dim=-1).contiguous()
-            right_boxes_refine = right_boxes_refine.view(batch_size, -1, logits, ker_h, ker_w)
-            refined_right_bboxes = self._right_bbox_decode(sbboxes_pred, right_boxes_refine)
-            # print("----- time sub sub3: {}".format(time.time() - starttime))
+            sbboxes_priors = torch.cat([left_priors, right_priors[:, :, [0, 2]]], dim=-1).view(1, num_detections, variation_size**2, 6)
+            list_sbboxes_priors.append(sbboxes_priors)  # (1, num_detections, k*k, 6)
+            list_refined_right_bboxes.append(right_bboxes_refine)
+            list_refined_right_scores.append(cls_score)
+            list_predicted_right_keypts.append(right_keypts_pred)
+            # print("stereoNet time cost (one left dets proposals pass): {}".format(time.time() - starttime))
 
-            # right keypts prediction
-            right_keypts_pred = self.right_keypts_predictor(right_roi_feats)  # Note: shape [B*100, 6, 7, 7]
-            right_scores_pred = self.right_keypts_predictor_scorer(right_roi_feats)  # Note: shape [B*100, 1, 7, 7]
-            logits, ker_h, ker_w = right_keypts_pred.shape[-3:]
-            right_keypts_pred = right_keypts_pred.view(1, -1, logits, ker_h, ker_w)
-            predicted_right_keypts = self._right_keypts_decode(sbboxes_pred, right_keypts_pred)  # Note: shape [B, 100, 49, 6]
-
-            list_sbboxes_pred.append(sbboxes_pred)
-            list_refined_right_bboxes.append(refined_right_bboxes)
-            list_right_scores_refine.append(right_scores_refine.view(1, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2))
-            list_predicted_right_keypts.append(predicted_right_keypts)
-            list_right_scores_keypts.append(right_scores_pred.view(1, -1, 1, ker_h * ker_w).permute(0, 1, 3, 2))
-
-        return list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts
+        return list_sbboxes_priors, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts
 
     def forward(
         self,
-        right_feat: List[Tensor],
+        right_event_voxel: List[Tensor],
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
@@ -378,13 +574,10 @@ class StereoDetectionHead(nn.Module):
         """
         Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
         """
-        decode_keypts = False
-        if "decode_keypts" in kwargs:
-            decode_keypts = kwargs["decode_keypts"]
         if batch_img_metas is None:
             batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
 
-        preds = self.predict(right_feat, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_factor"], decode_keypts)
+        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_anchor_ticks"])
         losses = None
         artifacts = None
         if labels is not None and not self.is_freeze:
@@ -410,139 +603,202 @@ class StereoDetectionHead(nn.Module):
                 stereo_objdet_targets: dict
                     "bboxes": (N_allbatch, 6),
                     "cls":  (N_allbatch,),
-                    "keypoints_right": (N_allbatch, 2, 3),
+                    "cls_leftdet": (N_allbatch,)
+                    "keypoints": (N_allbatch, num_keypts*3), this is gt.
+                    "keypoints_right": (N_allbatch, num_keypts*3), this is gt.
                     "batch_idx": (N_allbatch,). Index in this batch for this instance.
         """
-        list_sbboxes_pred, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts, list_right_scores_keypts = preds  # Note: number of positive in each can be different after nms.
+        list_sbboxes_priors, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts = preds  # Note: number of positive in each can be different after nms.
         left_fg_mask, left_target_gt_idx, left_nms_topk_mask, stereo_objdet_targets, batch_img_metas = labels["left_fg_mask"], labels["left_target_gt_idx"], labels["left_nms_topk_mask"], labels["stereo_objdet_targets"], labels["batch_img_metas"]
 
         loss_dict = {}
-        num_batch = len(list_sbboxes_pred)
+        num_batch = len(list_sbboxes_priors)
         list_sbboxes_pred_refined = []
-        bbox_targets = []
-        pos_masks = []
-        list_right_selected_keypts = []
+        pos_gt_nobkg_masks = []
+        list_right_keypts_pred = []
         # right bboxes related loss
         for indexInBatch in range(num_batch):
-            if list_sbboxes_pred[indexInBatch] is None:
-                # No detections in left
+            # starttime = time.time()
+            mask_this_batch = stereo_objdet_targets["batch_idx"] == indexInBatch
+            pos_gt_mask_one = left_fg_mask[indexInBatch]
+            pos_gt_mask_one = pos_gt_mask_one[left_nms_topk_mask[indexInBatch]]
+            
+            if list_sbboxes_priors[indexInBatch] is None or pos_gt_mask_one.sum() == 0:
+                # No detections from left
                 list_sbboxes_pred_refined.append(None)
-                pos_masks.append(None)
+                pos_gt_nobkg_masks.append(None)
+                list_right_keypts_pred.append(None)
                 num_batch -= 1
                 print("{}-th image in batch has no detections, skip.".format(indexInBatch))
                 continue
-            bbox_targetset_one = stereo_objdet_targets["bboxes"][stereo_objdet_targets["batch_idx"] == indexInBatch]
-            bbox_targets_one = bbox_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]]
-            pos_masks_one = left_fg_mask[indexInBatch][left_nms_topk_mask[indexInBatch]]
+
+            bbox_targetset_one = stereo_objdet_targets["bboxes"][mask_this_batch]
+            idx_gt2left = left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]][pos_gt_mask_one]
+            bbox_targets_one = bbox_targetset_one[idx_gt2left]
+            # Note: assume left_fg_mask has same number as GT labels. pos_gt_mask_one tells which detections from predict() have avialable GT label.
+            assert pos_gt_mask_one.sum() == bbox_targets_one.shape[0], "number of positive detections (priors) from predict() not equal to number of gt bboxes. Biprojection not valid. can not continue loss computation."
 
             rbboxes_targets = torch.concat([
                 bbox_targets_one[:, 4].unsqueeze(-1),
                 bbox_targets_one[:, 1].unsqueeze(-1),
                 bbox_targets_one[:, 5].unsqueeze(-1),
                 bbox_targets_one[:, 3].unsqueeze(-1)
-            ], dim=1)[pos_masks_one]
-            right_bboxes = list_refined_right_bboxes[indexInBatch]
-            right_scores = list_right_scores_refine[indexInBatch]
-            bboxes = list_sbboxes_pred[indexInBatch]  # shape [1, 100, 6]. (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format bbox, all in global scale.
+            ], dim=1)  # (num_detections, 4)
+            rcls_targets = stereo_objdet_targets['cls'][mask_this_batch]
+            # align gt with left detections' order
+            rcls_targets = rcls_targets[idx_gt2left]  # (num_detections,)
 
-            batch_size, num_priors, num_grids = right_bboxes.shape[:3]
-            rbboxes_refined = right_bboxes.view(-1, num_grids, 4)[pos_masks_one]
-            num_positive = rbboxes_refined.shape[0]
-            ious, indices_best_right = self.batch_iou_calculator_simple(rbboxes_refined, rbboxes_targets.unsqueeze(1))
+            sbboxes_priors = list_sbboxes_priors[indexInBatch].squeeze(0)  # shape [1, num_detections, k*k, 6]. (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format bbox, all in global scale.
+            variation_size_squared = sbboxes_priors.shape[1]
+            sbboxes_priors = sbboxes_priors[pos_gt_mask_one]
+            num_detections = sbboxes_priors.shape[0]
+            right_priors = sbboxes_priors[..., [4, 1, 5, 3]]  # (num_detections, k*k, 4)
+            right_bboxes = list_refined_right_bboxes[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
+            right_bboxes = right_bboxes[pos_gt_mask_one]
+            right_scores = list_right_scores_refine[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
+            right_scores = right_scores[pos_gt_mask_one]
+            right_keypts = list_predicted_right_keypts[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
+            right_keypts = right_keypts[pos_gt_mask_one]
+            # print("stereoNet time cost (loss data uncollapse): {}".format(time.time() - starttime))
+            # starttime = time.time()
+            
+            try:
+                rbboxes_refined = right_bboxes.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
+            except:
+                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            # advanced indexing to select bboxes for correct class.
+            rbboxes_refined_selected = rbboxes_refined[
+                torch.arange(num_detections).view(-1, 1).expand(-1, variation_size_squared),
+                torch.arange(variation_size_squared).unsqueeze(0),
+                rcls_targets.view(num_detections, 1).expand(-1, variation_size_squared)
+            ]  # rbboxes_refined_selected shape is (num_detections, variation_size_squared, 4)
 
-            rselect_mask, rbboxes_refined_selected, rbboxes_targets_selected = self.batch_assigner(
-                rbboxes_refined,
+            # decoding pred right bboxes
+            rbboxes_refined_decoded = self.bbox_coder.decode(right_priors.view(-1, 4), rbboxes_refined_selected.view(-1, 4)).view(num_detections, -1, 4)
+            
+            ious, indices_best_right = self.batch_iou_calculator_simple(rbboxes_refined_decoded, rbboxes_targets.unsqueeze(1))
+            pos_mask, rbboxes_refined_selected, rbboxes_gt_selected = self.batch_sampler(
+                rbboxes_refined_selected,
                 ious,
                 rbboxes_targets,
                 self._config['r_iou_threshold'],
                 self._config['candidates_k']
             )
-            num_pos_timesk = torch.sum(rselect_mask.to(torch.float))
+            num_pos_timesk = torch.sum(pos_mask.to(torch.float))
             num_total_samples_timesk = max(num_pos_timesk, 1.0)
-            
-            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected) / num_total_samples_timesk
+
+            # Note: encoding target and pred right bboxes before computing loss. See mmdet, bbox_head.py::BBoxHead::loss()
+            # priors, gts -> encoded priors
+            right_priors_selected = right_priors[:, :self._config['candidates_k']].clone()
+            right_priors_selected[torch.sum(rbboxes_gt_selected, dim=-1) == 0.00] *= 0.0  # for zero columns in gt, make the priors zero as well.
+            rbboxes_targets_selected_encoded = self.bbox_coder.encode(right_priors_selected, rbboxes_gt_selected)
+            rbboxes_targets_selected_encoded[torch.isnan(rbboxes_targets_selected_encoded)] = 0.0
+            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected_encoded) / num_total_samples_timesk
             if "loss_rbbox" not in loss_dict:
                 loss_dict["loss_rbbox"] = loss_rbbox_one
             else:
                 loss_dict["loss_rbbox"] += loss_rbbox_one
+            # print("stereoNet time cost (loss rbbox): {}".format(time.time() - starttime))
+            # starttime = time.time()
 
             # right bboxes scores
-            rbboxes_scores = right_scores.view(-1, num_grids, 1)[pos_masks_one].sigmoid()
-            ## dynamic targets
-            rbboxes_scores_targets = torch.zeros_like(rbboxes_scores)
-            rbboxes_scores_targets[rselect_mask] = 1
-            loss_rscore_one = self.loss_rscore(rbboxes_scores, rbboxes_scores_targets.view(num_positive, -1, 1)) / num_total_samples_timesk
+            rbboxes_scores = right_scores.view(num_detections, variation_size_squared, -1)
+            # negative samples (iou < thres) are assigned to the background class. See mmdet, bbox_head.py::BBoxHead::_get_targets_single()
+            rbboxes_scores_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared)
+            rbboxes_scores_targets[~pos_mask] = self._config['num_classes']
+            label_weights = torch.ones_like(rbboxes_scores_targets)
+            loss_rscore_one = self.loss_rcls(
+                rbboxes_scores.view(num_detections * variation_size_squared, -1),
+                rbboxes_scores_targets.view(-1),
+                label_weights.view(-1),
+                avg_factor=max(torch.sum(label_weights > 0).float().item(), 1.)
+            )
             if "loss_rscore" not in loss_dict:
                 loss_dict["loss_rscore"] = loss_rscore_one
             else:
                 loss_dict["loss_rscore"] += loss_rscore_one
-
-            # substitute right bboxes in sbboxes for visualization.
-            with torch.no_grad():
-                bboxes = bboxes.view(-1, 6)
-                selected_sbboxes = bboxes[pos_masks_one]
-                indices_highest_score = torch.argmax(rbboxes_scores.squeeze(-1), dim=1)
-                rbboxes_highest_score = torch.gather(rbboxes_refined, 1, indices_highest_score.view(num_positive, 1, 1).expand(-1, -1, 4)).squeeze(1)            
-                selected_sbboxes[:, 4] = rbboxes_highest_score[:, 0]
-                selected_sbboxes[:, 5] = rbboxes_highest_score[:, 2]
-                bboxes[pos_masks_one] = selected_sbboxes
-                bboxes = bboxes.view(num_priors, 6)
-                list_sbboxes_pred_refined.append(bboxes)
-                pos_masks.append(pos_masks_one)
+            # print("stereoNet time cost (loss rscore): {}".format(time.time() - starttime))
+            # starttime = time.time()
 
             # loss for right keypts
-            keypts_targetset_one = stereo_objdet_targets["keypoints_right"][stereo_objdet_targets["batch_idx"] == indexInBatch]
-            keypts_targets_one = keypts_targetset_one[left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]]].view(num_priors, -1)[pos_masks_one]
-            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[pos_masks_one]
-            keypts_distances, indices_best_right_keypts = self.batch_keypts_distance_calculator_simple(right_keypts, keypts_targets_one.unsqueeze(1))
+            keypts_targetset_one = stereo_objdet_targets["keypoints_right"][mask_this_batch]
+            # align gt order with left detections' order
+            keypts_targets_one = keypts_targetset_one[idx_gt2left].view(num_detections, -1)
+            # encode gt keypoints
+            keypts_targets_one_encoded = keypts_targets_one.clone()
+            for indexKeypt in range(self._config["max_num_keypoints"]):
+                keypts_targets_one_encoded[:, (3 * indexKeypt):(2 + 3 * indexKeypt)] = EncodeKeypts(
+                    right_priors[:, 0, :],
+                    keypts_targets_one_encoded[:, (3 * indexKeypt):(2 + 3 * indexKeypt)],
+                )
+            # select keypooints by predicted class labels
+            right_keypts_pred = right_keypts.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
+            right_keypts_selected = right_keypts_pred[
+                torch.arange(num_detections).view(-1, 1).expand(-1, variation_size_squared),
+                torch.arange(variation_size_squared).unsqueeze(0),
+                rcls_targets.view(num_detections, 1).expand(-1, variation_size_squared)
+            ]
 
-            rkeypts_select_mask, keypts_preds_selected, keypts_targets_selected = self.batch_assigner_keypts(
-                right_keypts,
-                keypts_distances,
-                keypts_targets_one,
-                self._config["keypts_distance_threshold"],  # distance_threshold
-                self._config["candidates_k"]
-            )
-            print("num_pos_timesk: {}, num_pos_timesk_keypts: {}".format(num_pos_timesk, torch.sum(rkeypts_select_mask.to(torch.float))))
-            num_pos_timesk = torch.sum(rkeypts_select_mask.to(torch.float))
-            num_total_samples_timesk = max(num_pos_timesk, 1.0)
-            kpt_mask = keypts_targets_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2] != 0
-            rbboxes_roi = bboxes[:, [4, 1, 5, 3]].unsqueeze(1).repeat(1, self._config["candidates_k"], 1)[pos_masks_one].view(-1, 4)
-            area = xyxy2xywh(rbboxes_roi)[:, 2:].prod(1, keepdim=True)
+            list_right_keypts_selected_pos = []
+            list_keypts_targets_selected_encoded = []
+            for indexDet in range(num_detections):
+                right_keypts_selected_one = right_keypts_selected[indexDet][pos_mask[indexDet]]
+                list_right_keypts_selected_pos.append(
+                    right_keypts_selected_one
+                )
+                list_keypts_targets_selected_encoded.append(
+                    keypts_targets_one_encoded[indexDet].unsqueeze(0).repeat(right_keypts_selected_one.shape[0], 1)
+                )
+            right_keypts_selected_pos = torch.cat(list_right_keypts_selected_pos, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
+            keypts_targets_selected_encoded = torch.cat(list_keypts_targets_selected_encoded, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
+
+            kpt_mask = keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3)[..., 2] > 0
+            area = xyxy2xywh(right_priors[pos_mask])[:, 2:].prod(1, keepdim=True)
             loss_rkeypts = self.loss_keypoint(
-                keypts_preds_selected.view(-1, self._config["max_num_keypoints"], 3),
-                keypts_targets_selected.view(-1, self._config["max_num_keypoints"], 3),
+                right_keypts_selected_pos,
+                keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3),
                 kpt_mask,
                 area
             ) / num_total_samples_timesk
-            loss_rkeypts_obj = self.loss_bce_pose(keypts_preds_selected.view(-1, self._config["max_num_keypoints"], 3)[..., 2], kpt_mask.float()) / num_total_samples_timesk
-            # right keypts scores
-            rkeypts_scores = list_right_scores_keypts[indexInBatch].view(-1, num_grids, 1)[pos_masks_one].sigmoid()
-            rkeypts_scores_targets = torch.zeros_like(rkeypts_scores)
-            rkeypts_scores_targets[rkeypts_select_mask] = 1
-            loss_rkeypts_score_one = self.loss_rscore(rkeypts_scores, rkeypts_scores_targets) / num_total_samples_timesk
+            loss_rkeypts_obj = self.loss_bce_pose(
+                right_keypts_selected_pos[..., 2],
+                kpt_mask.float()
+            ) / num_total_samples_timesk
+
             if "loss_rkeypts" not in loss_dict:
                 loss_dict["loss_rkeypts"] = loss_rkeypts
                 loss_dict["loss_rkeypts_obj"] = loss_rkeypts_obj
-                loss_dict["loss_rkeypts_score"] = loss_rkeypts_score_one
             else:
                 loss_dict["loss_rkeypts"] += loss_rkeypts
                 loss_dict["loss_rkeypts_obj"] += loss_rkeypts_obj
-                loss_dict["loss_rkeypts_score"] += loss_rkeypts_score_one
+            # print("stereoNet time cost (loss rkeypts & bce_pose): {}".format(time.time() - starttime))
+            # starttime = time.time()
 
-            # select best keypts for visualization
-            with torch.no_grad():
-                batchIndices = torch.arange(right_keypts.size(0))
-                right_keypts_selected_best = right_keypts[batchIndices, torch.argmax(rkeypts_scores, dim=1).squeeze(-1)]
-                list_right_selected_keypts.append(right_keypts_selected_best.view(-1, self._config["max_num_keypoints"], 3))
+            # select best right bboxes and keypts for visualization.
+            (
+                mask_nonbackground,
+                refined_sbboxes_nobkg,
+                refined_right_scored_pred,
+                right_keypts_pred_nobkg
+            ) = self.extract_inference_results(
+                sbboxes_priors,
+                rbboxes_refined,
+                rbboxes_scores,
+                right_keypts_pred
+            )
+            list_sbboxes_pred_refined.append(refined_sbboxes_nobkg)
+            pos_gt_nobkg_masks.append(mask_nonbackground)
+            list_right_keypts_pred.append(right_keypts_pred_nobkg)
+            # print("stereoNet time cost (rkeypts pred): {}".format(time.time() - starttime))
 
-        loss_dict["loss_rbbox"] /= num_batch
+        loss_dict["loss_rbbox"] /= num_batch / 1000
         loss_dict["loss_rscore"] /= num_batch
-        loss_dict["loss_rkeypts"] /= num_batch / 100  # Note: scale it to a reasonable magnitude
+        loss_dict["loss_rkeypts"] /= num_batch / 100000  # Note: scale it to a reasonable magnitude
         loss_dict["loss_rkeypts_obj"] /= num_batch
-        loss_dict["loss_rkeypts_score"] /= num_batch
+        if torch.isnan(loss_dict["loss_rbbox"]) or torch.isnan(loss_dict["loss_rscore"]) or torch.isnan(loss_dict["loss_rkeypts"]) or torch.isnan(loss_dict["loss_rkeypts_obj"]):
+            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
-        return loss_dict, list_sbboxes_pred_refined, pos_masks, list_right_selected_keypts
+        return loss_dict, list_sbboxes_pred_refined, pos_gt_nobkg_masks, list_right_keypts_pred
 
     @staticmethod
     def kpts_decode(anchor_points, pred_kpts):
@@ -673,6 +929,79 @@ class StereoDetectionHead(nn.Module):
         return loss_dict
     
     @torch.no_grad()
+    def extract_inference_results(
+        self,
+        sbboxes_priors: Tensor,
+        refined_right_bboxes: Tensor,
+        refined_right_scores: Tensor,
+        right_keypts_pred: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """
+        Extract inference results from the model's predictions.
+        Args:
+            sbboxes_priors: (num_detections, variation_size_squared, 6) shape, containing the right priors from preivous network.
+            refined_right_bboxes: (num_detections*variation_size_squared, num_classes, 4) shape.
+            refined_right_scores: (num_detections*variation_size_squared, num_classes+1) shape.
+            right_keypts_pred: (num_detections*variation_size_squared, num_classes, num_keypts*3) shape.
+        
+        Returns:
+            mask_nonbackground: (num_detections,) shape.
+            refined_sbboxes: (<num_detections>, 6) shape, <num_detections> == mask_nonbackground.sum().
+            refined_right_scores_pred: (<num_detections>, 1) shape.
+            right_keypts_pred: (<num_detections>, num_keypts*3) shape.
+        """
+        num_detections, variation_size_squared = sbboxes_priors.shape[:2]
+        num_classes = refined_right_bboxes.shape[-2]
+        sbboxes_priors = sbboxes_priors.view(num_detections, variation_size_squared, 6)
+
+        refined_right_bboxes = refined_right_bboxes.view(num_detections, variation_size_squared, num_classes, 4)
+        refined_right_scores = refined_right_scores.view(num_detections, variation_size_squared, (num_classes + 1))
+        right_keypts_pred = right_keypts_pred.view(num_detections, variation_size_squared, num_classes, 3)
+
+        best_scores_of_classes, best_class_labels = torch.max(F.softmax(refined_right_scores, dim=-1), dim=-1)
+        indices_highest_score = torch.argmax(best_scores_of_classes, dim=1)
+        batchIndices = torch.arange(num_detections)
+        class_labels_pred = best_class_labels[batchIndices, indices_highest_score]
+        mask_nonbackground = class_labels_pred != num_classes
+        if mask_nonbackground.sum() == 0:
+            return mask_nonbackground, None, None, None
+        else:
+            sbboxes_priors_nobkg = sbboxes_priors[mask_nonbackground]
+            refined_sbboxes_nobkg = sbboxes_priors_nobkg[:, 0, :].view(-1, 6).clone()
+            refined_right_bboxes_nobkg = refined_right_bboxes[mask_nonbackground]
+            right_keypts_pred_nobkg = right_keypts_pred[mask_nonbackground]
+            class_labels_pred_nobkg = class_labels_pred[mask_nonbackground]
+            # select the highest score as confidence score
+            refined_right_scores_pred = best_scores_of_classes[torch.arange(num_detections), indices_highest_score]
+            indices_highest_score_nobkg = indices_highest_score[mask_nonbackground]
+            refined_right_scores_pred = refined_right_scores_pred[mask_nonbackground]
+            # select data based on the class label
+            refined_right_bboxes_nobkg = refined_right_bboxes_nobkg[
+                torch.arange(mask_nonbackground.sum()).view(-1, 1).expand(-1, variation_size_squared),
+                torch.arange(variation_size_squared).unsqueeze(0),
+                class_labels_pred_nobkg.view(mask_nonbackground.sum(), 1).expand(-1, variation_size_squared)
+            ]
+            refined_right_bboxes_nobkg = refined_right_bboxes_nobkg[torch.arange(mask_nonbackground.sum()), indices_highest_score_nobkg]
+            right_priors_nobkg = sbboxes_priors_nobkg[..., [4, 1, 5, 3]]  # (num_detections, k*k, 4)
+            refined_right_bboxes_nobkg_decoded = self.bbox_coder.decode(right_priors_nobkg[:, 0, :], refined_right_bboxes_nobkg.view(-1, 4))
+            refined_sbboxes_nobkg[:, [4, 5]] = refined_right_bboxes_nobkg_decoded[:, [0, 2]]
+            refined_sbboxes_nobkg = refined_sbboxes_nobkg.view(mask_nonbackground.sum(), 6)
+            # select best keypoints
+            right_keypts_pred_nobkg = right_keypts_pred_nobkg[
+                torch.arange(mask_nonbackground.sum()).view(-1, 1).expand(-1, variation_size_squared),
+                torch.arange(variation_size_squared).unsqueeze(0),
+                class_labels_pred_nobkg.view(mask_nonbackground.sum(), 1).expand(-1, variation_size_squared)
+            ]
+            right_keypts_pred_nobkg = right_keypts_pred_nobkg[torch.arange(mask_nonbackground.sum()), indices_highest_score_nobkg]
+            right_keypts_pred_nobkg = right_keypts_pred_nobkg.clone()
+            for indexKeypt in range(self._config["max_num_keypoints"]):
+                right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)] = DecodeKeypts(
+                    right_priors_nobkg[:, 0, :],
+                    right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)],
+                )
+            return mask_nonbackground, refined_sbboxes_nobkg, refined_right_scores_pred, right_keypts_pred_nobkg.view(mask_nonbackground.sum(), -1, 3)
+
+    @torch.no_grad()
     def batch_keypts_distance_calculator_simple(self, keypts_preds: Tensor, keypts_ref: Tensor):
         """
         compute euclidian distances between each pair of keypoints and the only ref pair of keypoints.
@@ -699,16 +1028,15 @@ class StereoDetectionHead(nn.Module):
     @torch.no_grad()
     def batch_iou_calculator_simple(self, bboxes_preds: Tensor, bboxes_ref: Tensor):
         """
-        compute IoU between each pred at each batch and the only ref bbox at each batch.
+        compute IoU between each preds group and the corresponding ref bboxes.
         Args:
-            bboxes_preds: [B, num_grids, 4]. box format (tl_x, tl_y, br_x, br_y).
-            bboxes_ref: [B, 1, 4].
+            bboxes_preds: [N, num_grids, 4]. box format (tl_x, tl_y, br_x, br_y). N is the number of detection instances.
+            bboxes_ref: [N, 4].
 
         Returns: 
-            ious: [B,  num_grids]
-            indicies_best_right: [B]
+            ious: [N,  num_grids]
+            indicies_best_right: [N]
         """
-        assert bboxes_ref.shape[1] == 1, "bboxes_ref should have only one at each batch."
         num_grids = bboxes_preds.shape[1]
         bboxes_ref = bboxes_ref.expand(-1, num_grids, -1)
         intersectionBox_tl_x = torch.max(torch.stack((bboxes_preds[..., 0], bboxes_ref[..., 0]), dim=-1), dim=-1)[0]
@@ -723,43 +1051,43 @@ class StereoDetectionHead(nn.Module):
         ious = intersectionAreas / unionAreas
         return ious, torch.max(ious, dim=-1)[1]
 
-    def batch_assigner(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
+    def batch_sampler(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
         """
         for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
         If candidates within IoU_thres are less than candidates_k, 0 pad them.
+        Make sure at least one candidate for each gt.
 
         Args:
-            bboxes_preds: shape (B, N, 4)
-            iou_scores: shape (B, N, 1)
-            batch_gt_bboxes: shape (B, 4)
+            bboxes_preds: shape (N, num_grids, 4)
+            iou_scores: shape (N, num_grids, 1)
+            batch_gt_bboxes: shape (N, 4)
 
         Returns:
-            rselect_mask: shape (B, N), boolean mask.
-            bboxes_preds_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
-            bboxes_targets_selected: shape (B, k, 4). Note some of the k elements can be just 0s.
+            pos_mask: shape (N, num_grids), mask for positive samples.
+            bboxes_preds_selected: shape (N, k, 4). Note some of the k elements can be just 0s.
+            bboxes_gt_selected: shape (N, k, 4). Note some of the k elements can be just 0s.
         """
-        bboxes_targets_selected = batch_gt_bboxes.view(-1, 1, 4).repeat(1, candidates_k, 1)
-        batch_size, num_grids = bboxes_preds.shape[:2]
-
+        bboxes_gt_selected = batch_gt_bboxes.view(-1, 1, 4).repeat(1, candidates_k, 1)
+        num_detections, num_grids = bboxes_preds.shape[:2]
         with torch.no_grad():
             topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=1)
             valid_mask = topk_scores > iou_thres
-            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt; torch.topk sorted topk_scores and the first one is the best.
-            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (B, k)
+            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt; torch.topk sorted topk_scores and the first one is theoretically the best.
+            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (N, k)
         
-        pseudo_bboxes = torch.zeros(batch_size, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
+        pseudo_bboxes = torch.zeros(num_detections, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
         bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=1)
         bboxes_preds_selected = torch.gather(bboxes_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 4))
-        bboxes_targets_selected = bboxes_targets_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
+        bboxes_gt_selected = bboxes_gt_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
 
         # make sure at least one candidate for each gt
-        # candidates_mask[torch.arange(0, batch_size, device=candidates_mask.device), topk_indices[:, 0]] = True
-        candidates_mask = torch.zeros_like(iou_scores, dtype=torch.bool)  # build a new mask with only topk being True.
+        # candidates_mask[torch.arange(0, num_detections, device=candidates_mask.device), topk_indices[:, 0]] = True
+        pos_mask = torch.zeros_like(iou_scores, dtype=torch.bool)  # build a new mask with only topk being True.
         valid_mask = topk_indices < num_grids
-        for indexInBatch in range(batch_size):
-            candidates_mask[indexInBatch, topk_indices[indexInBatch][valid_mask[indexInBatch]]] = True
+        for indexInstance in range(num_detections):
+            pos_mask[indexInstance, topk_indices[indexInstance][valid_mask[indexInstance]]] = True
 
-        return candidates_mask, bboxes_preds_selected, bboxes_targets_selected
+        return pos_mask, bboxes_preds_selected, bboxes_gt_selected
     
     def batch_assigner_keypts(self, keypts_preds: Tensor, distances: Tensor, batch_gt_keypts: Tensor, distance_threshold: float, candidates_k: int):
         """

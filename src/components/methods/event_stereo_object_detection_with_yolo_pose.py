@@ -6,6 +6,7 @@ import time
 import torchvision
 from typing import Optional
 from torch import Tensor
+import torch.nn.functional as F
 
 from tqdm import tqdm
 
@@ -24,17 +25,18 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def ExtractRefinedInstance(refined_instances: Tensor, refined_scores: Tensor):
+def InvertBijection(forw_mapping: Tensor) -> Tensor:
     """
-    for each instance, find the highest scored one in ker_h * ker_w and select the corresponding one as the final.
     Args:
-        refined_instances: (B, NumInstance, ker_h * ker_w, ?).
-        refined_scores: (B, NumInstance, ker_h * ker_w, 1).
+        forw_mapping: (N,), e.g. [3, 0, 1, 2]
+    
+    Returns:
+        inv_mapping: (N,), e.g. [1, 2, 3, 0]
     """
-    logits_length = refined_instances.shape[-1]
-    highest_scores, indices_highest_score = torch.max(refined_scores.squeeze(-1), dim=-1)
-    refined_instances_selected = torch.gather(refined_instances, -2, indices_highest_score.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, logits_length)).squeeze(-2)
-    return highest_scores, refined_instances_selected
+    print("forw_mapping: {}".format(forw_mapping))
+    inv_mapping = torch.empty_like(forw_mapping)
+    inv_mapping[forw_mapping] = torch.arange(inv_mapping.shape[0], device=inv_mapping.device)
+    return inv_mapping
 
 
 def freeze_static_components(models: dict):
@@ -111,7 +113,12 @@ def _backward_and_optimize(
     return
 
 
-def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: bool, max_num_keypoints: int=1):
+def preprocess_batch(
+    batch_labels: dict,
+    batch_img_metas: dict,
+    is_stereo_bbox: bool,
+    max_num_keypoints: int = 1
+):
     """
     Prepare the batch_labels as the YoloPose required.
     """
@@ -134,7 +141,7 @@ def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: 
         keypoints_right = keypts_tensor.clone()
         keypoints_right[:, :, 0] = keypts_tensor[:, :, 0] - disparity.unsqueeze(-1).expand(-1, max_num_keypoints)
         # Note: do not normalize for keypoints_right
-    keypts_tensor[:, :, 0] /= batch_img_metas["w"]
+    keypts_tensor[:, :, 0] /= batch_img_metas["w"]  # Note: yolo_pose format requires normalized keypoints.
     keypts_tensor[:, :, 1] /= batch_img_metas["h"]
 
     batchidx_tensor = [torch.ones((one_labels["bboxes"].shape[0]), dtype=torch.float, device=one_labels["bboxes"].device) * indexInBatch for indexInBatch, one_labels in enumerate(batch_labels)]
@@ -146,7 +153,8 @@ def preprocess_batch(batch_labels: dict, batch_img_metas: dict, is_stereo_bbox: 
         "batch_idx": batchidx_tensor
     }
     if is_stereo_bbox:
-        batch_labels_yolopose["keypoints_right"] = keypoints_right
+        batch_labels_yolopose["keypoints_right"] = keypoints_right  # Note: do not normalize keypoints_right.
+
     return batch_labels_yolopose
 
 def train(
@@ -262,7 +270,6 @@ def train(
                 models["objdet_head"],
                 {
                     "left_event_voxel": batch_data["event"]["left"],
-                    "right_event_voxel": batch_data["event"]["right"],
                 },
                 objdet_targets,
                 lossDictAll,
@@ -270,7 +277,6 @@ def train(
             )
 
             (
-                right_feature,
                 left_selected_boxes,
                 left_selected_classes,
                 left_selected_confidences,
@@ -302,8 +308,6 @@ def train(
                     }
                 )
                 tensorBoardLogger.add_image("(train) left sharp with GT bboxes", leftimage_gt_visz)
-                right_feature_map = torch.mean(right_feature[0][0].detach(), dim=0).cpu().numpy()
-                tensorBoardLogger.add_image("(train) right feature map", torch.from_numpy(right_feature_map))
 
             if models["objdet_head"].module.is_freeze:
                 left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
@@ -322,17 +326,17 @@ def train(
 
                 if num_pos > 0:
                     # ---------- stereo detection head ----------
+                    left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
                     stereo_objdet_targets = preprocess_batch(
                         batch_data["gt_labels"]["objdet"],
                         batch_img_metas,
                         True,
-                        models["stereo_detection_head"].module.config["max_num_keypoints"]
+                        1
                     )
-                    left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
                     stereo_preds, lossDictAll, artifacts = _forward_one_batch(
                         models["stereo_detection_head"],
                         {
-                            "right_feat": right_feature,
+                            "right_event_voxel": batch_data["event"]["right"],
                             "left_bboxes": left_bboxes_nmsed_topked,
                             "disp_prior": pred_disparity_pyramid[-1],
                             "batch_img_metas": batch_img_metas,
@@ -340,7 +344,7 @@ def train(
                         },
                         {
                             "left_fg_mask": left_fg_mask,
-                            "left_target_gt_idx": left_target_gt_idx,
+                            "left_target_gt_idx": left_target_gt_idx,  # Note: mapping gt order to left detections' order
                             "left_nms_topk_mask": nms_topk_mask,
                             "stereo_objdet_targets": stereo_objdet_targets,
                             "batch_img_metas": batch_img_metas
@@ -352,37 +356,35 @@ def train(
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None:
                         if artifacts is not None:
-                            pos_masks_one = artifacts[1][0]
-                            right_bboxes_one = artifacts[0][0].detach()
-                            right_bboxes_one = torch.cat([
-                                right_bboxes_one[..., 4].unsqueeze(-1),
-                                right_bboxes_one[..., 1].unsqueeze(-1),
-                                right_bboxes_one[..., 5].unsqueeze(-1),
-                                right_bboxes_one[..., 3].unsqueeze(-1)
-                            ], dim=-1)
-                            rightimage_visz = RenderImageWithBboxesAndKeypts(
-                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
-                                {
-                                    "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
-                                    "classes": -1 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
-                                    "confidences": 1.0 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
-                                    "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
-                                }
-                            )
-                            tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
-                            
-                            right_bboxes = batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy()
-                            right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
-                            rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
-                                {
-                                    "bboxes": right_bboxes,
-                                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
-                                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
-                                    "keypts": batch_data["gt_labels"]["objdet"][0]["keypts_right"][:, :, :2].detach().cpu().numpy(),
-                                }
-                            )
-                            tensorBoardLogger.add_image("(train) right sharp with GT bboxes", rightimage_gt_visz)
+                            for indexInBatch in range(len(artifacts[0])):
+                                if artifacts[0][indexInBatch] is None:
+                                    # not a valid detection
+                                    continue
+                                right_bboxes_one = artifacts[0][indexInBatch].detach()
+                                right_bboxes_one = right_bboxes_one[..., [4, 1, 5, 3]]
+                                rightimage_visz = RenderImageWithBboxesAndKeypts(
+                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    {
+                                        "bboxes": right_bboxes_one.detach().cpu().numpy(),
+                                        "classes": -1 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
+                                        "confidences": 1.0 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
+                                        "keypts": artifacts[-1][indexInBatch][:, :, :2].detach().cpu().numpy() if artifacts[-1][indexInBatch] is not None else None,
+                                    }
+                                )
+                                tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
+                                
+                                right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
+                                right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
+                                rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    {
+                                        "bboxes": right_bboxes,
+                                        "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
+                                        "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]).cpu().numpy(),
+                                        "keypts": batch_data["gt_labels"]["objdet"][indexInBatch]["keypts_right"][:, :, :2].detach().cpu().numpy(),
+                                    }
+                                )
+                                tensorBoardLogger.add_image("(train) right sharp with GT bboxes", rightimage_gt_visz)
 
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
@@ -414,7 +416,6 @@ def train(
 
         if tensorBoardLogger is not None:
             pbar.update(1)
-        torch.cuda.synchronize()
 
     if tensorBoardLogger is not None:
         pbar.close()
@@ -498,7 +499,6 @@ def valid(
                 models["objdet_head"],
                 {
                     "left_event_voxel": batch_data["event"]["left"],
-                    "right_event_voxel": batch_data["event"]["right"],
                 },
                 objdet_targets,
                 lossDictAll,
@@ -506,7 +506,6 @@ def valid(
             )
 
             (
-                right_feature,
                 left_selected_boxes,
                 left_selected_classes,
                 left_selected_confidences,
@@ -560,12 +559,17 @@ def valid(
 
                 if num_pos > 0:
                     # ---------- stereo detection head ----------
-                    stereo_objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, True)
                     left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
+                    stereo_objdet_targets = preprocess_batch(
+                        batch_data["gt_labels"]["objdet"],
+                        batch_img_metas,
+                        True,
+                        1
+                    )
                     stereo_preds, lossDictAll, artifacts = _forward_one_batch(
                         models["stereo_detection_head"],
                         {
-                            "right_feat": right_feature,
+                            "right_event_voxel": batch_data["event"]["right"],
                             "left_bboxes": left_bboxes_nmsed_topked,
                             "disp_prior": pred_disparity_pyramid[-1],
                             "batch_img_metas": batch_img_metas,
@@ -583,38 +587,37 @@ def valid(
                     )
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
-                    if tensorBoardLogger is not None:
+                    if tensorBoardLogger is not None and artifacts[0][0] is not None:
                         if artifacts is not None:
-                            pos_masks_one = artifacts[1][0]
-                            right_bboxes_one = artifacts[0][0].detach()
-                            right_bboxes_one = torch.cat([
-                                right_bboxes_one[..., 4].unsqueeze(-1),
-                                right_bboxes_one[..., 1].unsqueeze(-1),
-                                right_bboxes_one[..., 5].unsqueeze(-1),
-                                right_bboxes_one[..., 3].unsqueeze(-1)
-                            ], dim=-1)
-                            rightimage_visz = RenderImageWithBboxesAndKeypts(
-                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
-                                {
-                                    "bboxes": right_bboxes_one[pos_masks_one].detach().cpu().numpy(),
-                                    "classes": -1 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
-                                    "confidences": 1.0 * torch.ones_like(right_bboxes_one[pos_masks_one][:,0]).cpu().numpy(),
-                                    "keypts": artifacts[-1][0][:, :, :2].detach().cpu().numpy(),
-                                }
-                            )
-                            tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)
-                            right_bboxes = batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy()
-                            right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
-                            rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                                right_event_sharp[0].detach().squeeze().cpu().numpy(),
-                                {
-                                    "bboxes": right_bboxes,
-                                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
-                                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
-                                    "keypts": batch_data["gt_labels"]["objdet"][0]["keypts_right"][:, :, :2].detach().cpu().numpy(),
-                                }
-                            )
-                            tensorBoardLogger.add_image("(valid) right sharp with GT bboxes", rightimage_gt_visz)
+                            for indexInBatch in range(len(artifacts[0])):
+                                if artifacts[0][indexInBatch] is None:
+                                    # not a valid detection
+                                    continue
+                                right_bboxes_one = artifacts[0][indexInBatch].detach()
+                                right_bboxes_one = right_bboxes_one[..., [4, 1, 5, 3]] 
+                                rightimage_visz = RenderImageWithBboxesAndKeypts(
+                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    {
+                                        "bboxes": right_bboxes_one.detach().cpu().numpy(),
+                                        "classes": -1 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
+                                        "confidences": 1.0 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
+                                        "keypts": artifacts[-1][indexInBatch][:, :, :2].detach().cpu().numpy() if artifacts[-1][indexInBatch] is not None else None,
+                                    }
+                                )
+                                tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)
+                                
+                                right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
+                                right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
+                                rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    {
+                                        "bboxes": right_bboxes,
+                                        "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
+                                        "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]).cpu().numpy(),
+                                        "keypts": batch_data["gt_labels"]["objdet"][indexInBatch]["keypts_right"][:, :, :2].detach().cpu().numpy(),
+                                    }
+                                )
+                                tensorBoardLogger.add_image("(valid) right sharp with GT bboxes", rightimage_gt_visz)
 
         batchSize = batch_data["event"]["left"].shape[0]
         loss = 0
@@ -634,7 +637,6 @@ def valid(
         if tensorBoardLogger is not None:
             pbar.update(1)
 
-    torch.cuda.synchronize()
 
     if tensorBoardLogger is not None:
         pbar.close()
@@ -715,13 +717,11 @@ def test(
 
         # ---------- objdet net ----------
         left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
-        right_feature = models["objdet_head"].module.predict(batch_data["event"]["right"], isRightFeatures=True)
         if is_save_onnx:
             torch.onnx.export(
                 models['objdet_head'].module,
                 (
                     batch_data["event"]["left"],
-                    batch_data["event"]["right"]
                 ),
                 os.path.join(save_root, "objdet_head.onnx"),
                 export_params=True,
@@ -744,23 +744,22 @@ def test(
             end2end=False,
         )
 
-        batch_refined_right_bboxes_selected = None
+        refined_sbboxes_nobkg = None
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
             # ---------- stereo detection head ----------
             left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
-            batch_sbboxes_pred, batch_refined_right_bboxes, batch_right_scores_refine, right_pred_kpts, right_scores_keypts = models["stereo_detection_head"].module.predict(
-                right_feature,
+            batch_sbboxes_priors, batch_refined_right_bboxes, batch_refined_right_scores, batch_predicted_right_keypts = models["stereo_detection_head"].module.predict(
+                batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
                 batch_img_metas,
-                models["stereo_detection_head"].module.config["bbox_expand_factor"],
-                True
+                models["stereo_detection_head"].module.config["bbox_expand_anchor_ticks"]
             )
             if is_save_onnx:
                 torch.onnx.export(
                     models['stereo_detection_head'].module,
                     (
-                        right_feature,
+                        batch_data["event"]["right"],
                         left_bboxes_nmsed_topked,
                         pred_disparity_pyramid[-1],
                         batch_img_metas,
@@ -770,37 +769,53 @@ def test(
                     opset_version=16,
                     do_constant_folding=True,
                     input_names=["right_feat", "left_bboxes", "disp_prior", "batch_img_metas"],
-                    output_names=["batch_sbboxes_pred", "batch_refined_right_bboxes", "batch_right_scores_refine", "right_pred_kpts", "right_scores_keypts"]
+                    output_names=["batch_sbboxes_priors", "batch_refined_right_bboxes", "batch_refined_right_scores", "batch_predicted_right_keypts"]
                 )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
-            right_bboxes_best_scores, batch_refined_right_bboxes_selected = ExtractRefinedInstance(batch_refined_right_bboxes[0], batch_right_scores_refine[0])
-            right_keypts_best_scores, batch_refined_right_keypts_selected = ExtractRefinedInstance(right_pred_kpts[0], right_scores_keypts[0])
+            # select best right bboxes and keypts for visualization.
+            (
+                mask_nonbackground,
+                refined_sbboxes_nobkg,
+                refined_right_scored_pred,
+                right_keypts_pred_nobkg
+            ) = models["stereo_detection_head"].module.extract_inference_results(
+                batch_sbboxes_priors[0].squeeze(0),
+                batch_refined_right_bboxes[0].view(-1, num_classes, 4),
+                batch_refined_right_scores[0],
+                batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+            )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
-
         if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0):
             print("==================================== finished onnx model (event_stereo_object_detection_with_yolo_pose) export! ====================================")
             break
 
-        if batch_refined_right_bboxes_selected is not None:
+        if refined_sbboxes_nobkg is not None:
             # (l_tl_x, l_tl_y, l_br_x, l_br_y,
             #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
             #                                                                 class_label, confidence, confidence_right,
             #                                                                                                           l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
             # TODO: mark right confidences on the result visz image.
+            left_bboxes_final = left_bboxesClsKeypts_nmsed_topked[0][mask_nonbackground][:, 0:4]
             preds = FilterBadDetections(
                 torch.concat([
-                    left_bboxesClsKeypts_nmsed_topked[0][:, 0:4],
-                    batch_refined_right_bboxes_selected[0],
-                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1),
-                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1),
-                    left_bboxesClsKeypts_nmsed_topked[0][:, (4 + models["objdet_head"].module.config["num_classes"]):],
-                    batch_refined_right_keypts_selected[0][:, :],
+                    left_bboxes_final,
+                    torch.concat([
+                        refined_sbboxes_nobkg[:, 4].view(-1, 1),
+                        left_bboxes_final[:, 1].view(-1, 1),
+                        refined_sbboxes_nobkg[:, 5].view(-1, 1),
+                        left_bboxes_final[:, 3].view(-1, 1)
+                    ], dim=-1),
+                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1)[mask_nonbackground],
+                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1)[mask_nonbackground],
+                    refined_right_scored_pred.view(-1, 1),
+                    left_bboxesClsKeypts_nmsed_topked[0][:, (4 + models["objdet_head"].module.config["num_classes"]):][mask_nonbackground],
+                    right_keypts_pred_nobkg.view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3),
                 ], dim=1),
                 imageHeight=batch_data["image_metadata"]["h_cam"],
                 imageWidth=batch_data["image_metadata"]["w_cam"],
-                margin=0
+                margin=10
             )
             if preds is not None:
                 prediction_dict = {
@@ -833,7 +848,6 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
     delete objects whose bboxes are within 4 edges' margin of the image.
     delete objects whose keypoints are outside of the bbox.
     """
-    return preds
     new_preds = []
     num_objects = preds.shape[0]
     max_num_keypoints = (preds.shape[1] - 10) // 3 // 2
@@ -860,17 +874,17 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
             continue
         isKeyptsOutsideBbox = False
         for indexKeypt in range(max_num_keypoints):
-            if preds[i][10 + indexKeypt * 3 + 2] > 0:
+            if preds[i][11 + indexKeypt * 3 + 2] > 0:
                 # keypoint is visible
                 if (
-                    preds[i][10 + indexKeypt * 3] < preds[i][0]
-                    or preds[i][10 + indexKeypt * 3] > preds[i][2]
-                    or preds[i][10 + indexKeypt * 3 + 1] < preds[i][1]
-                    or preds[i][10 + indexKeypt * 3 + 1] > preds[i][3]
-                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3] < preds[i][4]
-                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3] > preds[i][6]
-                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3 + 1] < preds[i][5]
-                    or preds[i][10 + max_num_keypoints * 3 + indexKeypt * 3 + 1] > preds[i][7]
+                    preds[i][11 + indexKeypt * 3] < preds[i][0]
+                    or preds[i][11 + indexKeypt * 3] > preds[i][2]
+                    or preds[i][11 + indexKeypt * 3 + 1] < preds[i][1]
+                    or preds[i][11 + indexKeypt * 3 + 1] > preds[i][3]
+                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] < preds[i][4]
+                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] > preds[i][6]
+                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] < preds[i][5]
+                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] > preds[i][7]
                 ):
                     isKeyptsOutsideBbox = True
                     break
@@ -979,18 +993,20 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
         sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
         classes = detection[:, 8].cpu().numpy().astype('int')
-        confidences = detection[:, 9].cpu().numpy()
-        if detection.shape[-1] > 10:
-            keypts_left = detection[:, 10:(10+max_num_keypoints*3)].cpu().numpy()
-            keypts_right = detection[:, (10+max_num_keypoints*3):].cpu().numpy()
+        confidences = detection[:, 9:11].cpu().numpy()
+        if detection.shape[-1] > 11:
+            keypts_left = detection[:, 11:(11+max_num_keypoints*3)].cpu().numpy()
+            keypts_right = detection[:, (11+max_num_keypoints*3):].cpu().numpy()
             visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
                 pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
                 pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
                 sbboxes,
                 classes,
-                confidences,
+                confidences[:, 0],
                 keypts_left,
-                keypts_right)
+                keypts_right,
+                stereo_confidences=confidences[:, 1],
+            )
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)

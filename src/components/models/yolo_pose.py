@@ -366,24 +366,12 @@ class YoloPose(nn.Module):
     def predict(
         self,
         x: Tensor,
-        isRightFeatures: Optional[bool] = None
     ):
         y = []  # outputs
-        if isRightFeatures:
-            indicesToRetrieveFeatures = [16, 19, 22]
-            intermediateFeatures = []
-
         for indexModule, m in enumerate(self._model):
-            if m.f != -1:  # if not from previous layer
+            if m.f != -1:  # if not only from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-
             x = m(x)  # run
-            if isRightFeatures:
-                if indexModule in indicesToRetrieveFeatures:
-                    intermediateFeatures.append(x)
-                if indexModule == indicesToRetrieveFeatures[-1]:
-                    x = intermediateFeatures
-                    break
             y.append(x if m.i in self._save else None)  # save for using in following layers
 
         return x
@@ -391,7 +379,6 @@ class YoloPose(nn.Module):
     def forward(
         self,
         left_event_voxel: Tensor,
-        right_event_voxel: Optional[Tensor] = None,
         labels = None,
         **kwargs
     ):
@@ -400,7 +387,6 @@ class YoloPose(nn.Module):
 
         Args:
             left_event_voxel: left event input. shape [B, 10, h, w].
-            right_event_voxel: right event input. shape [B, 10, h, w].
             ...
             gt_labels: list of dict for one batch. each dict contains 'bboxes' and 'labels' keys.
         Returns:
@@ -409,27 +395,17 @@ class YoloPose(nn.Module):
         """
         preds = self.predict(left_event_voxel)
 
-        right_features = None
-        if right_event_voxel is not None:
-            isTraining = self.training
-            if isTraining:
-                self.eval()
-            with torch.no_grad():
-                right_features = self.predict(right_event_voxel, isRightFeatures=True)
-            if isTraining:
-                self.train()
-
         losses = None
-        artifacts = [right_features, None, None, None, None, None, None, None]
+        artifacts = [None, None, None, None, None, None, None]
         if labels is not None:
             losses_and_artifacts = self.compute_loss(preds, labels)
-            artifacts[1] = losses_and_artifacts[1]
-            artifacts[2] = losses_and_artifacts[2]
-            artifacts[3] = losses_and_artifacts[3]
-            artifacts[4] = losses_and_artifacts[4]
-            artifacts[5] = losses_and_artifacts[5]
-            artifacts[6] = losses_and_artifacts[6]
-            artifacts[7] = losses_and_artifacts[7]
+            artifacts[0] = losses_and_artifacts[1]
+            artifacts[1] = losses_and_artifacts[2]
+            artifacts[2] = losses_and_artifacts[3]
+            artifacts[3] = losses_and_artifacts[4]
+            artifacts[4] = losses_and_artifacts[5]
+            artifacts[5] = losses_and_artifacts[6]
+            artifacts[6] = losses_and_artifacts[7]
             losses = losses_and_artifacts[0]
             if self.is_freeze:
                 for key, loss_value in losses.items():
