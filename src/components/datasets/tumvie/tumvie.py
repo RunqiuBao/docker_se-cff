@@ -51,7 +51,10 @@ class TumVieDataset(torch.utils.data.Dataset):
             
         self.sequence_data_list = []
         for sequence in sequence_list:
-            sequence_root = os.path.join(root, sequence)            
+            sequence_root = os.path.join(root, sequence)
+            if not os.path.exists(sequence_root):
+                print("{} does not exist, skip this sequence.".format(sequence))
+                continue
             self.sequence_data_list.append(
                 SequenceDataset(
                     root=sequence_root,
