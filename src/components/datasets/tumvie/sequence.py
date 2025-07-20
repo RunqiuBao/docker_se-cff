@@ -83,7 +83,8 @@ class SequenceDataset(torch.utils.data.Dataset):
             imageHeight=kwargs["event_rectified_height"],
             imageWidth=kwargs["event_rectified_width"],
             isLoadCOCOFormat=isLoadCOCOFormat,
-            num_repeat=self._num_repeat if split == "train" else 1
+            num_repeat=self._num_repeat if split == "train" else 1,
+            timestamps=self.timestamps
         )
 
         # Disparity Dataset

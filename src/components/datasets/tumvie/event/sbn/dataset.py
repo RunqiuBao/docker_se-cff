@@ -98,7 +98,7 @@ class EventDataset(torch.utils.data.Dataset):
             event_data = self._post_load_event_data(event_data)
             for key, value in event_data.items():
                 event_data[key] = value.squeeze().transpose(2, 0, 1)
-        event_data["timestamp"] = timestamp
+        event_data["timestamp"] = str(timestamp)
         return event_data
 
     def _pre_load_event_data(self, timestamp):

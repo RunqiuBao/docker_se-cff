@@ -18,10 +18,10 @@ from .warp import disp_warp
     # numpy.array([0.26, 0.25])
     # / 10.0
 # )
-OKS_SIGMA = (
-    numpy.array([0.26, 0.25, 0.25, 0.35])
-    / 10.0
-)
+# OKS_SIGMA = (
+#     numpy.array([0.26, 0.25, 0.25, 0.35])
+#     / 10.0
+# )
 
 class DisparityLoss(nn.Module):
 
@@ -318,6 +318,7 @@ def kpts_decode(anchor_points, pred_kpts):
     y[..., 1] += anchor_points[..., [1]] - 0.5
     return y
 
+
 def calculate_keypoints_loss(
     masks, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts, calculator_bce_pose_loss, calculator_keypoint_loss
 ):
@@ -392,14 +393,14 @@ def calculate_keypoints_loss(
 class v8PoseLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, keyptsShape):  # model must be de-paralleled
+    def __init__(self, model, keyptsShape, oks_sigma):  # model must be de-paralleled
         """Initializes v8PoseLoss with model, sets keypoint variables and declares a keypoint loss instance."""
         super().__init__(model)
         self.kpt_shape = model.model[-1].kpt_shape
         self.bce_pose = nn.BCEWithLogitsLoss()
         is_pose = self.kpt_shape == keyptsShape
         nkpt = self.kpt_shape[0]  # number of keypoints
-        sigmas = torch.from_numpy(OKS_SIGMA).to(self.device) if is_pose else torch.ones(nkpt, device=self.device) / nkpt
+        sigmas = torch.from_numpy(oks_sigma).to(self.device) if is_pose else torch.ones(nkpt, device=self.device) / nkpt
         self.keypoint_loss = KeypointLoss(sigmas=sigmas)
 
     def __call__(self, preds, batch):

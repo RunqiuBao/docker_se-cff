@@ -123,6 +123,7 @@ MODEL:
       num_classes: 2
       max_num_keypoints: 1
       in_channels: 10
+      oks_sigma: [0.26, 0.25, 0.25, 0.35]
       num_topk_candidates: 30
       bbox_expand_factor: 1.3  # Note: this is only x direction, y direction is fixed
       # prior generator strides
@@ -181,8 +182,8 @@ LOSSES:
     pose_loss_weight: 12.0
     kobj_loss_weight: 1.0
   stereo_detection_head_cfg:
-    pose_loss_weight: 12.0
-    kobj_loss_weight: 1.0
+    rbbox_loss_weight: 1000
+    rkeypts_loss_weight: 100000
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:

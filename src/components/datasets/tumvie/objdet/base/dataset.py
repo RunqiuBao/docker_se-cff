@@ -18,8 +18,9 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
     _imageSize = None
     is_initilized = False
     _num_label_files = None
+    _timestamps = None
 
-    def __init__(self, root: str, imageHeight: int, imageWidth: int, num_repeat: int=1, **kwargs):
+    def __init__(self, root: str, imageHeight: int, imageWidth: int, num_repeat: int=1, timestamps=None, **kwargs):
         self._num_repeat = num_repeat  # for data augmentation. Repeating the data sequence and do randomcrop.
         self.NO_VALUE = 0
         try:
@@ -32,7 +33,18 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             self.is_initilized = True
         except Exception as e:
             print("objdet annotations loading failed: {}".format(e))
-            pass
+            try:
+                self.path_to_labels = os.path.join(root, "labels")
+                label_files_list = glob(os.path.join(self.path_to_labels, "*.json"))
+                assert len(label_files_list) > 0
+                self._num_data_files = len(label_files_list)
+                self._num_label_files = self._num_data_files * self._num_repeat
+                self._imageSize = numpy.array([imageWidth, imageHeight])
+                self.is_initilized = True
+                self._timestamps = timestamps
+            except Exception as e:
+                print("objdet annotations loading failed again: {}".format(e))
+                raise
 
     def __len__(self):
         return self._num_label_files
@@ -42,14 +54,26 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             return
 
         indexFrame = indexFrame % self._num_data_files
-        try:
-            labels_data = self._cvatDataset[indexFrame].annotations
-            # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))
-            labels_data = self.FormatLabels(labels_data, indexFrame, self._cvatDataset[indexFrame].media.data, self._cvatDataset[indexFrame].id)
-            labels_data["timestamp"] = self._cvatDataset[indexFrame].id
-        except Exception as e:
-            print("Error in loading labels({}) for frame {}: {}".format(self.path_to_labels, indexFrame, e))
-            raise
+        if self._cvatDataset is not None:
+            try:
+                labels_data = self._cvatDataset[indexFrame].annotations
+                # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))
+                labels_data = self.FormatLabels(labels_data, indexFrame, self._cvatDataset[indexFrame].media.data, self._cvatDataset[indexFrame].id)
+                labels_data["timestamp"] = self._cvatDataset[indexFrame].id
+            except Exception as e:
+                print("Error in loading labels({}) for frame {}: {}".format(self.path_to_labels, indexFrame, e))
+                raise
+        else:
+            timestamp = self._timestamps[indexFrame]
+            file_path = os.path.join(self.path_to_labels, str(timestamp).zfill(12) + ".json")
+            try:
+                with open(file_path, "r") as file:
+                    labels_data = json.load(file)
+            except:
+                raise FileNotFoundError(f"The label file {file_path} does not exist.")
+
+            labels_data = self.FormatLabels2(labels_data)
+            labels_data["timestamp"] = str(timestamp)
 
         return labels_data
 
@@ -199,6 +223,66 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         except:
             raise
         return labels_formatted
+    
+    def FormatLabels2(self, labels_data):
+        """
+        For blender-vibration dataset.
+        format the labels into a dict with 2 keys:
+            - 'bboxes': Nx7 tensor. 7 including: [
+                    X_tl,  # top left corner X at left image
+                    Y_tl,  # top left corner Y at left image
+                    X_br,  # bottom right corner X at left image
+                    Y_br,  # bottom right corner Y at left image
+                    X_tl_r,  # top left corner X at right image
+                    X_br_r,  # bottom right corner X at right image
+                    index_box  # index in N bboxes.
+                ]
+            - 'labels': (N,) tensor. classes of the bboxes
+            - 'keypts'
+            - 'keypts_right'
+        """
+        bboxes, leftcorners, rightcorners = [], [], []
+        labels = []
+        for indexInstance, oneInstance in enumerate(labels_data["shapes"]):
+            labels.append(numpy.array([int(oneInstance["label"])]))
+            x_keypt2 = (oneInstance["keypt2"][0][0] + oneInstance["keypt2"][1][0]) / 2
+            y_keypt2 = (oneInstance["keypt2"][0][1] + oneInstance["keypt2"][1][1]) / 2
+            bboxes.append(
+                numpy.array(
+                    [
+                        oneInstance["leftPoints"][0][0],
+                        oneInstance["leftPoints"][0][1],
+                        oneInstance["leftPoints"][1][0],
+                        oneInstance["leftPoints"][1][1],
+                        oneInstance["rightPoints"][0][0],
+                        oneInstance["rightPoints"][1][0],
+                        indexInstance
+                    ]
+                )[numpy.newaxis, :]
+            )
+            disparity = (oneInstance["leftPoints"][0][0] + oneInstance["leftPoints"][1][0]) / 2 - (oneInstance["rightPoints"][0][0] + oneInstance["rightPoints"][1][0]) / 2
+            leftcorner_oneinstance = numpy.array([
+                [oneInstance["keypt1"][0], oneInstance["keypt1"][1], 2],
+                [x_keypt2, y_keypt2, 2]
+            ])
+            rightcorner_oneinstance = leftcorner_oneinstance.copy()
+            leftcorners.append(
+                leftcorner_oneinstance[None, :]
+            )
+            rightcorner_oneinstance[:, 0] = rightcorner_oneinstance[:, 0] - disparity
+            rightcorners.append(
+                rightcorner_oneinstance[None, :]
+            )
+        bboxes = numpy.concatenate(bboxes, axis=0)
+        labels = numpy.concatenate(labels)
+        keypts_left = numpy.concatenate(leftcorners, axis=0)
+        keypts_right = numpy.concatenate(rightcorners, axis=0)
+        return {
+            "bboxes": bboxes,
+            "labels": labels,
+            "keypts": keypts_left,
+            "keypts_right": keypts_right
+        }
 
     def collate_fn(self, batch):
         """

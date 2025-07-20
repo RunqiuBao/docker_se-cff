@@ -175,10 +175,10 @@ class StereoDetectionHead(nn.Module):
         reg_last_dim = last_layer_dim
         self.fc_reg = MODELS.build({'type': 'Linear', 'in_features': reg_last_dim, 'out_features': out_dim_reg})
         cls_last_dim = last_layer_dim  # 1024
-        cls_channels = self._config['num_classes'] + 1  # Note: the last class is background. It will be ignored in current implementation.
+        cls_channels = self._config['num_classes'] + 1
         self.fc_cls = MODELS.build({'type': 'Linear', 'in_features': cls_last_dim, 'out_features': cls_channels})
         keypts_dim = 3  # only one keypts for these objects for now.
-        keypts_out_dim = keypts_dim * self._config['num_classes']
+        keypts_out_dim = keypts_dim * self._config['num_classes'] * self._config['max_num_keypoints']
         keypts_last_dim = last_layer_dim
         self.fc_keypts = MODELS.build({'type': 'Linear', 'in_features': keypts_last_dim, 'out_features': keypts_out_dim})
 
@@ -791,9 +791,14 @@ class StereoDetectionHead(nn.Module):
             list_right_keypts_pred.append(right_keypts_pred_nobkg)
             # print("stereoNet time cost (rkeypts pred): {}".format(time.time() - starttime))
 
-        loss_dict["loss_rbbox"] /= num_batch / 1000
+        loss_dict["loss_rbbox"] /= num_batch
+        loss_dict["loss_rbbox"] *= self._config["loss_cfg"]["rbbox_loss_weight"]
+
         loss_dict["loss_rscore"] /= num_batch
-        loss_dict["loss_rkeypts"] /= num_batch / 100000  # Note: scale it to a reasonable magnitude
+
+        loss_dict["loss_rkeypts"] /= num_batch
+        loss_dict["loss_rkeypts"] *= self._config["loss_cfg"]["rkeypts_loss_weight"]  # Note: scale it to a reasonable magnitude
+
         loss_dict["loss_rkeypts_obj"] /= num_batch
         if torch.isnan(loss_dict["loss_rbbox"]) or torch.isnan(loss_dict["loss_rscore"]) or torch.isnan(loss_dict["loss_rkeypts"]) or torch.isnan(loss_dict["loss_rkeypts_obj"]):
             import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
@@ -956,7 +961,7 @@ class StereoDetectionHead(nn.Module):
 
         refined_right_bboxes = refined_right_bboxes.view(num_detections, variation_size_squared, num_classes, 4)
         refined_right_scores = refined_right_scores.view(num_detections, variation_size_squared, (num_classes + 1))
-        right_keypts_pred = right_keypts_pred.view(num_detections, variation_size_squared, num_classes, 3)
+        right_keypts_pred = right_keypts_pred.view(num_detections, variation_size_squared, num_classes, 3 * self._config["max_num_keypoints"])
 
         best_scores_of_classes, best_class_labels = torch.max(F.softmax(refined_right_scores, dim=-1), dim=-1)
         indices_highest_score = torch.argmax(best_scores_of_classes, dim=1)
