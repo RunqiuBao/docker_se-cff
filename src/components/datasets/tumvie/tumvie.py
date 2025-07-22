@@ -34,7 +34,7 @@ class TumVieDataset(torch.utils.data.Dataset):
         self.crop_height = crop_height
         self.crop_width = crop_width
         self.num_workers = num_workers
-        assert split in DATA_SPLIT.keys()
+        assert split in DATA_SPLIT[kwargs.get("config_name", "default")]
 
         # moving events into lmdb
         if not isDisableLmdbRead and os.path.isdir(os.path.join(root, split, "lmdb")) and os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb")) > 1024**2:  # Note: the dataset need to be larger than 1MB
@@ -45,7 +45,7 @@ class TumVieDataset(torch.utils.data.Dataset):
         else:
             print("baodebug: ==========================: skip lmdb due to isDisableLmdbRead {} and isDir", str(isDisableLmdbRead), str(os.path.isdir(os.path.join(root, split, "lmdb"))))
 
-        sequence_list = DATA_SPLIT[split]
+        sequence_list = DATA_SPLIT[kwargs.get("config_name", "default")][split]
         if defineSeqIdx is not None:
             sequence_list = [sequence_list[defineSeqIdx]]
             

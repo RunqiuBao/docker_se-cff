@@ -43,8 +43,9 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                 self.is_initilized = True
                 self._timestamps = timestamps
             except Exception as e:
-                print("objdet annotations loading failed again: {}".format(e))
-                raise
+                if kwargs["dataset_type"] != "test":
+                    print("objdet annotations loading failed again: {}".format(e))
+                    raise
 
     def __len__(self):
         return self._num_label_files
