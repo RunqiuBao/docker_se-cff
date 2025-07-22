@@ -394,7 +394,8 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             for iKeypt in range(max_num_keypts):
                 if keypts_left[ii, iKeypt * 3 + 2] > 0:
                     keypt_int = (int(keypts_left[ii, iKeypt * 3 + 0]), int(keypts_left[ii, iKeypt * 3 + 1]))
-                    cv2.circle(left_event_sharp, keypt_int, radius=5, color=(0, 255, 0), thickness=-1)
+                    color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
+                    cv2.circle(left_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
         if facets is not None:
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
             # instances_facets = draw_featmap_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor)
@@ -423,7 +424,8 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             for iKeypt in range(max_num_keypts):
                 if keypts_right[ii, iKeypt * 3 + 2] > 0:
                     keypt_int = (int(keypts_right[ii, iKeypt * 3 + 0]), int(keypts_right[ii, iKeypt * 3 + 1]))
-                    cv2.circle(right_event_sharp, keypt_int, radius=5, color=(0, 255, 0), thickness=-1)
+                    color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
+                    cv2.circle(right_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
         if facets_right is not None:
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_BGR2GRAY)
             # instances_facets_right = draw_featmap_on_view(top_left, bottom_right, facets_right[ii], instances_facets_right, enlarge_facet_factor)
