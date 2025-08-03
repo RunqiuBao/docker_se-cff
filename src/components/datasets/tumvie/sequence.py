@@ -85,7 +85,8 @@ class SequenceDataset(torch.utils.data.Dataset):
             isLoadCOCOFormat=isLoadCOCOFormat,
             num_repeat=self._num_repeat if split == "train" else 1,
             timestamps=self.timestamps,
-            dataset_type=split
+            dataset_type=split,
+            max_num_keypoints=kwargs.get("max_num_keypoints", None)
         )
 
         # Disparity Dataset
@@ -257,6 +258,7 @@ class SequenceDataset(torch.utils.data.Dataset):
 
     def load_data(self, idx):
         data = {}
+
         event_data = self.event_dataset[idx]
         objdet_data = self.objdet_dataset[idx]
         disparity_data = self.disparity_dataset[(idx, objdet_data)]

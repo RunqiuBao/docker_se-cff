@@ -6,8 +6,33 @@ import json
 import cv2
 from torch import Tensor
 from datumaro.components.dataset import Dataset
-from datumaro.components.annotation import Polygon, Bbox
+from datumaro.components.annotation import Polygon, Bbox, Points
 from collections import defaultdict
+
+
+def FormatKeypoints(keyPoints: numpy.ndarray, max_num_keypoints: int) -> numpy.ndarray:
+    """
+    If max_num_keypoints is 1, average all the key points and return as (1, 3); Else, return the key points as (N, 3) shape.
+    If keyPoints number is less than max_num_keypoints, pad with zeros.
+    Args:
+        keyPoints: (N, 2) shape
+
+    Returns:
+        keyPoints: (N, 3) shape.
+    """
+    keyPoints = [[corner[0], corner[1], 2] for corner in keyPoints]
+    if max_num_keypoints == 1:
+        keyPoints = numpy.mean(keyPoints, axis=0)[None, :]
+    else:
+        keyPoints = numpy.array(keyPoints)
+        if keyPoints.shape[0] < max_num_keypoints:
+            keyPoints = numpy.pad(
+                keyPoints,
+                ((0, max_num_keypoints - keyPoints.shape[0]), (0, 0)),
+                mode='constant',
+                constant_values=0
+            )
+    return keyPoints
 
 
 class StereoObjDetDataset(torch.utils.data.Dataset):
@@ -20,7 +45,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
     _num_label_files = None
     _timestamps = None
 
-    def __init__(self, root: str, imageHeight: int, imageWidth: int, num_repeat: int=1, timestamps=None, **kwargs):
+    def __init__(self, root: str, imageHeight: int, imageWidth: int, num_repeat: int=1, timestamps=None, max_num_keypoints=None, **kwargs):
         self._num_repeat = num_repeat  # for data augmentation. Repeating the data sequence and do randomcrop.
         self.NO_VALUE = 0
         try:
@@ -31,6 +56,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             self._num_data_files = len(self._cvatDataset)
             self._num_label_files = len(self._cvatDataset) * self._num_repeat  # Note: data augmentation by random crop and repeat
             self.is_initilized = True
+            self._max_num_keypoints = max_num_keypoints if max_num_keypoints is not None else 1
         except Exception as e:
             print("objdet annotations loading failed: {}".format(e))
             try:
@@ -44,8 +70,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                 self._timestamps = timestamps
             except Exception as e:
                 if kwargs["dataset_type"] != "test":
-                    print("objdet annotations loading failed again: {}".format(e))
-                    raise
+                    print("!!!!!Error!!, objdet annotations loading failed again: {}".format(e))
 
     def __len__(self):
         return self._num_label_files
@@ -106,12 +131,28 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
         for idx, annotation in zip(indicesGroup, labels_data):
             groupedAnnotations[idx].append(annotation)
         for oneGroup in groupedAnnotations.values():
-            for oneTargetInOneGroup in oneGroup:
-                bboxThisGroup = oneTargetInOneGroup.get_bbox()
-                if (bboxThisGroup[0] + bboxThisGroup[2] / 2) < self._imageSize[0]:
-                    left_targets.append(oneTargetInOneGroup)
-                else:
-                    right_targets.append(oneTargetInOneGroup)
+            if len(oneGroup) > 2: # containing separate points.
+                left_target_group, right_target_group = {}, {}
+                for oneTargetInOneGroup in oneGroup:
+                    if isinstance(oneTargetInOneGroup, Points):
+                        if (oneTargetInOneGroup.points[0] + oneTargetInOneGroup.points[2]) / 2 < self._imageSize[0]:
+                            left_target_group["points"] = oneTargetInOneGroup
+                        else:
+                            right_target_group["points"] = oneTargetInOneGroup
+                    if isinstance(oneTargetInOneGroup, Bbox):
+                        if (oneTargetInOneGroup.get_bbox()[0] + oneTargetInOneGroup.get_bbox()[2] / 2) < self._imageSize[0]:
+                            left_target_group["bbox"] = oneTargetInOneGroup
+                        else:
+                            right_target_group["bbox"] = oneTargetInOneGroup
+                left_targets.append(left_target_group)
+                right_targets.append(right_target_group)
+            else:
+                for oneTargetInOneGroup in oneGroup:
+                    bboxThisGroup = oneTargetInOneGroup.get_bbox()
+                    if (bboxThisGroup[0] + bboxThisGroup[2] / 2) < self._imageSize[0]:
+                        left_targets.append(oneTargetInOneGroup)
+                    else:
+                        right_targets.append(oneTargetInOneGroup)
         
         # # -------- test code --------
         # debug_path = "/root/data/debug_tumvie_dataload/"
@@ -138,12 +179,23 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             raise
         try:
             for indexTarget in range(len(left_targets)):
-                if left_targets[indexTarget].label != right_targets[indexTarget].label:
-                    print("!!Error: frame ({}) stereo targets class indexNotMatch: left {}, right {}".format(indexFrame, left_targets[indexTarget].label, right_targets[indexTarget].label))
+                left_target = left_targets[indexTarget]
+                right_target = right_targets[indexTarget]
+                if isinstance(left_target, dict):
+                    left_target_points = left_target["points"]
+                    left_target = left_target["bbox"]
+                    right_target_points = right_target["points"]
+                    right_target = right_target["bbox"]
+                else:
+                    left_target_points, right_target_points = None, None
+
+                if left_target.label != right_target.label:
+                    print("!!Error: frame ({}) stereo targets class indexNotMatch: left {}, right {}".format(indexFrame, left_target.label, right_target.label))
                     continue
-                labels.append(numpy.array([int(left_targets[indexTarget].label)]))
-                left_bbox = left_targets[indexTarget].get_bbox()  # Note: format [x_min, y_min, w, h]
-                right_bbox = right_targets[indexTarget].get_bbox()
+
+                labels.append(numpy.array([int(left_target.label)]))
+                left_bbox = left_target.get_bbox()  # Note: format [x_min, y_min, w, h]
+                right_bbox = right_target.get_bbox()
                 x_center = left_bbox[0] + left_bbox[2] / 2
                 y_center = left_bbox[1] + left_bbox[3] / 2
                 x_center_r = right_bbox[0] + right_bbox[2] / 2
@@ -171,44 +223,43 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                     )[numpy.newaxis, :]
                 )
 
-                if isinstance(left_targets[indexTarget], Polygon):
-                    left_corners = numpy.array(left_targets[indexTarget].points).reshape(-1, 2)  # Note: format [x_min, y_min, w, h]
+                if isinstance(left_target, Polygon):
+                    left_corners = numpy.array(left_target.points).reshape(-1, 2)
                     leftcorners.append(
-                        numpy.mean(
-                            numpy.array([
-                                [left_corners[0][0], left_corners[0][1], 2],
-                                [left_corners[1][0], left_corners[1][1], 2],
-                                [left_corners[2][0], left_corners[2][1], 2],
-                                [left_corners[3][0], left_corners[3][1], 2]
-                            ]),
-                            axis=0
-                        )[None, None, :]
+                        FormatKeypoints(left_corners, self._max_num_keypoints)[None, :]
                     )
-                    right_corners = numpy.array(right_targets[indexTarget].points).reshape(-1, 2)  # Note: format [x_min, y_min, w, h]
+
+                    right_corners = numpy.array(right_target.points).reshape(-1, 2)
+                    for ii in range(right_corners.shape[0]):
+                        right_corners[ii][0] -= self._imageSize[0]
                     rightcorners.append(
-                        numpy.mean(
-                            numpy.array([
-                                [right_corners[0][0] - self._imageSize[0], right_corners[0][1], 2],
-                                [right_corners[1][0] - self._imageSize[0], right_corners[1][1], 2],
-                                [right_corners[2][0] - self._imageSize[0], right_corners[2][1], 2],
-                                [right_corners[3][0] - self._imageSize[0], right_corners[3][1], 2]
-                            ]),
-                            axis=0
-                        )[None, None, :]
+                        FormatKeypoints(right_corners, self._max_num_keypoints)[None, :]
+                    )
+                elif left_target_points is not None:
+                    # Bbox with separate key points
+                    left_corners = numpy.array(left_target_points.points).reshape(-1, 2)
+                    leftcorners.append(
+                        FormatKeypoints(left_corners, self._max_num_keypoints)[None, :]
+                    )
+                    right_corners = numpy.array(right_target_points.points).reshape(-1, 2)
+                    rightcorners.append(
+                        FormatKeypoints(right_corners, self._max_num_keypoints)[None, :]
                     )
                 else:
-                    # Bbox
-                    left_bbox = left_targets[indexTarget].get_bbox()  # Note: format [x_min, y_min, w, h]
+                    # Bbox without separate key points
+                    left_bbox = left_target.get_bbox()  # Note: format [x_min, y_min, w, h]
                     leftcorners.append(
-                        numpy.array([
-                            left_bbox[0] + left_bbox[2] / 2, left_bbox[1] + left_bbox[3] / 2, 2
-                        ])[None, None, :]
+                        FormatKeypoints(
+                            numpy.array([left_bbox[0] + left_bbox[2] / 2, left_bbox[1] + left_bbox[3] / 2, 2])[None, :],
+                            self._max_num_keypoints
+                        )[None, :]
                     )
-                    right_bbox = right_targets[indexTarget].get_bbox()
+                    right_bbox = right_target.get_bbox()
                     rightcorners.append(
-                        numpy.array([
-                            right_bbox[0] + right_bbox[2] / 2 - self._imageSize[0], right_bbox[1] + right_bbox[3] / 2, 2
-                        ])[None, None, :]
+                        FormatKeypoints(
+                            numpy.array([right_bbox[0] + right_bbox[2] / 2 - self._imageSize[0], right_bbox[1] + right_bbox[3] / 2, 2])[None, :],
+                            self._max_num_keypoints
+                        )[None, :]
                     )
                     
             if bboxes:
@@ -242,7 +293,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
             - 'keypts'
             - 'keypts_right'
         """
-        bboxes, leftcorners, rightcorners = [], [], []
+        bboxes, keypts_left, keypts_right = [], [], []
         labels = []
         for indexInstance, oneInstance in enumerate(labels_data["shapes"]):
             labels.append(numpy.array([int(oneInstance["label"])]))
@@ -267,17 +318,18 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                 [x_keypt2, y_keypt2, 2]
             ])
             rightcorner_oneinstance = leftcorner_oneinstance.copy()
-            leftcorners.append(
+            keypts_left.append(
                 leftcorner_oneinstance[None, :]
             )
             rightcorner_oneinstance[:, 0] = rightcorner_oneinstance[:, 0] - disparity
-            rightcorners.append(
+            keypts_right.append(
                 rightcorner_oneinstance[None, :]
             )
-        bboxes = numpy.concatenate(bboxes, axis=0)
-        labels = numpy.concatenate(labels)
-        keypts_left = numpy.concatenate(leftcorners, axis=0)
-        keypts_right = numpy.concatenate(rightcorners, axis=0)
+        if bboxes:
+            bboxes = numpy.concatenate(bboxes, axis=0)
+            labels = numpy.concatenate(labels)
+            keypts_left = numpy.concatenate(keypts_left, axis=0)
+            keypts_right = numpy.concatenate(keypts_right, axis=0)
         return {
             "bboxes": bboxes,
             "labels": labels,

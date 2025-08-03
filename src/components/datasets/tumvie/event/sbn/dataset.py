@@ -60,7 +60,12 @@ class EventDataset(torch.utils.data.Dataset):
                 event_path = os.path.join(root, location, "events.h5")
                 rectify_map_path = os.path.join(root, location, "rectify_map.h5")
                 self.event_slicer[location] = EventSlicer(
-                    event_path, rectify_map_path, num_of_event, num_of_future_event, event_h=self.event_h, event_w=self.event_w
+                    event_path,
+                    rectify_map_path,
+                    num_of_event,
+                    num_of_future_event,
+                    event_h=self.event_h,
+                    event_w=self.event_w
                 )
 
             self.stack_function = getattr(stack, stack_method)(
