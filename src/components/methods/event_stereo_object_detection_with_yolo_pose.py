@@ -371,6 +371,7 @@ def train(
                                         "keypts": artifacts[-1][indexInBatch][:, :, :2].detach().cpu().numpy() if artifacts[-1][indexInBatch] is not None else None,
                                     }
                                 )
+                                
                                 tensorBoardLogger.add_image("(train) right sharp preds with keypts", rightimage_visz)
                                 
                                 right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
@@ -385,7 +386,6 @@ def train(
                                     }
                                 )
                                 tensorBoardLogger.add_image("(train) right sharp with GT bboxes", rightimage_gt_visz)
-
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
         try:
@@ -541,6 +541,16 @@ def valid(
                     }
                 )
                 tensorBoardLogger.add_image("(valid) left sharp with bboxes", leftimage_visz)
+                leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    {
+                        "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy(),
+                        "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
+                        "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).cpu().numpy(),
+                        "keypts": batch_data["gt_labels"]["objdet"][0]["keypts"][:, :, :2].detach().cpu().numpy(),
+                    }
+                )
+                tensorBoardLogger.add_image("(valid) left sharp with GT bboxes", leftimage_gt_visz)
 
             if models["objdet_head"].is_freeze:
                 left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
@@ -604,6 +614,7 @@ def valid(
                                         "keypts": artifacts[-1][indexInBatch][:, :, :2].detach().cpu().numpy() if artifacts[-1][indexInBatch] is not None else None,
                                     }
                                 )
+
                                 tensorBoardLogger.add_image("(valid) right sharp preds with keypts", rightimage_visz)
                                 
                                 right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
@@ -618,6 +629,11 @@ def valid(
                                     }
                                 )
                                 tensorBoardLogger.add_image("(valid) right sharp with GT bboxes", rightimage_gt_visz)
+                                # ------- debug code --------
+                                # debug_path = "/root/data/debug/"
+                                # stereo_visz = numpy.hstack([leftimage_gt_visz, rightimage_gt_visz])
+                                # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", stereo_visz)
+                                # ------- debug code --------
 
         batchSize = batch_data["event"]["left"].shape[0]
         loss = 0
