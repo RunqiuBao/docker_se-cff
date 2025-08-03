@@ -87,25 +87,35 @@
 #     --seq_idx 3 \
 #     --calib_path /root/data/unitree-go-dataset/calib.json
 
-python3 teod_makedataset.py \
-    --data_root /root/data/planer_seovs/objdet/ \
-    --dataset_type train \
-    --lmdb_dir /root/data/planer_seovs/objdet/train/lmdb/ \
-    --view4label_dir /root/data/planer_seovs/objdet/train/view4label/ \
-    --config_path /root/code/docker_pytorch_trainnn/configs/config_datagen_planerseovs.yaml \
-    --seq_idx_toselect 0 \
-    --seq_idx 0 \
-    --calib_path /root/data/planer_seovs/calib.json
+# python3 teod_makedataset.py \
+#     --data_root /root/data/planer_seovs/objdet/ \
+#     --dataset_type train \
+#     --lmdb_dir /root/data/planer_seovs/objdet/train/lmdb/ \
+#     --view4label_dir /root/data/planer_seovs/objdet/train/view4label/ \
+#     --config_path /root/code/docker_pytorch_trainnn/configs/config_datagen_planerseovs.yaml \
+#     --seq_idx_toselect 0 \
+#     --seq_idx 0 \
+#     --calib_path /root/data/planer_seovs/calib.json
 
 python3 teod_makedataset.py \
-    --data_root /root/data/planer_seovs/objdet/ \
+    --data_root /root/data/unitree-go-dataset/objdet/ \
+    --dataset_type train \
+    --lmdb_dir /root/data/unitree-go-dataset/objdet/train/lmdb/ \
+    --view4label_dir /root/data/unitree-go-dataset/objdet/train/view4label/ \
+    --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
+    --seq_idx_toselect 4 \
+    --seq_idx 5 \
+    --calib_path /root/data/unitree-go-dataset/calib.json
+
+python3 teod_makedataset.py \
+    --data_root /root/data/unitree-go-dataset/objdet/ \
     --dataset_type valid \
-    --lmdb_dir /root/data/planer_seovs/objdet/valid/lmdb/ \
-    --view4label_dir /root/data/planer_seovs/objdet/valid/view4label/ \
-    --config_path /root/code/docker_pytorch_trainnn/configs/config_datagen_planerseovs.yaml \
-    --seq_idx_toselect 0 \
-    --seq_idx 0 \
-    --calib_path /root/data/planer_seovs/calib.json
+    --lmdb_dir /root/data/unitree-go-dataset/objdet/valid/lmdb/ \
+    --view4label_dir /root/data/unitree-go-dataset/objdet/valid/view4label/ \
+    --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
+    --seq_idx_toselect 3 \
+    --seq_idx 4 \
+    --calib_path /root/data/unitree-go-dataset/calib.json
 
 # python3 teod_makedataset.py \
 #     --data_root /root/data/planer_seovs/slam/ \
