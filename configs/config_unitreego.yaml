@@ -90,7 +90,7 @@ MODEL:
   concentration_net_cfg:
     DICTKEY: concentration_net
     CLASSNAME: ConcentrationNet
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       in_channels: 10
       attention_method: soft
@@ -98,7 +98,7 @@ MODEL:
   disp_head_cfg:
     DICTKEY: disp_head
     CLASSNAME: StereoMatchingNetwork
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       in_channels: 1
       max_disp: 168
@@ -140,11 +140,11 @@ MODEL:
       nms_iou_threshold: 0.5
       # inference param
       nms_iou_threshold_inference: 0.3
-      confidence_threshold_inference: 0.9
+      confidence_threshold_inference: 0.01
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       # detection
       num_classes: 3
@@ -166,8 +166,7 @@ MODEL:
       r_iou_threshold: 0.9
       candidates_k: 49
       # inference:
-      rscore_threshold: 0.9
-      right_confidence_threshold_inference: 0.83
+      right_confidence_threshold_inference: 0.1
 LOSSES:
   concentration_net_cfg:
     skiplossconf: True
