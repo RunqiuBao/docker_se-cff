@@ -673,6 +673,9 @@ def test(
     
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
+    previous_preds = None
+    previous_ts = None
+    previous_prediction_dict = None
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         starttime = time.time()
@@ -815,24 +818,42 @@ def test(
                 ], dim=1),
                 imageHeight=batch_data["image_metadata"]["h_cam"],
                 imageWidth=batch_data["image_metadata"]["w_cam"],
-                margin=10
+                margin=10,
+                right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"]
+            )
+            preds = FilterTemporal(
+                preds,
+                previous_preds,
+                iou_threshold_for_matching=0.2,
+                iou_leftright_for_filtering=0.7,
+                area_change_threshold=0.7
+            )
+            previous_preds = FilterTemporal(
+                previous_preds,
+                preds,
+                iou_threshold_for_matching=0.2,
+                iou_leftright_for_filtering=0.7,
+                area_change_threshold=0.7
             )
             if preds is not None:
-                prediction_dict = {
+                if previous_preds is not None:
+                    SaveTestResultsAndVisualize(
+                        previous_prediction_dict,
+                        indexBatch,
+                        previous_ts,
+                        sequence_name,
+                        save_root,
+                        batch_data["image_metadata"]
+                    )
+                previous_preds = preds
+                previous_ts = batch_data["end_timestamp"].item()
+                previous_prediction_dict = {
                     "objdet": [preds],
                     "concentrate": {
                         "left": left_event_sharp,
                         "right": right_event_sharp
                     }
                 }
-                SaveTestResultsAndVisualize(
-                    prediction_dict,
-                    indexBatch,
-                    batch_data["end_timestamp"].item(),
-                    sequence_name,
-                    save_root,
-                    batch_data["image_metadata"]
-                )
             else:
                 logger.error("batch {} has no valid detections.".format(indexBatch))
         else:
@@ -843,7 +864,7 @@ def test(
     return
 
 
-def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int):
+def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int, right_confidence_threshold: float):
     """
     delete objects whose bboxes are within 4 edges' margin of the image.
     delete objects whose keypoints are outside of the bbox.
@@ -872,31 +893,81 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
         ):
             print("{}-th object is filtered out due to inside image edge margin.".format(i))
             continue
-        isKeyptsOutsideBbox = False
-        for indexKeypt in range(max_num_keypoints):
-            if preds[i][11 + indexKeypt * 3 + 2] > 0:
-                # keypoint is visible
-                if (
-                    preds[i][11 + indexKeypt * 3] < preds[i][0]
-                    or preds[i][11 + indexKeypt * 3] > preds[i][2]
-                    or preds[i][11 + indexKeypt * 3 + 1] < preds[i][1]
-                    or preds[i][11 + indexKeypt * 3 + 1] > preds[i][3]
-                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] < preds[i][4]
-                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] > preds[i][6]
-                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] < preds[i][5]
-                    or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] > preds[i][7]
-                ):
-                    isKeyptsOutsideBbox = True
-                    break
-        if isKeyptsOutsideBbox:
-            print("{}-th object is filtered out due to keypoints outside bbox.".format(i))
+        if preds[i][10] < right_confidence_threshold:
+            print("{}-th object is filtered out due to low right confidence.".format(i))
             continue
+        if (preds[i][2] - preds[i][0]) * (preds[i][3] - preds[i][1]) < 600:  # bbox area should be larger than 2000 pixels
+            print("{}-th object is filtered out due to too small bbox area.".format(i))
+            continue
+        # isKeyptsOutsideBbox = False
+        # for indexKeypt in range(max_num_keypoints):
+        #     if preds[i][11 + indexKeypt * 3 + 2] > 0:
+        #         # keypoint is visible
+        #         if (
+        #             preds[i][11 + indexKeypt * 3] < preds[i][0]
+        #             or preds[i][11 + indexKeypt * 3] > preds[i][2]
+        #             or preds[i][11 + indexKeypt * 3 + 1] < preds[i][1]
+        #             or preds[i][11 + indexKeypt * 3 + 1] > preds[i][3]
+        #             or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] < preds[i][4]
+        #             or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3] > preds[i][6]
+        #             or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] < preds[i][5]
+        #             or preds[i][11 + max_num_keypoints * 3 + indexKeypt * 3 + 1] > preds[i][7]
+        #         ):
+        #             isKeyptsOutsideBbox = True
+        #             break
+        # if isKeyptsOutsideBbox:
+        #     print("{}-th object is filtered out due to keypoints outside bbox.".format(i))
+        #     continue
         new_preds.append(preds[i].unsqueeze(0))
         print("{}-th object is kept.".format(i))
     if len(new_preds) > 0:
         return torch.concat(new_preds, dim=0)
     else:
         return None
+    
+
+def FilterTemporal(preds: Tensor, ref_preds: Tensor, iou_threshold_for_matching: float, iou_leftright_for_filtering: float, area_change_threshold: float):
+    """
+    temporal filtering based on area change of the bboxes. Filter out the suddenly-small bboxes.
+    """
+    if ref_preds is None or preds is None:
+        return preds
+    
+    new_preds = []
+    for pred in preds:
+        found_match = False
+        for ref_pred in ref_preds:
+            max_x_tl = max(pred[0], ref_pred[0])
+            max_y_tl = max(pred[1], ref_pred[1])
+            min_x_br = min(pred[2], ref_pred[2])
+            min_y_br = min(pred[3], ref_pred[3])
+            overlap_area = (min_x_br - max_x_tl) * (min_y_br - max_y_tl)
+            union_area = (pred[2] - pred[0]) * (pred[3] - pred[1]) + (ref_pred[2] - ref_pred[0]) * (ref_pred[3] - ref_pred[1]) - overlap_area
+            iou = max(overlap_area / union_area, 0)
+            if iou < iou_threshold_for_matching:
+                continue
+            # found match
+            found_match = True
+            area_pred = (pred[2] - pred[0]) * (pred[3] - pred[1])
+            area_previous = (ref_pred[2] - ref_pred[0]) * (ref_pred[3] - ref_pred[1])
+            max_x_tl_r = max(pred[4], ref_pred[4])
+            max_y_tl_r = max(pred[5], ref_pred[5])
+            min_x_br_r = min(pred[6], ref_pred[6])
+            min_y_br_r = min(pred[7], ref_pred[7])
+            overlap_area_r = (min_x_br_r - max_x_tl_r) * (min_y_br_r - max_y_tl_r)
+            union_area = (pred[6] - pred[4]) * (pred[7] - pred[5]) + (ref_pred[6] - ref_pred[4]) * (ref_pred[7] - ref_pred[5]) - overlap_area_r
+            iou_right = max(overlap_area_r / union_area, 0)
+            if area_pred < area_previous * area_change_threshold:
+                break
+            elif iou > iou_leftright_for_filtering and iou_right < iou_leftright_for_filtering:
+                break
+            else:
+                new_preds.append(pred.unsqueeze(0))
+                break
+        if not found_match:
+            new_preds.append(pred.unsqueeze(0))
+    logger.info("temporalFilter: found {} valid preds in {} preds".format(len(new_preds), preds.shape[0]))
+    return torch.concat(new_preds, dim=0) if len(new_preds) > 0 else None
 
 
 @torch.no_grad
@@ -965,7 +1036,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     detresults_openmode = "w"
     batch_size = len(pred['objdet'])
     for indexInBatch, detection in enumerate(pred['objdet']):
-        with open(os.path.join(path_det_results_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".txt"), detresults_openmode) as detresult_file:
+        with open(os.path.join(path_det_results_folder, str(timestamp) + ".txt"), detresults_openmode) as detresult_file:
             for indexDet in range(detection.shape[0]):
                 oneDet = numpy.array2string(detection[indexDet].cpu().numpy(), separator=" ", max_line_width=numpy.inf, formatter={'float_kind':lambda x: "%.4f" % x})[1:-1]
                 detresult_file.write(oneDet + "\n")
@@ -1009,13 +1080,13 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
             )
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(path_det_visz_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), visz)
+        cv2.imwrite(os.path.join(path_det_visz_folder, str(timestamp) + ".png"), visz)
         left_concentrated = pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
         left_concentrated = left_concentrated - left_concentrated.min()
         left_concentrated = (left_concentrated * 255 / left_concentrated.max()).astype('uint8')
         right_concentrated = pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
         right_concentrated = right_concentrated - right_concentrated.min()
         right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
-        cv2.imwrite(os.path.join(path_concentrate_left_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), left_concentrated)
-        cv2.imwrite(os.path.join(path_concentrate_right_folder, str(indexBatch * batch_size + indexInBatch).zfill(6) + ".png"), right_concentrated)
+        cv2.imwrite(os.path.join(path_concentrate_left_folder, str(timestamp) + ".png"), left_concentrated)
+        cv2.imwrite(os.path.join(path_concentrate_right_folder, str(timestamp) + ".png"), right_concentrated)
     return
