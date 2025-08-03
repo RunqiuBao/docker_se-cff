@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 200
+TOTAL_EPOCH: 100
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -139,8 +139,8 @@ MODEL:
       nms_pre: 100
       nms_iou_threshold: 0.5
       # inference param
-      nms_iou_threshold_inference: 0.3
-      confidence_threshold_inference: 0.5
+      nms_iou_threshold_inference: 0.7
+      confidence_threshold_inference: 0.1
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
@@ -162,7 +162,7 @@ MODEL:
       act_cfg:
         type: ReLU
       # right bbox regression
-      right_roi_feat_size: 14
+      right_roi_feat_size: 28
       keypts_distance_threshold: 20.0
       r_iou_threshold: 0.4
       candidates_k: 30
