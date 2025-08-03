@@ -704,12 +704,12 @@ class StereoDetectionHead(nn.Module):
             # right bboxes scores
             rbboxes_scores = right_scores.view(num_detections, variation_size_squared, -1)
             # negative samples (iou < thres) are assigned to the background class. See mmdet, bbox_head.py::BBoxHead::_get_targets_single()
-            rbboxes_scores_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared)
-            rbboxes_scores_targets[~pos_mask] = self._config['num_classes']
-            label_weights = torch.ones_like(rbboxes_scores_targets)
+            rbboxes_cls_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared)
+            rbboxes_cls_targets[~pos_mask] = self._config['num_classes']
+            label_weights = torch.ones_like(rbboxes_cls_targets)
             loss_rscore_one = self.loss_rcls(
                 rbboxes_scores.view(num_detections * variation_size_squared, -1),
-                rbboxes_scores_targets.view(-1),
+                rbboxes_cls_targets.view(-1),
                 label_weights.view(-1),
                 avg_factor=max(torch.sum(label_weights > 0).float().item(), 1.)
             )
@@ -969,6 +969,7 @@ class StereoDetectionHead(nn.Module):
         class_labels_pred = best_class_labels[batchIndices, indices_highest_score]
         mask_nonbackground = class_labels_pred != num_classes
         if mask_nonbackground.sum() == 0:
+            print("Warning: all detections are classified as bkground, no valid detections.")
             return mask_nonbackground, None, None, None
         else:
             sbboxes_priors_nobkg = sbboxes_priors[mask_nonbackground]
@@ -1053,6 +1054,7 @@ class StereoDetectionHead(nn.Module):
         hs = torch.clamp(intersectionBox_br_y - intersectionBox_tl_y, min=0, max=None)
         intersectionAreas = ws * hs  # [B, num_grids]
         unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
+        unionAreas = unionAreas - intersectionAreas
         ious = intersectionAreas / unionAreas
         return ious, torch.max(ious, dim=-1)[1]
 
@@ -1060,7 +1062,7 @@ class StereoDetectionHead(nn.Module):
         """
         for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
         If candidates within IoU_thres are less than candidates_k, 0 pad them.
-        Make sure at least one candidate for each gt.
+        Make sure at least 8 candidates for each gt.
 
         Args:
             bboxes_preds: shape (N, num_grids, 4)
@@ -1077,7 +1079,7 @@ class StereoDetectionHead(nn.Module):
         with torch.no_grad():
             topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=1)
             valid_mask = topk_scores > iou_thres
-            valid_mask[:, 0] = True  # Note: make sure at least one candidate for each gt; torch.topk sorted topk_scores and the first one is theoretically the best.
+            valid_mask[:, :8] = True  # Note: make sure at least 8 candidates for each gt; torch.topk sorted topk_scores and the first one is theoretically the best.
             topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (N, k)
         
         pseudo_bboxes = torch.zeros(num_detections, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
