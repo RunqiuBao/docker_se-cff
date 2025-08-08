@@ -5,6 +5,8 @@ DATASET:
     NAME: tumvie
     PARAMS:
       split: train
+      event_raw_height: 480
+      event_raw_width: 640
       event_height: 418
       event_width: 578
       event_rectified_height: 418
@@ -27,6 +29,8 @@ DATASET:
     NAME: tumvie
     PARAMS:
       split: valid
+      event_raw_height: 480
+      event_raw_width: 640
       event_height: 418
       event_width: 578
       event_rectified_height: 418
@@ -49,6 +53,8 @@ DATASET:
     NAME: tumvie
     PARAMS:
       split: test
+      event_raw_height: 480
+      event_raw_width: 640
       event_height: 418
       event_width: 578
       event_rectified_height: 418
