@@ -786,6 +786,12 @@ class StereoDetectionHead(nn.Module):
                 rbboxes_scores,
                 right_keypts_pred
             )
+            # # ----------- debug code -----------
+            # refined_sbboxes_nobkg = sbboxes_priors[:, 16, :]
+            # right_keypts_pred_nobkg = right_keypts_pred[:, 16, 0, :].view(-1, 2, 3)
+            # mask_nonbackground = torch.ones_like(mask_nonbackground, dtype=torch.bool)
+            # # ----------- debug code -----------
+
             list_sbboxes_pred_refined.append(refined_sbboxes_nobkg)
             pos_gt_nobkg_masks.append(mask_nonbackground)
             list_right_keypts_pred.append(right_keypts_pred_nobkg)

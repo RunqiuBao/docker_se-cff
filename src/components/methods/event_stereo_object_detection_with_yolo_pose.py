@@ -232,7 +232,7 @@ def train(
             logger.debug("data timestamp: {}, {}".format(batch_data["event"]["timestamp"][0], batch_data["objdet"][0]["timestamp"]))
             disp_map = pred_disparity_pyramid[-1].detach().cpu()
             disp_map *= 255 / disp_map.max()
-            tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
+            tensorBoardLogger.add_image("disp_map", disp_map[0, ...].to(torch.uint8).squeeze())
             viz_left_sharp = left_event_sharp[0].detach().squeeze().cpu()
             viz_left_sharp -= viz_left_sharp.min()
             viz_left_sharp /= viz_left_sharp.max()
@@ -260,6 +260,7 @@ def train(
                 }
             )[0]
             tensorBoardLogger.add_image("right_sharp", viz_right_sharp.to(torch.uint8).squeeze())
+            tensorBoardLogger.add_image("disparity gt",  batch_data["gt_labels"]["disparity"].to(torch.uint8).detach().cpu()[0, ...])
 
         if models["disp_head"].module.is_freeze:
             objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, False)
@@ -386,6 +387,21 @@ def train(
                                     }
                                 )
                                 tensorBoardLogger.add_image("(train) right sharp with GT bboxes", rightimage_gt_visz)
+                                # # ------- debug code --------
+                                # leftimage_visz = RenderImageWithBboxesAndKeypts(
+                                #     left_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                #     {
+                                #         "bboxes": left_selected_boxes[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "classes": left_selected_classes[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "confidences": left_selected_confidences[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "keypts": left_selected_keypts[left_selected_batchidx == indexInBatch][:, :, :].detach().cpu().numpy(),
+                                #     }
+                                # )
+                                # debug_path = "/root/data/debug_train/"
+                                # stereo_visz = numpy.hstack([leftimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']], rightimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]])
+                                # cv2.imwrite(debug_path + str(indexInBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", stereo_visz)
+                                # # ------- debug code --------
+
         # backward and optimize
         batchSize = batch_data["event"]["left"].shape[0]
         try:
@@ -486,9 +502,38 @@ def valid(
 
         # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
         if tensorBoardLogger is not None:
+            logger.debug("data timestamp: {}, {}".format(batch_data["event"]["timestamp"][0], batch_data["objdet"][0]["timestamp"]))
             disp_map = pred_disparity_pyramid[-1].detach().cpu()
             disp_map *= 255 / disp_map.max()
-            tensorBoardLogger.add_image("disp_map", disp_map.to(torch.uint8).squeeze())
+            tensorBoardLogger.add_image("disp_map (valid)", disp_map[0, ...].to(torch.uint8).squeeze())
+            viz_left_sharp = left_event_sharp[0].detach().squeeze().cpu()
+            viz_left_sharp -= viz_left_sharp.min()
+            viz_left_sharp /= viz_left_sharp.max()
+            viz_left_sharp *= 255
+            viz_left_sharp = RenderImageWithBboxes(
+                viz_left_sharp.squeeze().cpu().numpy(),
+                {
+                    "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu(),
+                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu(),
+                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).detach().cpu()
+                }
+            )[0]
+            tensorBoardLogger.add_image("left_sharp (valid)", viz_left_sharp.to(torch.uint8).squeeze())
+            viz_right_sharp = right_event_sharp[0].detach().squeeze().cpu()
+            viz_right_sharp -= viz_right_sharp.min()
+            viz_right_sharp /= viz_right_sharp.max()
+            viz_right_sharp *= 255
+            gt_bboxes_right =  batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu()[:, [4, 1, 5, 3]]
+            viz_right_sharp = RenderImageWithBboxes(
+                viz_right_sharp.squeeze().cpu().numpy(),
+                {
+                    "bboxes": gt_bboxes_right,
+                    "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu(),
+                    "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][0]["labels"]).detach().cpu()
+                }
+            )[0]
+            tensorBoardLogger.add_image("right_sharp (valid)", viz_right_sharp.to(torch.uint8).squeeze())
+            tensorBoardLogger.add_image("disparity gt (valid)",  batch_data["gt_labels"]["disparity"].to(torch.uint8).detach().cpu()[0, ...])
 
         if models["disp_head"].is_freeze:
             objdet_targets = preprocess_batch(batch_data["gt_labels"]["objdet"], batch_img_metas, False)
@@ -629,11 +674,36 @@ def valid(
                                     }
                                 )
                                 tensorBoardLogger.add_image("(valid) right sharp with GT bboxes", rightimage_gt_visz)
-                                # ------- debug code --------
-                                # debug_path = "/root/data/debug/"
-                                # stereo_visz = numpy.hstack([leftimage_gt_visz, rightimage_gt_visz])
-                                # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", stereo_visz)
-                                # ------- debug code --------
+
+                                # # ------- debug code --------
+                                # debug_path = "/root/data/debug_valid/"
+                                # leftimage_visz = RenderImageWithBboxesAndKeypts(
+                                #     left_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                #     {
+                                #         "bboxes": left_selected_boxes[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "classes": left_selected_classes[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "confidences": left_selected_confidences[left_selected_batchidx == indexInBatch].detach().cpu().numpy(),
+                                #         "keypts": left_selected_keypts[left_selected_batchidx == indexInBatch][:, :, :].detach().cpu().numpy(),
+                                #     }
+                                # )
+                                # leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                #     left_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                #     {
+                                #         "bboxes": batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy(),
+                                #         "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
+                                #         "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]).cpu().numpy(),
+                                #         "keypts": batch_data["gt_labels"]["objdet"][indexInBatch]["keypts"][:, :, :2].detach().cpu().numpy(),
+                                #     }
+                                # )
+                                # disparity_visz = numpy.vstack([
+                                #     pred_disparity_pyramid[-1][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']],
+                                #     batch_data["gt_labels"]["disparity"][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]
+                                # ])
+                                # disparity_visz = cv2.cvtColor(disparity_visz, cv2.COLOR_GRAY2BGR)
+                                # stereo_visz = numpy.vstack([leftimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']], rightimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]])
+                                # all_visz = numpy.hstack([disparity_visz, stereo_visz])
+                                # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", all_visz)
+                                # # ------- debug code --------
 
         batchSize = batch_data["event"]["left"].shape[0]
         loss = 0
@@ -817,6 +887,23 @@ def test(
             #                                                                                                           l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
             # TODO: mark right confidences on the result visz image.
             left_bboxes_final = left_bboxesClsKeypts_nmsed_topked[0][mask_nonbackground][:, 0:4]
+            # # -------------- debug code --------------
+            # dummy_results = batch_sbboxes_priors[0][0, :, 16, :]
+            # dummy_results = torch.concat([
+            #     dummy_results[:, :4],
+            #     dummy_results[:, 4].unsqueeze(-1),
+            #     dummy_results[:, 1].unsqueeze(-1),
+            #     dummy_results[:, 5].unsqueeze(-1),
+            #     dummy_results[:, 3].unsqueeze(-1)
+            # ], dim=-1)
+            # dummy_results = torch.concat([
+            #     dummy_results,
+            #     torch.ones((dummy_results.shape[0], 3), device=dummy_results.device, dtype=dummy_results.dtype),
+            #     torch.zeros((dummy_results.shape[0], 12), device=dummy_results.device, dtype=dummy_results.dtype),
+            # ], dim=-1)
+            # preds = dummy_results
+            # # -------------- debug code --------------
+
             preds = FilterBadDetections(
                 torch.concat([
                     left_bboxes_final,
@@ -851,9 +938,10 @@ def test(
                 iou_leftright_for_filtering=0.7,
                 area_change_threshold=0.7
             )
+
             if preds is not None:
                 if previous_preds is not None:
-                    SaveTestResultsAndVisualize(
+                    stereo_visz = SaveTestResultsAndVisualize(
                         previous_prediction_dict,
                         indexBatch,
                         previous_ts,
@@ -861,6 +949,13 @@ def test(
                         save_root,
                         batch_data["image_metadata"]
                     )
+                    # # -------------- debug code --------------
+                    # os.makedirs("/root/data/debug_test/", exist_ok=True)
+                    # h, w = stereo_visz[0].shape[:2]
+                    # h = h // 2
+                    # cv2.imwrite("/root/data/debug_test/" + str(previous_prediction_dict['ts']) + ".png", numpy.vstack([previous_prediction_dict['disp'][:h, :w], stereo_visz[0]]))
+                    # # -------------- debug code --------------
+
                 previous_preds = preds
                 previous_ts = batch_data["end_timestamp"].item()
                 previous_prediction_dict = {
@@ -868,7 +963,9 @@ def test(
                     "concentrate": {
                         "left": left_event_sharp,
                         "right": right_event_sharp
-                    }
+                    },
+                    "ts": previous_ts,
+                    "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR)
                 }
             else:
                 logger.error("batch {} has no valid detections.".format(indexBatch))
@@ -1066,6 +1163,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
     imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
     facets_info_batch = []
+    stereo_visz = []
     for indexInBatch, detection in enumerate(pred['objdet']):
         max_num_keypoints = (detection.shape[1] - 10) // 3 // 2
         left_bboxes = detection[:, 0:4].cpu().numpy()
@@ -1105,4 +1203,5 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
         cv2.imwrite(os.path.join(path_concentrate_left_folder, str(timestamp) + ".png"), left_concentrated)
         cv2.imwrite(os.path.join(path_concentrate_right_folder, str(timestamp) + ".png"), right_concentrated)
-    return
+        stereo_visz.append(numpy.vstack([visz_left, visz_right]))
+    return stereo_visz
