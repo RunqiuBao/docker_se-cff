@@ -10,7 +10,7 @@ save_root=/root/code/docker_pytorch_trainnn/experiments/unitree/
 num_workers=4
 NUM_PROC=4
 
-CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} #--resume_cpt /root/code/docker_pytorch_trainnn/weights_disp_unitree/best2.pth --only_resume_weight #--only_test # --not_resume_weight_from stereo_detection_head # --only_test # --only_test # --is_save_onnx  --only_resume_weight_from concentration_net
+CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} #--resume_cpt /root/code/docker_pytorch_trainnn/weights_disp_unitree/grafted_weights.pth --only_resume_weight #--only_test # --not_resume_weight_from stereo_detection_head # --only_test # --only_test # --is_save_onnx  --only_resume_weight_from concentration_net
 
 # # generate onnx model
 # CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} --resume_cpt /root/code/docker_pytorch_trainnn/weights_keypts_unitree_usevoxel/best.pth --only_resume_weight --only_test --is_save_onnx
