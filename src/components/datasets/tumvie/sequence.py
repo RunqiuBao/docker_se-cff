@@ -70,8 +70,8 @@ class SequenceDataset(torch.utils.data.Dataset):
             timestamps=self.timestamps,
             lmdb_txn=lmdb_txn,
             num_repeat=self._num_repeat if split == "train" else 1,
-            event_h=kwargs["event_height"],
-            event_w=kwargs["event_width"],
+            event_h=kwargs["event_height"] if lmdb_txn is not None else kwargs["event_raw_height"],
+            event_w=kwargs["event_width"] if lmdb_txn is not None else kwargs["event_raw_width"],
             **event_cfg.PARAMS,
         )
 
