@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 500
+TOTAL_EPOCH: 150
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -13,8 +13,8 @@ DATASET:
       crop_height: 480
       crop_width: 672
       randomhorizontalflip: False
-      randomcrop: True
-      num_repeat: 2
+      randomcrop: False
+      num_repeat: 1
       isLoadCOCOFormat: False
       max_num_keypoints: 4
       event_cfg:
@@ -118,7 +118,7 @@ MODEL:
   objdet_head_cfg:
     DICTKEY: objdet_head
     CLASSNAME: YoloPose
-    is_freeze: False
+    is_freeze: True
     PARAMS:
       min_bbox_size: 5
       # detection
@@ -145,7 +145,7 @@ MODEL:
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
-    is_freeze: True
+    is_freeze: False
     PARAMS:
       # detection
       num_classes: 2
