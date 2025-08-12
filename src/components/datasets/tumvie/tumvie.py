@@ -25,6 +25,7 @@ class TumVieDataset(torch.utils.data.Dataset):
         num_workers=0,
         defineSeqIdx=None,
         isDisableLmdbRead=False,
+        seqsToUse=None,
         **kwargs,
     ):
         self.root = root
@@ -48,6 +49,8 @@ class TumVieDataset(torch.utils.data.Dataset):
         sequence_list = DATA_SPLIT[kwargs.get("config_name", "default")][split]
         if defineSeqIdx is not None:
             sequence_list = [sequence_list[defineSeqIdx]]
+        if seqsToUse is not None:
+            sequence_list = [sequence_list[i] for i in seqsToUse]
             
         self.sequence_data_list = []
         for sequence in sequence_list:
