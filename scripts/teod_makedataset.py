@@ -198,6 +198,8 @@ def main(args):
         defineSeqIdx=args.seq_idx_toselect,
         isDisableLmdbRead=True
     )
+    if isinstance(data_loader, list):
+        data_loader = data_loader[0]
     data_iter = iter(data_loader)
 
     stereo_calib_dict = None
