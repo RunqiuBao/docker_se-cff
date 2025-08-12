@@ -760,8 +760,7 @@ def test(
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
     previous_preds = None
-    previous_ts = None
-    previous_prediction_dict = None
+    prediction_dict = None
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         starttime = time.time()
@@ -827,7 +826,7 @@ def test(
             iou_thres=models["objdet_head"].module.config["nms_iou_threshold_inference"],
             labels=[],
             nc=models["objdet_head"].module.config["num_classes"],
-            multi_label=True,
+            multi_label=False,
             agnostic=False,
             max_det=models["objdet_head"].module.config["num_topk_candidates"],
             end2end=False,
@@ -921,52 +920,45 @@ def test(
                 ], dim=1),
                 imageHeight=batch_data["image_metadata"]["h_cam"],
                 imageWidth=batch_data["image_metadata"]["w_cam"],
-                margin=10,
-                right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"]
+                margin=4,
+                right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"],
+                left_right_confidence_diff=models["stereo_detection_head"].module.config["left_right_confidence_diff_inference"],
             )
+            # preds = FilterIrregularBboxes(preds, hw_ratiorange_class0=[1.9, 3.15])
             preds = FilterTemporal(
                 preds,
                 previous_preds,
-                iou_threshold_for_matching=0.2,
-                iou_leftright_for_filtering=0.7,
-                area_change_threshold=0.7
-            )
-            previous_preds = FilterTemporal(
-                previous_preds,
-                preds,
-                iou_threshold_for_matching=0.2,
+                iou_threshold_for_matching=0.4,
                 iou_leftright_for_filtering=0.7,
                 area_change_threshold=0.7
             )
 
             if preds is not None:
-                if previous_preds is not None:
-                    stereo_visz = SaveTestResultsAndVisualize(
-                        previous_prediction_dict,
-                        indexBatch,
-                        previous_ts,
-                        sequence_name,
-                        save_root,
-                        batch_data["image_metadata"]
-                    )
-                    # # -------------- debug code --------------
-                    # os.makedirs("/root/data/debug_test/", exist_ok=True)
-                    # h, w = stereo_visz[0].shape[:2]
-                    # h = h // 2
-                    # cv2.imwrite("/root/data/debug_test/" + str(previous_prediction_dict['ts']) + ".png", numpy.vstack([previous_prediction_dict['disp'][:h, :w], stereo_visz[0]]))
-                    # # -------------- debug code --------------
-
-                previous_preds = preds
-                previous_ts = batch_data["end_timestamp"].item()
-                previous_prediction_dict = {
+                prediction_dict = {
                     "objdet": [preds],
                     "concentrate": {
                         "left": left_event_sharp,
                         "right": right_event_sharp
                     },
-                    "ts": previous_ts,
+                    "ts": batch_data["end_timestamp"].item(),
                     "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR)
                 }
+                stereo_visz = SaveTestResultsAndVisualize(
+                    prediction_dict,
+                    indexBatch,
+                    batch_data["end_timestamp"].item(),
+                    sequence_name,
+                    save_root,
+                    batch_data["image_metadata"]
+                )
+                # # -------------- debug code --------------
+                # os.makedirs("/root/data/debug_test/", exist_ok=True)
+                # h, w = stereo_visz[0].shape[:2]
+                # h = h // 2
+                # cv2.imwrite("/root/data/debug_test/" + str(previous_prediction_dict['ts']) + ".png", numpy.vstack([previous_prediction_dict['disp'][:h, :w], stereo_visz[0]]))
+                # # -------------- debug code --------------
+
+                previous_preds = preds
             else:
                 logger.error("batch {} has no valid detections.".format(indexBatch))
         else:
@@ -977,7 +969,24 @@ def test(
     return
 
 
-def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int, right_confidence_threshold: float):
+def FilterIrregularBboxes(preds: Tensor, hw_ratiorange_class0: list):
+    if preds is None:
+        return None
+    new_preds = []
+    for indexPred in range(preds.shape[0]):
+        pred = preds[indexPred]
+        print(
+            (pred[3] - pred[1]) / (pred[2] - pred[0])
+        )
+        hw_ratio = (pred[3] - pred[1]) / (pred[2] - pred[0])
+        if hw_ratio < hw_ratiorange_class0[0] or hw_ratio > hw_ratiorange_class0[1]:
+            print("bbox {} is filtered out due to irregular hw ratio: {}".format(pred, hw_ratio))
+            continue
+        new_preds.append(pred.unsqueeze(0))
+    return torch.concat(new_preds, dim=0) if len(new_preds) > 0 else None
+
+
+def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int, right_confidence_threshold: float, left_right_confidence_diff: float):
     """
     delete objects whose bboxes are within 4 edges' margin of the image.
     delete objects whose keypoints are outside of the bbox.
@@ -1008,6 +1017,9 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
             continue
         if preds[i][10] < right_confidence_threshold:
             print("{}-th object is filtered out due to low right confidence.".format(i))
+            continue
+        if abs(preds[i][9] - preds[i][10]) > left_right_confidence_diff:
+            print("{}-th object is filtered out due to too much left right confidence diff.".format(i))
             continue
         if (preds[i][2] - preds[i][0]) * (preds[i][3] - preds[i][1]) < 600:  # bbox area should be larger than 2000 pixels
             print("{}-th object is filtered out due to too small bbox area.".format(i))
