@@ -841,7 +841,8 @@ def test(
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
                 batch_img_metas,
-                models["stereo_detection_head"].module.config["bbox_expand_anchor_ticks"]
+                models["stereo_detection_head"].module.config["bbox_move_anchor_ticks"],
+                models["stereo_detection_head"].module.config["bbox_expand_factor"],
             )
             if is_save_onnx:
                 torch.onnx.export(
