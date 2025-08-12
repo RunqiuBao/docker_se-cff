@@ -472,14 +472,15 @@ class StereoDetectionHead(nn.Module):
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
-        bbox_expand_anchor_ticks: float,
+        bbox_move_anchor_ticks: List[float],
+        bbox_expand_factor: float
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
             right_event_voxel: shape is [B, 10, h, w]
             bboxes_pred: list of B tensors of shape [?, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
             disp_prior: [B, h, w] shape.
-            bbox_expand_anchor_ticks: from 0.5 to 2.0, use multiple ticks to resize the bboxes horizontally and increase hypotheses.
+            bbox_move_anchor_ticks: from 0.5 to 2.0, use multiple ticks to resize the bboxes horizontally and vertically to search for different regions.
 
         Returns:
             sbboxes_pred: shape [B, N, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
@@ -503,23 +504,31 @@ class StereoDetectionHead(nn.Module):
 
             # enlarge bboxes
             _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
-            variation_size = len(bbox_expand_anchor_ticks)
-            variation_srclist = torch.tensor(bbox_expand_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
-            col1 = -1 * variation_srclist.repeat(variation_size)
-            col2 = variation_srclist.repeat_interleave(variation_size)
-            variations = torch.stack([col1, col2], dim=1)
+            variation_size = len(bbox_move_anchor_ticks)
+            variation_srclist = torch.tensor(bbox_move_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
+            variations_x = variation_srclist.repeat(variation_size)
+            variations_y = variation_srclist.repeat_interleave(variation_size)
             
-            hdwboxes = (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) / 2.0
+            varitions_lxrx = torch.stack([-(torch.ones_like(variations_x) * 2.0 - variations_x), variations_x], dim=1)
+            hdwboxes = bbox_expand_factor * (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) / 2.0
             cwbboxes = (_bboxes_pred[..., 2] + _bboxes_pred[..., 0]) / 2.0
             hdwboxes = hdwboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
             cwbboxes = cwbboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
-            wbboxes = cwbboxes + variations * hdwboxes
+            wbboxes = cwbboxes + varitions_lxrx * hdwboxes
+
+            variations_tyby = torch.stack([-(torch.ones_like(variations_y) * 2.0 - variations_y), variations_y],  dim=1)
+            dhwboxes = bbox_expand_factor * (_bboxes_pred[..., 3] - _bboxes_pred[..., 1]) / 2.0
+            chbboxes = (_bboxes_pred[..., 3] + _bboxes_pred[..., 1]) / 2.0
+            dhwboxes = dhwboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
+            chbboxes = chbboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)
+            hbboxes = chbboxes + variations_tyby * dhwboxes
 
             _bboxes_pred = _bboxes_pred.unsqueeze(2).repeat(1, 1, variation_size**2, 1)  # [1, N, variation_size, 4]
             right_priors = _bboxes_pred.clone().view(1, -1, 4)  # [1, N * variation_size, 4]
             left_priors = right_priors.clone()
 
-            _bboxes_pred[:, :, :, [0, 2]] = wbboxes[:, :, :, [0,1]]
+            _bboxes_pred[:, :, :, [0, 2]] = wbboxes[:, :, :, [0, 1]]
+            _bboxes_pred[:, :, :, [1, 3]] = hbboxes[:, :, :, [0, 1]]
             _bboxes_pred = _bboxes_pred.view(1, -1, 4)
             
             num_detections = bboxes_pred.shape[1]
@@ -528,7 +537,21 @@ class StereoDetectionHead(nn.Module):
             # extract right bbox roi feature
             xindi = ((bboxes_pred[..., 0] + bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
             yindi = ((bboxes_pred[..., 1] + bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1).squeeze()
+
+            # # directly get disparity
             bbox_disps = disp_prior[indexInBatch][yindi, xindi].unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, -1)
+            # # get a local patch and average to get disparity
+            # with torch.no_grad():
+            #     kernel_size = 7
+            #     rr = kernel_size // 2
+            #     imageWidth = disp_prior[indexInBatch].shape[-1]
+            #     originalDisps_padded = F.pad(disp_prior[indexInBatch].unsqueeze(0).unsqueeze(0), (rr, rr, rr, rr), mode="replicate")
+            #     originalDisps_padded_unfoldered = F.unfold(originalDisps_padded, kernel_size=kernel_size, stride=1)
+            #     idxXy = (yindi.long() * imageWidth + xindi.long()).view(1, 1, -1).expand(1, kernel_size * kernel_size, -1)
+            #     picked_disps = originalDisps_padded_unfoldered.gather(dim=2, index=idxXy).squeeze(0)
+            #     picked_disps = torch.median(picked_disps, dim=0).values
+            #     bbox_disps = picked_disps.unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, -1)
+
             _bboxes_pred[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
             right_priors[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
             rois_right = _bboxes_pred.reshape(-1, 4)
@@ -577,7 +600,7 @@ class StereoDetectionHead(nn.Module):
         if batch_img_metas is None:
             batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
 
-        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_expand_anchor_ticks"])
+        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_move_anchor_ticks"], self._config["bbox_expand_factor"])
         losses = None
         artifacts = None
         if labels is not None and not self.is_freeze:
