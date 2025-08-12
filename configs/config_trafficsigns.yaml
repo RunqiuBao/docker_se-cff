@@ -1,10 +1,12 @@
-TOTAL_EPOCH: 150
+TOTAL_EPOCH: 200
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
     NAME: tumvie
     PARAMS:
       split: train
+      event_raw_height: 480
+      event_raw_width: 640
       sampling_ratio: 1
       event_height: 418
       event_width: 578
@@ -28,6 +30,8 @@ DATASET:
     NAME: tumvie
     PARAMS:
       split: valid
+      event_raw_height: 480
+      event_raw_width: 640
       event_height: 418
       event_width: 578
       event_rectified_height: 418
@@ -50,6 +54,8 @@ DATASET:
     NAME: tumvie
     PARAMS:
       split: test
+      event_raw_height: 480
+      event_raw_width: 640
       sampling_ratio: 1
       event_height: 418
       event_width: 578
@@ -122,7 +128,7 @@ MODEL:
     PARAMS:
       min_bbox_size: 5
       # detection
-      num_classes: 3
+      num_classes: 2
       max_num_keypoints: 4
       in_channels: 10
       oks_sigma: [0.26, 0.25, 0.25, 0.35]
@@ -141,7 +147,7 @@ MODEL:
       nms_iou_threshold: 0.5
       # inference param
       nms_iou_threshold_inference: 0.3
-      confidence_threshold_inference: 0.5
+      confidence_threshold_inference: 0.1
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
@@ -168,7 +174,8 @@ MODEL:
       r_iou_threshold: 0.4
       candidates_k: 30
       # inference:
-      rscore_threshold: 0.9
+      right_confidence_threshold_inference: 0.1
+      left_right_confidence_diff_inference: 1.0
 LOSSES:
   concentration_net_cfg:
     skiplossconf: True
@@ -184,8 +191,8 @@ LOSSES:
     pose_loss_weight: 12.0
     kobj_loss_weight: 1.0
   stereo_detection_head_cfg:
-    rbbox_loss_weight: 1000
-    rkeypts_loss_weight: 100000
+    rbbox_loss_weight: 10000
+    rkeypts_loss_weight: 1000
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:
