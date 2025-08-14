@@ -415,7 +415,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
         if stereo_confidences is not None:
-            text = 'cf:{:.4f},cl:{}'.format(stereo_confidences[ii].item(), classindex)
+            text = '{:.3f},cl:{}'.format(stereo_confidences[ii].item() * 100, classindex)
             textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
             cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
