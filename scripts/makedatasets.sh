@@ -57,15 +57,15 @@
 #     --calib_path /root/data/unitree-go-dataset/calib.json
 
 
-python3 teod_makedataset.py \
-    --data_root /root/data/unitree-go-dataset/objdet/ \
-    --dataset_type train \
-    --lmdb_dir /root/data/unitree-go-dataset/objdet/train/lmdb/ \
-    --view4label_dir /root/data/unitree-go-dataset/objdet/train/view4label/ \
-    --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
-    --seq_idx_toselect 4 \
-    --seq_idx 5 \
-    --calib_path /root/data/unitree-go-dataset/calib_correct.json
+# python3 teod_makedataset.py \
+#     --data_root /root/data/unitree-go-dataset/objdet/ \
+#     --dataset_type train \
+#     --lmdb_dir /root/data/unitree-go-dataset/objdet/train/lmdb/ \
+#     --view4label_dir /root/data/unitree-go-dataset/objdet/train/view4label/ \
+#     --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
+#     --seq_idx_toselect 4 \
+#     --seq_idx 5 \
+#     --calib_path /root/data/unitree-go-dataset/calib_correct.json
 
 # python3 teod_makedataset.py \
 #     --data_root /root/data/unitree-go-dataset/objdet/ \
@@ -97,22 +97,22 @@ python3 teod_makedataset.py \
 #     --seq_idx 3 \
 #     --calib_path /root/data/unitree-go-dataset/calib.json
 
-python3 teod_makedataset.py \
-    --data_root /root/data/unitree-go-dataset/objdet/ \
-    --dataset_type valid \
-    --lmdb_dir /root/data/unitree-go-dataset/objdet/valid/lmdb/ \
-    --view4label_dir /root/data/unitree-go-dataset/objdet/valid/view4label/ \
-    --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
-    --seq_idx_toselect 3 \
-    --seq_idx 4 \
-    --calib_path /root/data/unitree-go-dataset/calib_correct.json
-
 # python3 teod_makedataset.py \
-#     --data_root /root/data/unitree-go-dataset/slam/ \
-#     --dataset_type test \
-#     --lmdb_dir /root/data/unitree-go-dataset/slam/test/lmdb/ \
-#     --view4label_dir /root/data/unitree-go-dataset/slam/test/view4label/ \
+#     --data_root /root/data/unitree-go-dataset/objdet/ \
+#     --dataset_type valid \
+#     --lmdb_dir /root/data/unitree-go-dataset/objdet/valid/lmdb/ \
+#     --view4label_dir /root/data/unitree-go-dataset/objdet/valid/view4label/ \
 #     --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
-#     --seq_idx_toselect 0 \
-#     --seq_idx 14 \
+#     --seq_idx_toselect 3 \
+#     --seq_idx 4 \
 #     --calib_path /root/data/unitree-go-dataset/calib_correct.json
+
+python3 teod_makedataset.py \
+    --data_root /root/data/unitree-go-dataset/slam/ \
+    --dataset_type test \
+    --lmdb_dir /root/data/unitree-go-dataset/slam/test/lmdb/ \
+    --view4label_dir /root/data/unitree-go-dataset/slam/test/view4label/ \
+    --config_path /root/code/docker_pytorch_trainnn/configs/config_unitreego.yaml \
+    --seq_idx_toselect 0 \
+    --seq_idx 14 \
+    --calib_path /root/data/unitree-go-dataset/calib_correct.json

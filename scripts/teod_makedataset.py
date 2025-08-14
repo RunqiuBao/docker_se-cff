@@ -172,24 +172,37 @@ def main(args):
 
     # create dataloader
     dataset_type = args.dataset_type
-    get_data_loader = getattr(
-        datasets,
-        cfg.DATASET.TRAIN.NAME,  # train, valid, test should share the same dataset class
-    ).get_dataloader
-    batch_size = (
-        cfg.DATALOADER.TRAIN.PARAMS.batch_size
-    )
 
     if dataset_type == "train":
         dataset_cfg = cfg.DATASET.TRAIN
         dataloader_cfg = cfg.DATALOADER.TRAIN
+        get_data_loader = getattr(
+            datasets,
+            cfg.DATASET.TRAIN.NAME,  # train, valid, test should share the same dataset class
+        ).get_dataloader
+        batch_size = (
+            cfg.DATALOADER.TRAIN.PARAMS.batch_size
+        )
     elif dataset_type == "valid":
         dataset_cfg = cfg.DATASET.VALID
         dataloader_cfg = cfg.DATALOADER.VALID
+        get_data_loader = getattr(
+            datasets,
+            cfg.DATASET.VALID.NAME,  # train, valid, test should share the same dataset class
+        ).get_dataloader
+        batch_size = (
+            cfg.DATALOADER.VALID.PARAMS.batch_size
+        )
     elif dataset_type == "test":
         dataset_cfg = cfg.DATASET.TEST
-        dataloader_cfg = cfg.DATALOADER.VALID
-
+        dataloader_cfg = cfg.DATALOADER.TEST
+        get_data_loader = getattr(
+            datasets,
+            cfg.DATASET.TEST.NAME,  # train, valid, test should share the same dataset class
+        ).get_dataloader
+        batch_size = (
+            cfg.DATALOADER.TEST.PARAMS.batch_size
+        )
     data_loader = get_data_loader(
         args=args,
         dataset_cfg=dataset_cfg,
@@ -233,18 +246,18 @@ def main(args):
                 tsFile.write(str(ts) + "\n")
                 
                 print("seq_idx: {}, index frame: {}, ts: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch, ts))
-                code_l = "%03d_%06d_l" % (
+                code_l = "%03d_%d_l" % (
                     args.seq_idx,
-                    indexSavedBatch * batch_size + indexInBatch,
+                    ts,
                 )
                 code_l = code_l.encode()
                 leftEvents = numpy.ascontiguousarray(
                     numpy.squeeze(batch_data["event"]["left"][indexInBatch].numpy())
                 )                
 
-                code_r = "%03d_%06d_r" % (
+                code_r = "%03d_%d_r" % (
                     args.seq_idx,
-                    indexSavedBatch * batch_size + indexInBatch,
+                    ts,
                 )
                 code_r = code_r.encode()
                 rightEvents = numpy.ascontiguousarray(
