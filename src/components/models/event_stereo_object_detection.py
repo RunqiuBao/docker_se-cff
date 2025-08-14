@@ -507,6 +507,8 @@ class StereoDetectionHead(nn.Module):
             variation_size = len(bbox_move_anchor_ticks)
             variation_srclist = torch.tensor(bbox_move_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
             variations_x = variation_srclist.repeat(variation_size)
+            alpha = 0.88
+            variation_srclist = variation_srclist * (1 - alpha) + alpha * torch.ones_like(variation_srclist)  # pull values towards 1.0
             variations_y = variation_srclist.repeat_interleave(variation_size)
             
             varitions_lxrx = torch.stack([-(torch.ones_like(variations_x) * 2.0 - variations_x), variations_x], dim=1)
@@ -685,10 +687,8 @@ class StereoDetectionHead(nn.Module):
             # print("stereoNet time cost (loss data uncollapse): {}".format(time.time() - starttime))
             # starttime = time.time()
             
-            try:
-                rbboxes_refined = right_bboxes.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
-            except:
-                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            rbboxes_refined = right_bboxes.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
+
             # advanced indexing to select bboxes for correct class.
             rbboxes_refined_selected = rbboxes_refined[
                 torch.arange(num_detections).view(-1, 1).expand(-1, variation_size_squared),
@@ -707,8 +707,7 @@ class StereoDetectionHead(nn.Module):
                 self._config['r_iou_threshold'],
                 self._config['candidates_k']
             )
-            num_pos_timesk = torch.sum(pos_mask.to(torch.float))
-            num_total_samples_timesk = max(num_pos_timesk, 1.0)
+            foreground_mask = ious >= self._config['r_iou_threshold']
 
             # Note: encoding target and pred right bboxes before computing loss. See mmdet, bbox_head.py::BBoxHead::loss()
             # priors, gts -> encoded priors
@@ -716,7 +715,7 @@ class StereoDetectionHead(nn.Module):
             right_priors_selected[torch.sum(rbboxes_gt_selected, dim=-1) == 0.00] *= 0.0  # for zero columns in gt, make the priors zero as well.
             rbboxes_targets_selected_encoded = self.bbox_coder.encode(right_priors_selected, rbboxes_gt_selected)
             rbboxes_targets_selected_encoded[torch.isnan(rbboxes_targets_selected_encoded)] = 0.0
-            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected_encoded) / num_total_samples_timesk
+            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected_encoded)
             if "loss_rbbox" not in loss_dict:
                 loss_dict["loss_rbbox"] = loss_rbbox_one
             else:
@@ -728,7 +727,7 @@ class StereoDetectionHead(nn.Module):
             rbboxes_scores = right_scores.view(num_detections, variation_size_squared, -1)
             # negative samples (iou < thres) are assigned to the background class. See mmdet, bbox_head.py::BBoxHead::_get_targets_single()
             rbboxes_cls_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared)
-            rbboxes_cls_targets[~pos_mask] = self._config['num_classes']
+            rbboxes_cls_targets[~foreground_mask] = self._config['num_classes']
             label_weights = torch.ones_like(rbboxes_cls_targets)
             loss_rscore_one = self.loss_rcls(
                 rbboxes_scores.view(num_detections * variation_size_squared, -1),
@@ -764,29 +763,41 @@ class StereoDetectionHead(nn.Module):
 
             list_right_keypts_selected_pos = []
             list_keypts_targets_selected_encoded = []
+            list_areas = []
             for indexDet in range(num_detections):
                 right_keypts_selected_one = right_keypts_selected[indexDet][pos_mask[indexDet]]
+                no_keypts_selected = right_keypts_selected_one.shape[0] == 0
+                if no_keypts_selected:
+                    right_keypts_selected_one = right_keypts_selected[indexDet][0, :].unsqueeze(0) * 0.0
                 list_right_keypts_selected_pos.append(
                     right_keypts_selected_one
                 )
+                keypts_targets_selected_one_encoded = keypts_targets_one_encoded[indexDet].unsqueeze(0).repeat(right_keypts_selected_one.shape[0], 1)
+                if no_keypts_selected:
+                    keypts_targets_selected_one_encoded = keypts_targets_one_encoded[indexDet].unsqueeze(0) * 0.0
                 list_keypts_targets_selected_encoded.append(
-                    keypts_targets_one_encoded[indexDet].unsqueeze(0).repeat(right_keypts_selected_one.shape[0], 1)
+                    keypts_targets_selected_one_encoded
                 )
+                right_priors_selected_xywh = xyxy2xywh(right_priors[indexDet][pos_mask[indexDet]])
+                if no_keypts_selected:
+                    right_priors_selected_xywh = right_priors[indexDet][0, :].unsqueeze(0) * 0.0
+                area_one = right_priors_selected_xywh[:, 2:].prod(1, keepdim=True)
+                list_areas.append(area_one)
             right_keypts_selected_pos = torch.cat(list_right_keypts_selected_pos, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
             keypts_targets_selected_encoded = torch.cat(list_keypts_targets_selected_encoded, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
 
             kpt_mask = keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3)[..., 2] > 0
-            area = xyxy2xywh(right_priors[pos_mask])[:, 2:].prod(1, keepdim=True)
+            area = torch.cat(list_areas, dim=0)
             loss_rkeypts = self.loss_keypoint(
                 right_keypts_selected_pos,
                 keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3),
                 kpt_mask,
                 area
-            ) / num_total_samples_timesk
+            )
             loss_rkeypts_obj = self.loss_bce_pose(
                 right_keypts_selected_pos[..., 2],
                 kpt_mask.float()
-            ) / num_total_samples_timesk
+            )
 
             if "loss_rkeypts" not in loss_dict:
                 loss_dict["loss_rkeypts"] = loss_rkeypts
@@ -1091,7 +1102,6 @@ class StereoDetectionHead(nn.Module):
         """
         for each gt, there are N candidates. Find the best candidates based on IoU_thres and candidates_k.
         If candidates within IoU_thres are less than candidates_k, 0 pad them.
-        Make sure at least 8 candidates for each gt.
 
         Args:
             bboxes_preds: shape (N, num_grids, 4)
@@ -1108,9 +1118,8 @@ class StereoDetectionHead(nn.Module):
         with torch.no_grad():
             topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=1)
             valid_mask = topk_scores > iou_thres
-            valid_mask[:, :8] = True  # Note: make sure at least 8 candidates for each gt; torch.topk sorted topk_scores and the first one is theoretically the best.
+            valid_mask[:, :1] = True  # Note: make sure at least 1 candidate for each gt; torch.topk sorted topk_scores and the first one is sorted to be the best.
             topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (N, k)
-        
         pseudo_bboxes = torch.zeros(num_detections, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
         bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=1)
         bboxes_preds_selected = torch.gather(bboxes_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 4))

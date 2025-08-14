@@ -261,10 +261,15 @@ class LocalTrackingHead(nn.Module):
             xindi = ((bboxes_pred[..., 0] + bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
             yindi = ((bboxes_pred[..., 1] + bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1).squeeze()
 
-            bbox_flows = flow_prior[indexInBatch][:, yindi, xindi].unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, 2, -1)
+            bbox_flows = flow_prior[indexInBatch][:, yindi, xindi]
+            bbox_flows = bbox_flows.unsqueeze(-1) if bbox_flows.ndim == 1 else bbox_flows
+            bbox_flows = bbox_flows.unsqueeze(0).unsqueeze(-1).repeat(1, 1, 1, variation_size**2)
 
-            _bboxes_pred[..., [0, 2]] += bbox_flows[:, 0, :].unsqueeze(-1).expand(1, -1, 2)
-            _bboxes_pred[..., [1, 3]] += bbox_flows[:, 1, :].unsqueeze(-1).expand(1, -1, 2)
+            try:
+                _bboxes_pred[..., [0, 2]] += bbox_flows[:, 0, :, :].unsqueeze(-1).view(1, -1, 1).expand(1, -1, 2)
+            except:
+                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            _bboxes_pred[..., [1, 3]] += bbox_flows[:, 1, :, :].unsqueeze(-1).view(1, -1, 1).expand(1, -1, 2)
             rois_targets = _bboxes_pred.reshape(-1, 4)
             rois_targets = torch.cat((batch_number, rois_targets), dim=1)
 
@@ -358,8 +363,7 @@ class LocalTrackingHead(nn.Module):
                 class_labels_pred_nobkg.view(mask_nonbackground.sum(), 1).expand(-1, variation_size_squared)
             ]
             refined_bboxes_nobkg = refined_bboxes_nobkg[torch.arange(mask_nonbackground.sum()), indices_highest_score_nobkg]
-            refined_bboxes_nobkg_decoded = self.bbox_coder.decode(bboxes_priors_nobkg[:, 0, :], refined_bboxes_nobkg.view(-1, 4))
-            refined_bboxes_nobkg[:, [0, 2]] = refined_bboxes_nobkg_decoded[:, [0, 2]]
+            refined_bboxes_nobkg = self.bbox_coder.decode(bboxes_priors_nobkg[:, 0, :], refined_bboxes_nobkg.view(-1, 4))
             refined_bboxes_nobkg = refined_bboxes_nobkg.view(mask_nonbackground.sum(), 4)
             # select best keypoints
             predicted_keypts_nobkg = predicted_keypts_nobkg[

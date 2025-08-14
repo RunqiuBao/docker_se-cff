@@ -416,7 +416,7 @@ def train(
             lossDictAll = {}
         except Exception as e:
             print("Note: one image in the batch might have no valid detection.")
-            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            # import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
         if ema is not None:
             # exponential moving average

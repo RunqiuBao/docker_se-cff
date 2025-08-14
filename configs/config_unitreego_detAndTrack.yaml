@@ -161,7 +161,8 @@ MODEL:
       channels_roi_extraction: 256
       feat_channels: 256
       num_stacked_convs: 2
-      bbox_expand_anchor_ticks: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+      bbox_expand_factor: 1.6
+      bbox_move_anchor_ticks: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
       OKS_SIGMA: [0.26, 0.25]
       norm_cfg:
         type: BN
@@ -175,7 +176,7 @@ MODEL:
       candidates_k: 49
       # inference:
       right_confidence_threshold_inference: 0.1
-      left_right_confidence_diff_inference: 1.0
+      left_right_confidence_diff_inference: 2.0  # tracked one conf > 1.0
   local_tracking_head_cfg:
     DICTKEY: local_tracking_head
     CLASSNAME: LocalTrackingHead
@@ -251,7 +252,7 @@ SCHEDULER:
     PARAMS:
       cycle_mult: 1.0
       first_cycle_steps: 100
-      gamma: 0.995
+      gamma: 0.5
       lr_ratio: 0.0001
       warmup_steps: 3
   scheduler1:
