@@ -22,6 +22,7 @@ from .yolo_pose_utils import xyxy2xywh
 from .objectdetection import StereoEventDetectionHead
 
 from . import losses
+from .losses import varifocal_loss
 from .utils.misc import freeze_module_grads, multi_apply, convert_tensor_to_numpy
 from ..methods.visz_utils import RenderImageWithBboxes, RenderImageWithBboxesAndKeypts
 
@@ -196,7 +197,7 @@ class StereoDetectionHead(nn.Module):
         initialize(self, init_cfg)
         
         # loss
-        self.loss_rcls = MODELS.build({'type': 'CrossEntropyLoss', 'use_sigmoid': False, 'loss_weight': 1.0})
+        self.loss_rscore = varifocal_loss
         self.loss_rbbox = MODELS.build({'type': 'L1Loss', 'loss_weight': 1.0})
         self.loss_bce_pose = nn.BCEWithLogitsLoss()
         OKS_SIGMA = (
@@ -507,8 +508,9 @@ class StereoDetectionHead(nn.Module):
             variation_size = len(bbox_move_anchor_ticks)
             variation_srclist = torch.tensor(bbox_move_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
             variations_x = variation_srclist.repeat(variation_size)
-            alpha = 0.88
-            variation_srclist = variation_srclist * (1 - alpha) + alpha * torch.ones_like(variation_srclist)  # pull values towards 1.0
+            # # fix y direction
+            # alpha = 0.88
+            # variation_srclist = variation_srclist * (1 - alpha) + alpha * torch.ones_like(variation_srclist)  # pull values towards 1.0
             variations_y = variation_srclist.repeat_interleave(variation_size)
             
             varitions_lxrx = torch.stack([-(torch.ones_like(variations_x) * 2.0 - variations_x), variations_x], dim=1)
@@ -617,6 +619,9 @@ class StereoDetectionHead(nn.Module):
 
     def compute_loss_yoloposeformat(self, preds: Tuple[List, List, List], labels: Dict):
         """
+        Design of the sampler:
+        similar to SimOTA, using dynamic-k matching for bbox regression. For classification, use iou-encoded confidence as target for each candidate.
+
         Args:
             preds:
             labels: dict containing the following keys.
@@ -641,6 +646,7 @@ class StereoDetectionHead(nn.Module):
         list_sbboxes_pred_refined = []
         pos_gt_nobkg_masks = []
         list_right_keypts_pred = []
+        iou_epsilon = 5e-2
         # right bboxes related loss
         for indexInBatch in range(num_batch):
             # starttime = time.time()
@@ -707,7 +713,6 @@ class StereoDetectionHead(nn.Module):
                 self._config['r_iou_threshold'],
                 self._config['candidates_k']
             )
-            foreground_mask = ious >= self._config['r_iou_threshold']
 
             # Note: encoding target and pred right bboxes before computing loss. See mmdet, bbox_head.py::BBoxHead::loss()
             # priors, gts -> encoded priors
@@ -724,17 +729,20 @@ class StereoDetectionHead(nn.Module):
             # starttime = time.time()
 
             # right bboxes scores
-            rbboxes_scores = right_scores.view(num_detections, variation_size_squared, -1)
+            rbboxes_scores = right_scores.view(num_detections * variation_size_squared, -1)
+            ious = ious.view(-1)
             # negative samples (iou < thres) are assigned to the background class. See mmdet, bbox_head.py::BBoxHead::_get_targets_single()
-            rbboxes_cls_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared)
+            rbboxes_cls_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared).view(num_detections * variation_size_squared)
+            foreground_mask = ious >= self._config.get('r_iou_bkg', 0.0)
             rbboxes_cls_targets[~foreground_mask] = self._config['num_classes']
-            label_weights = torch.ones_like(rbboxes_cls_targets)
-            loss_rscore_one = self.loss_rcls(
-                rbboxes_scores.view(num_detections * variation_size_squared, -1),
-                rbboxes_cls_targets.view(-1),
-                label_weights.view(-1),
-                avg_factor=max(torch.sum(label_weights > 0).float().item(), 1.)
+            rbboxes_cls_targets_onehot = F.one_hot(rbboxes_cls_targets, num_classes=self._config['num_classes'] + 1).float()
+            foreground_mask = foreground_mask.view(-1)
+            rbboxes_cls_targets_onehot[foreground_mask, rbboxes_cls_targets[foreground_mask]] = ious[foreground_mask].clamp(iou_epsilon, 1.0)
+            loss_rscore_one = self.loss_rscore(
+                pred=rbboxes_scores,
+                target=rbboxes_cls_targets_onehot
             )
+            
             if "loss_rscore" not in loss_dict:
                 loss_dict["loss_rscore"] = loss_rscore_one
             else:
