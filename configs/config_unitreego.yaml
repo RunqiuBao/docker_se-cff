@@ -148,7 +148,7 @@ MODEL:
       nms_iou_threshold: 0.5
       # inference param
       nms_iou_threshold_inference: 0.2
-      confidence_threshold_inference: 0.4
+      confidence_threshold_inference: 0.6
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
@@ -172,8 +172,9 @@ MODEL:
         type: ReLU
       # right bbox regression
       right_roi_feat_size: 28
-      r_iou_threshold: 0.9
-      candidates_k: 49
+      r_iou_bkg: 0.3
+      r_iou_threshold: 0.5
+      candidates_k: 8
       # inference:
       right_confidence_threshold_inference: 0.1
       left_right_confidence_diff_inference: 1.0
@@ -192,8 +193,8 @@ LOSSES:
     pose_loss_weight: 12.0
     kobj_loss_weight: 1.0
   stereo_detection_head_cfg:
-    rbbox_loss_weight: 10000
-    rkeypts_loss_weight: 1000
+    rbbox_loss_weight: 1
+    rkeypts_loss_weight: 1
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:
