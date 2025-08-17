@@ -536,7 +536,7 @@ class StereoDetectionHead(nn.Module):
             _bboxes_pred = _bboxes_pred.view(1, -1, 4)
             
             num_detections = bboxes_pred.shape[1]
-            batch_number = torch.arange(_bboxes_pred.shape[0]).unsqueeze(1).repeat(1, num_detections * variation_size**2).flatten().unsqueeze(-1).to(_bboxes_pred.device)
+            batch_number = indexInBatch * torch.ones((1,)).unsqueeze(1).repeat(1, num_detections * variation_size**2).flatten().unsqueeze(-1).to(_bboxes_pred.device)
 
             # extract right bbox roi feature
             xindi = ((bboxes_pred[..., 0] + bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
