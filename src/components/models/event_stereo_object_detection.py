@@ -8,18 +8,23 @@ import cv2
 import time
 import math
 import torch.nn.functional as F
+from dataclasses import dataclass
 
 from mmdet.registry import MODELS, TASK_UTILS
 from mmengine.config import Config
 from mmengine.model import initialize
 from mmcv.cnn import ConvModule
-from .yolo_pose_utils import initialize_weights
+from mmcv.ops import batched_nms
 from mmdet.structures.mask import mask_target, BitmapMasks
+from mmdet.models import CSPDarknet, YOLOXPAFPN
 
 from .concentration import ConcentrationNet
 from .stereo_matching import StereoMatchingNetwork
-from .yolo_pose_utils import xyxy2xywh
+from .yolo_pose_utils import xyxy2xywh, initialize_weights
 from .objectdetection import StereoEventDetectionHead
+from .utils.objdet_utils import compute_ious_pertarget
+from .rpn_base import RPNBaseClass
+from .utils.misc import images_to_levels
 
 from . import losses
 from .losses import varifocal_loss
@@ -97,6 +102,341 @@ class OnnxStyleNetwork(nn.Module):
         return output_objdet, output_facets, output_facets_right, output_concentrate_left, output_concentrate_right, output_disparity
 
 
+@dataclass
+class RPNHypothesesGroup:
+    bboxes: Optional[Tensor] = None
+    scores: Optional[Tensor] = None
+    level_ids: Optional[Tensor] = None
+    target_ids: Optional[Tensor] = None
+
+    def __getitem__(self, maskOrIndices: Tensor) -> 'RPNHypothesesGroup':
+        """
+        Args:
+            maskOrIndices: mask tensor or indices tensor of existing hypotheses.
+
+        Returns:
+            RPNHypothesesGroup with all member variables filtered by mask.
+        """
+        return RPNHypothesesGroup(
+            bboxes=self.bboxes[maskOrIndices],
+            scores=self.scores[maskOrIndices],
+            level_ids=self.level_ids[maskOrIndices],
+            target_ids=self.target_ids[maskOrIndices]
+        )
+
+    def __add__(self, other: 'RPNHypothesesGroup') -> 'RPNHypothesesGroup':
+        return RPNHypothesesGroup(
+            bboxes=torch.cat([self.bboxes, other.bboxes], dim=0) if self.bboxes is not None and other.bboxes is not None else None,
+            scores=torch.cat([self.scores, other.scores], dim=0) if self.scores is not None and other.scores is not None else None,
+            level_ids=torch.cat([self.level_ids, other.level_ids], dim=0) if self.level_ids is not None and other.level_ids is not None else None,
+            target_ids=torch.cat([self.target_ids, other.target_ids], dim=0) if self.target_ids is not None and other.target_ids is not None else None,
+        )
+    
+    def zero(self) -> 'RPNHypothesesGroup':
+        device = self.bboxes.device if self.bboxes is not None else 'cpu'
+        return RPNHypothesesGroup(
+            bboxes=torch.zeros((0, 4), dtype=torch.float32, device=device),
+            scores=torch.zeros((0,), dtype=torch.float32, device=device),
+            level_ids=torch.zeros((0,), dtype=torch.long, device=device),
+            target_ids=torch.zeros((0,), dtype=torch.long, device=device)
+        )
+
+
+def prune_hypotheses_equally_for_targets(hypotheses: RPNHypothesesGroup, max_hypotheses_per_image: int) -> RPNHypothesesGroup:
+    unique_target_ids = torch.unique(hypotheses.target_ids)
+    max_hypotheses_per_target = max_hypotheses_per_image // unique_target_ids.numel()
+    pruned_hypotheses = []
+    for tid in unique_target_ids:
+        mask = hypotheses.target_ids == tid
+        # sort by scores and keep the top max_hypotheses_per_target
+        sorted_scores, sorted_indices = hypotheses.scores[mask].sort(descending=True)
+        if mask.sum() > max_hypotheses_per_target:
+            top_indices = sorted_indices[:max_hypotheses_per_target]
+            mask = torch.zeros_like(hypotheses.target_ids, dtype=torch.bool)
+            mask[torch.where(hypotheses.target_ids == tid)[0][top_indices]] = True
+            pruned_hypotheses.append(hypotheses[mask])
+        else:
+            pruned_hypotheses.append(hypotheses[mask][sorted_indices])
+    pruned_hypotheses = sum(pruned_hypotheses, hypotheses.zero())
+    return pruned_hypotheses
+
+
+class RPNWithTargetsHead(RPNBaseClass):
+    def __init__(
+        self,
+        **kwargs      
+    ):
+        super(RPNWithTargetsHead, self).__init__()
+        
+        self.feat_channels = 256
+        self.in_channels = 256
+        self.num_classes = 1  # rpn only classifies foreground and background.
+        self.cls_out_channels = self.num_classes
+        anchors_ratios = [0.5, 1.0, 2.0]
+        self.prior_generator = TASK_UTILS.build(
+            {
+                'type': 'AnchorGenerator',
+                'scales': [8],
+                'ratios': anchors_ratios,
+                'strides': [4, 8, 16, 32]
+            }
+        )
+        self.num_base_priors = len(anchors_ratios)
+        self.bbox_coder = TASK_UTILS.build(
+            {
+                'type': 'DeltaXYWHBBoxCoder',
+                'target_means': [0.0, 0.0, 0.0, 0.0],
+                'target_stds': [1.0, 1.0, 1.0, 1.0]
+            }
+        )
+        self.loss_cls = MODELS.build(
+            {'type': 'CrossEntropyLoss', 'use_sigmoid': True, 'loss_weight': 1.0}
+        )
+        self.loss_bbox = MODELS.build(
+            {'type': 'L1Loss', 'loss_weight': 1.0}
+        )
+        self.assigner = TASK_UTILS.build(
+            {
+                'type': 'MaxIoUAssigner',
+                'pos_iou_thr': 0.7,
+                'neg_iou_thr': 0.3,
+                'min_pos_iou': 0.3,
+                'match_low_quality': True,
+                'ignore_iof_thr': -1
+            }
+        )
+        self.sampler = TASK_UTILS.build(
+            {
+                'type': 'RandomSampler',
+                'num': 256,
+                'pos_fraction': 0.5,
+                'neg_pos_ub': -1,
+                'add_gt_as_proposals': False
+            },
+            default_args=dict(context=self)
+        )
+        self.init_layers()
+
+    def init_layers(self)->tuple:
+        self.rpn_conv = nn.Conv2d(
+            self.in_channels,
+            self.feat_channels,
+            3,
+            padding=1
+        )
+        self.rpn_cls = nn.Conv2d(
+            self.feat_channels,
+            self.num_base_priors * self.cls_out_channels,
+            1
+        )
+        # reg_dim = self.bbox_coder.encode_size
+        reg_dim = 4
+        self.rpn_reg = nn.Conv2d(
+            self.feat_channels,
+            self.num_base_priors * reg_dim,
+            1
+        )
+    
+    def predict(self, xs: list[Tensor], batch_targets: List[Tensor], batch_img_metas: Dict) -> tuple[List[Tensor], List[Tensor]]:
+        """
+        Args:
+            xs: list of feature maps, each of shape (B, feat_channels, H//k, W//k).
+            batch_targets: list of B tensors of (N, 4) shape, where N is number of targets in the image.
+            batch_img_metas: h, w.
+        """
+        listfeat_rpn_cls_score, listfeat_rpn_bbox_pred = multi_apply(self.predict_single, xs)
+        list_hypotheses = self.allocate_hypotheses_to_targets(
+            listfeat_rpn_cls_score,
+            listfeat_rpn_bbox_pred,
+            batch_targets,
+            batch_img_metas
+        )
+        return list_hypotheses
+
+    def predict_single(self, x):
+        """
+        Args:
+            x: feature map of one scale, shape (B, feat_channels, H//k, W//k)
+        """
+        x = self.rpn_conv(x)
+        x = F.relu(x)
+        rpn_cls_score = self.rpn_cls(x)
+        rpn_bbox_pred = self.rpn_reg(x)
+        return rpn_cls_score, rpn_bbox_pred
+    
+    def allocate_hypotheses_to_targets(
+        self,
+        listfeat_cls_score: list[Tensor],
+        listfeat_bbox_pred: list[Tensor],
+        targets: List[Tensor],
+        batch_img_metas: Dict,
+        nms_pred: int = 2000,
+        max_hypotheses_per_img: int = 1000,
+        min_iou_with_target: float = 0.0,
+        min_bbox_size: float = 0.0
+    ) -> List[RPNHypothesesGroup]:
+        """
+        Allocate K best hypotheses to each target.
+        """
+        num_images_in_batch = len(targets)
+        num_levels = len(listfeat_cls_score)
+        imageHeight, imageWidth = batch_img_metas["h"], batch_img_metas["w"]
+
+        featmap_sizes = [listfeat_cls_score[i].shape[-2:] for i in range(num_levels)]
+        mlvl_priors = self.prior_generator.grid_priors(
+            featmap_sizes,
+            dtype=listfeat_cls_score[0].dtype,
+            device=listfeat_cls_score[0].device)
+
+        reg_dim = self.bbox_coder.encode_size
+        batch_results = []
+        for indexInBatch in range(num_images_in_batch):
+            mlvl_bbox_preds = []
+            mlvl_valid_priors = []
+            mlvl_scores = []
+            level_ids = []  # need for nms in separating level
+            cls_score_singleimage = [cls_score[indexInBatch] for cls_score in listfeat_cls_score]
+            bbox_pred_singleimage = [bbox_pred[indexInBatch] for bbox_pred in listfeat_bbox_pred]
+            for indexLevel, (cls_score_onelvl, bbox_pred_onelvl, priors) in enumerate(zip(cls_score_singleimage, bbox_pred_singleimage, mlvl_priors)):
+                bbox_pred_onelvl = bbox_pred_onelvl.permute(1, 2, 0).reshape(-1, reg_dim)
+                cls_score_onelvl = cls_score_onelvl.permute(1, 2, 0).reshape(-1, self.cls_out_channels)
+                scores = cls_score_onelvl.sigmoid()
+
+                scores = torch.squeeze(scores)
+                if 0 < nms_pred < scores.shape[0]:
+                    # sort is faster than topk
+                    ranked_scores, rank_inds = scores.sort(descending=True)
+                    topk_inds = rank_inds[:nms_pred]
+                    scores = ranked_scores[:nms_pred]
+                    bbox_pred_onelvl = bbox_pred_onelvl[topk_inds, :]
+                    priors = priors[topk_inds]
+
+                mlvl_bbox_preds.append(bbox_pred_onelvl)
+                mlvl_valid_priors.append(priors)
+                mlvl_scores.append(scores)
+
+                # use level id to implement the separate level nms
+                level_ids.append(
+                    scores.new_full(
+                        (scores.size(0),),
+                        indexLevel,
+                        dtype=torch.long
+                    )
+                )
+            bbox_pred = torch.cat(mlvl_bbox_preds)  # [N, 4]
+            priors = torch.cat(mlvl_valid_priors)  # [N, 4]
+            # restore bboxes to image pixel coordinates
+            bboxes_xyxy = self.bbox_coder.decode(priors, bbox_pred, max_shape=(imageHeight, imageWidth))
+            num_targets = targets[indexInBatch].shape[0]
+            ious = compute_ious_pertarget(bboxes_xyxy, targets[indexInBatch])
+            # remove targets with no ious larger than 0
+            notarget_mask = ious.max(dim=1).values <= min_iou_with_target
+            bboxes_xyxy = bboxes_xyxy[~notarget_mask]
+            mlvl_scores = torch.cat(mlvl_scores)[~notarget_mask]
+            level_ids = torch.cat(level_ids)[~notarget_mask]
+            target_ids = ious.argmax(dim=1)[~notarget_mask]
+            results = RPNHypothesesGroup(bboxes=bboxes_xyxy, scores=mlvl_scores, level_ids=level_ids, target_ids=target_ids)
+
+            # filter small size bboxes
+            w, h = results.bboxes[:, 2] - results.bboxes[:, 0], results.bboxes[:, 3] - results.bboxes[:, 1]
+            valid_mask = (w > min_bbox_size) & (h > min_bbox_size)
+            if not valid_mask.all():
+                results = results[valid_mask]
+
+            # another around of nms to reduce number to max_hypotheses_per_img
+            if results.bboxes.numel() > 0:
+                det_bboxes, keep_idxs = batched_nms(
+                    results.bboxes,
+                    results.scores,
+                    results.level_ids * num_targets + results.target_ids,  # Note: hypotheses of differnet level and different target id will not merge.
+                    {'type': 'nms', 'iou_threshold': 0.7}
+                )
+                results = results[keep_idxs]
+                results.scores = det_bboxes[:, -1]
+                results = prune_hypotheses_equally_for_targets(results, max_hypotheses_per_img)
+                del results.level_ids
+                results.bboxes = results.bboxes.detach().clone()  # in RPN, no need to use prediction results to compute losses.
+                results.scores = results.scores.detach().clone()
+            else:
+                # To avoid some potential error
+                results_ = RPNHypothesesGroup()
+                results_.bboxes = results.bboxes.new_zeros(0)
+                results_.scores = results.scores.new_zeros(0)
+                results_.labels = results.scores.new_zeros(0)
+                results = results_
+            batch_results.append(results)
+        return batch_results
+    
+    def compute_loss(
+        self,
+        cls_scores: List[Tensor],
+        bbox_preds: List[Tensor],
+        labels: Dict,
+        img_metas: Dict
+    ):
+        """
+        Args:
+            cls_scores: Box scores for each scale level has shape (B, num_anchors * 1, H, W).
+            bbox_preds: Box regression predictions for each scale level has shape (B, num_anchors * 4, H, W).
+            labels: dict
+                - stereo_objdet_targets: dict
+                    - bboxes: (N_allbatch, 6)
+                    - cls: (N_allbatch,)
+                    - batch_idx: (N_allbatchh,).
+        """
+        featmap_sizes = [featmap.size()[-2:] for featmap in cls_scores]
+        batch_size = cls_scores[0].shape[0]
+        assert len(featmap_sizes) == self.prior_generator.num_levels
+
+        # set cat_id of gt_labels to 0 in RPN
+        cls_scores_gt = labels['stereo_objdet_targets']['cls']
+        cls_scores_gt = torch.zeros_like(cls_scores_gt)
+        device = cls_scores[0].device
+        batch_img_metas = [{
+            'img_shape': (img_metas["h_recti"], img_metas["w_recti"]),
+            'pad_shape': (img_metas["h"], img_metas["w"]),
+        }] * batch_size
+
+        anchor_list, valid_flag_list = self.get_anchors(
+            featmap_sizes,
+            batch_img_metas,
+            device=device
+        )
+        batch_labels = [{
+                'bboxes': labels['stereo_objdet_targets']['bboxes'][labels['stereo_objdet_targets']['batch_idx'] == indexInBatch],
+                'labels': cls_scores_gt[labels['stereo_objdet_targets']['batch_idx'] == indexInBatch]
+            } for indexInBatch in range(batch_size)
+        ]
+        cls_reg_targets = self.get_targets(
+            anchor_list,
+            valid_flag_list,
+            batch_labels,
+            batch_img_metas
+        )
+        (labels_list, label_weights_list, bbox_targets_list, bbox_weights_list, avg_factor) = cls_reg_targets
+
+        # anchor number of multi levels
+        num_level_anchors = [anchors.size(0) for anchors in anchor_list[0]]
+        # concat all level anchors and flags to a single tensor
+        concat_anchor_list = []
+        for i in range(len(anchor_list)):
+            concat_anchor_list.append(torch.cat(anchor_list[i], dim=0))
+        all_anchor_list = images_to_levels(concat_anchor_list, num_level_anchors)
+
+        losses_cls, losses_bbox = multi_apply(
+            self.compute_loss_single,
+            cls_scores,
+            bbox_preds,
+            all_anchor_list,
+            labels_list,
+            label_weights_list,
+            bbox_targets_list,
+            bbox_weights_list,
+            avg_factor=avg_factor
+        )
+        return losses_cls, losses_bbox
+
+
 class StereoDetectionHead(nn.Module):
     def __init__(
         self,
@@ -112,29 +452,39 @@ class StereoDetectionHead(nn.Module):
         self._config["loss_cfg"] = loss_cfg
 
         # objdet tools
-        self.backbone = MODELS.build(
-            {
-                'type': 'ResNeXt',
-                'depth': 101,
-                'num_stages': 4,
-                'out_indices': (0, 1, 2, 3),
-                'frozen_stages': 1,
-                'norm_cfg': {'type': 'BN', 'requires_grad': True},
-                'norm_eval': True,
-                'style': 'pytorch',
-                'groups': 64,
-                'base_width': 4,
-                'in_channels': self._config['in_channels'],
-            }
-        )
-        self.neck = MODELS.build(
-            {
-                'type': 'FPN',
-                'in_channels': [256, 512, 1024, 2048],
-                'out_channels': self._config['channels_roi_extraction'],
-                'num_outs': 5
-            }
-        )
+        backboneCfg = {
+            "stem_in_channels": 10,
+            "deepen_factor": 0.33,
+            "widen_factor": 0.5,
+            "out_indices": [1, 2, 3, 4],
+            "use_depthwise": False,
+            "spp_kernal_sizes": [5, 9, 13],
+            "norm_cfg": {
+              "type": 'BN',
+              "momentum": 0.03,
+              "eps": 0.001
+            },
+            "act_cfg": {"type": 'Swish'}
+        }
+        neckCfg = {
+            "in_channels": [64, 128, 256, 512],
+            "out_channels": self._config['channels_roi_extraction'],
+            "num_csp_blocks": 1,
+            "use_depthwise": False,
+            "upsample_cfg": {
+                "scale_factor": 2,
+                "mode": "nearest"
+            },
+            "norm_cfg": {
+                "type": "BN",
+                "momentum": 0.03,
+                "eps": 0.001
+            },
+            "act_cfg": {"type": "Swish"}
+        }
+        self.backbone = CSPDarknet(**backboneCfg)
+        self.neck = YOLOXPAFPN(**neckCfg)
+        self.rpn_head = RPNWithTargetsHead()
 
         self.bbox_roi_extractor = MODELS.build(
             {
@@ -154,9 +504,9 @@ class StereoDetectionHead(nn.Module):
         )
 
         (
-            self.shared_convs,
-            self.shared_fcs,
-            last_layer_dim
+            self.shared_convs, # empy
+            self.shared_fcs,  # two layers
+            last_layer_dim  # 1024
         ) = self._add_conv_fc_branch(
             num_branch_convs=0,
             num_branch_fcs=2,
@@ -218,7 +568,7 @@ class StereoDetectionHead(nn.Module):
     @property
     def config(self):
         return self._config
-    
+
     def _add_conv_fc_branch(
         self,
         num_branch_convs: int,
@@ -467,14 +817,33 @@ class StereoDetectionHead(nn.Module):
     #     pyramid_feats.append(self.downsample_layer(pyramid_feats[-1]))
     #     return pyramid_feats
 
+    def warp_bboxes(
+        self,
+        left_bboxes: List[Tensor],
+        disp_prior: Tensor,
+        imageHeight: int,
+        imageWidth: int
+    ):
+        """
+        warp left bboxes by disparity prior.
+        """
+        warped_bboxes = []
+        left_bboxes = [bboxes.detach().clone() for bboxes in left_bboxes]  # avoid inplace operation
+        for indexInBatch, bboxes_oneimage in enumerate(left_bboxes):
+            xindi = ((bboxes_oneimage[..., 0] + bboxes_oneimage[..., 2]) / 2).to(torch.int).clamp(0, imageWidth - 1).squeeze()
+            yindi = ((bboxes_oneimage[..., 1] + bboxes_oneimage[..., 3]) / 2).to(torch.int).clamp(0, imageHeight - 1).squeeze()
+            bbox_disps = disp_prior[indexInBatch][yindi, xindi]
+            bboxes_oneimage[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(-1, 2)
+            warped_bboxes.append(bboxes_oneimage)
+        return warped_bboxes
+
     def predict(
         self,
         right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
         batch_img_metas: Dict,
-        bbox_move_anchor_ticks: List[float],
-        bbox_expand_factor: float
+        bbox_move_anchor_ticks: List[float]
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
@@ -484,81 +853,32 @@ class StereoDetectionHead(nn.Module):
             bbox_move_anchor_ticks: from 0.5 to 2.0, use multiple ticks to resize the bboxes horizontally and vertically to search for different regions.
 
         Returns:
-            sbboxes_pred: shape [B, N, 6]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
+            sbboxes_priors: list of shape [N, 8]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox
+            list_corresponding_leftdet_ids: list of shape [N,], target ids for each prior.
             refined_right_bboxes: shape [B, N, ker_h * ker_w, 4]. Corresponding refined right bboxes.
             right_scores_refine: shape [B, N, ker_h * ker_w, 1]. Corresponding scores.
         """
-        list_sbboxes_priors, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts = [], [], [], []
-        
+        list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts = [], [], [], [], []
         right_feats = self.backbone(right_event_voxel)
         right_feats = self.neck(right_feats)
-        for indexInBatch, bboxes_pred in enumerate(left_bboxes):
+        warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=batch_img_metas['h'], imageWidth=batch_img_metas['w'])
+        batch_hypotheses = self.rpn_head.predict(right_feats, warped_left_bboxes, batch_img_metas)
+        for indexInBatch, left_bboxes_oneimage in enumerate(left_bboxes):
             # starttime = time.time()
-            if bboxes_pred.shape[0] == 0:
+            if left_bboxes_oneimage.shape[0] == 0:
                 # No detections in left
                 list_sbboxes_priors.append(None)
                 list_refined_right_bboxes.append(None)
                 list_refined_right_scores.append(None)
                 list_predicted_right_keypts.append(None)
                 continue
-            bboxes_pred = torch.unsqueeze(bboxes_pred, dim=0)
-
-            # enlarge bboxes
-            _bboxes_pred = bboxes_pred.clone()  # initial warped bboxes for right side target.
-            variation_size = len(bbox_move_anchor_ticks)
-            variation_srclist = torch.tensor(bbox_move_anchor_ticks, dtype=torch.float32, device=_bboxes_pred.device)
-            variations_x = variation_srclist.repeat(variation_size)
-            # # fix y direction
-            # alpha = 0.88
-            # variation_srclist = variation_srclist * (1 - alpha) + alpha * torch.ones_like(variation_srclist)  # pull values towards 1.0
-            variations_y = variation_srclist.repeat_interleave(variation_size)
+            hypotheses = batch_hypotheses[indexInBatch]
+            num_hypotheses = hypotheses.bboxes.shape[0]
+            left_priors = left_bboxes_oneimage[hypotheses.target_ids]
+            right_priors = hypotheses.bboxes
             
-            varitions_lxrx = torch.stack([-(torch.ones_like(variations_x) * 2.0 - variations_x), variations_x], dim=1)
-            hdwboxes = bbox_expand_factor * (_bboxes_pred[..., 2] - _bboxes_pred[..., 0]) / 2.0
-            cwbboxes = (_bboxes_pred[..., 2] + _bboxes_pred[..., 0]) / 2.0
-            hdwboxes = hdwboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
-            cwbboxes = cwbboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
-            wbboxes = cwbboxes + varitions_lxrx * hdwboxes
-
-            variations_tyby = torch.stack([-(torch.ones_like(variations_y) * 2.0 - variations_y), variations_y],  dim=1)
-            dhwboxes = bbox_expand_factor * (_bboxes_pred[..., 3] - _bboxes_pred[..., 1]) / 2.0
-            chbboxes = (_bboxes_pred[..., 3] + _bboxes_pred[..., 1]) / 2.0
-            dhwboxes = dhwboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)  # (1, N, k*k, 2)
-            chbboxes = chbboxes.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, variation_size**2, 2)
-            hbboxes = chbboxes + variations_tyby * dhwboxes
-
-            _bboxes_pred = _bboxes_pred.unsqueeze(2).repeat(1, 1, variation_size**2, 1)  # [1, N, variation_size, 4]
-            right_priors = _bboxes_pred.clone().view(1, -1, 4)  # [1, N * variation_size, 4]
-            left_priors = right_priors.clone()
-
-            _bboxes_pred[:, :, :, [0, 2]] = wbboxes[:, :, :, [0, 1]]
-            _bboxes_pred[:, :, :, [1, 3]] = hbboxes[:, :, :, [0, 1]]
-            _bboxes_pred = _bboxes_pred.view(1, -1, 4)
-            
-            num_detections = bboxes_pred.shape[1]
-            batch_number = indexInBatch * torch.ones((1,)).unsqueeze(1).repeat(1, num_detections * variation_size**2).flatten().unsqueeze(-1).to(_bboxes_pred.device)
-
-            # extract right bbox roi feature
-            xindi = ((bboxes_pred[..., 0] + bboxes_pred[..., 2]) / 2).to(torch.int).clamp(0, batch_img_metas['w'] - 1).squeeze()
-            yindi = ((bboxes_pred[..., 1] + bboxes_pred[..., 3]) / 2).to(torch.int).clamp(0, batch_img_metas['h'] - 1).squeeze()
-
-            # # directly get disparity
-            bbox_disps = disp_prior[indexInBatch][yindi, xindi].unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, -1)
-            # # get a local patch and average to get disparity
-            # with torch.no_grad():
-            #     kernel_size = 7
-            #     rr = kernel_size // 2
-            #     imageWidth = disp_prior[indexInBatch].shape[-1]
-            #     originalDisps_padded = F.pad(disp_prior[indexInBatch].unsqueeze(0).unsqueeze(0), (rr, rr, rr, rr), mode="replicate")
-            #     originalDisps_padded_unfoldered = F.unfold(originalDisps_padded, kernel_size=kernel_size, stride=1)
-            #     idxXy = (yindi.long() * imageWidth + xindi.long()).view(1, 1, -1).expand(1, kernel_size * kernel_size, -1)
-            #     picked_disps = originalDisps_padded_unfoldered.gather(dim=2, index=idxXy).squeeze(0)
-            #     picked_disps = torch.median(picked_disps, dim=0).values
-            #     bbox_disps = picked_disps.unsqueeze(0).unsqueeze(-1).repeat(1, 1, variation_size**2).view(1, -1)
-
-            _bboxes_pred[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
-            right_priors[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(1, -1, 2)
-            rois_right = _bboxes_pred.reshape(-1, 4)
+            batch_number = indexInBatch * torch.ones((num_hypotheses)).unsqueeze(1).to(hypotheses.bboxes.device)
+            rois_right = right_priors.clone()
             rois_right = torch.cat((batch_number, rois_right), dim=1)
 
             right_roi_feats = self.bbox_roi_extractor(right_feats, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
@@ -580,14 +900,15 @@ class StereoDetectionHead(nn.Module):
             #         roi_feat_sample /= roi_feat_sample.max()
             #         self.logger.add_image("roi_feat_sample{}".format(indexInstance), roi_feat_sample)
 
-            sbboxes_priors = torch.cat([left_priors, right_priors[:, :, [0, 2]]], dim=-1).view(1, num_detections, variation_size**2, 6)
-            list_sbboxes_priors.append(sbboxes_priors)  # (1, num_detections, k*k, 6)
+            sbboxes_priors = torch.cat([left_priors, right_priors], dim=-1).view(1, num_hypotheses, 8)
+            list_sbboxes_priors.append(sbboxes_priors)
             list_refined_right_bboxes.append(right_bboxes_refine)
             list_refined_right_scores.append(cls_score)
             list_predicted_right_keypts.append(right_keypts_pred)
+            list_corresponding_leftdet_ids.append(hypotheses.target_ids)
             # print("stereoNet time cost (one left dets proposals pass): {}".format(time.time() - starttime))
 
-        return list_sbboxes_priors, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts
+        return list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts
 
     def forward(
         self,
@@ -604,7 +925,8 @@ class StereoDetectionHead(nn.Module):
         if batch_img_metas is None:
             batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
 
-        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_move_anchor_ticks"], self._config["bbox_expand_factor"])
+        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_move_anchor_ticks"])
+
         losses = None
         artifacts = None
         if labels is not None and not self.is_freeze:
@@ -627,7 +949,6 @@ class StereoDetectionHead(nn.Module):
             labels: dict containing the following keys.
                 left_fg_mask: mask for target assignment. (B, max_hypotheses)-> (4, 6615).
                 left_target_gt_idx: for each foreground object, idx to the corresponding gt target. (B, max_hypotheses). need to be selected by fg_mask before use.
-                left_target_bboxes: all target bboxes from left side. (B, max_hypotheses, 4). used for loss computation in keypoints prediction.
                 left_nms_topk_mask: mask of filtering noisy left detections by nms and topk. (B, max_hypotheses).
                 batch_img_metas: h, w of img.
                 stereo_objdet_targets: dict
@@ -638,7 +959,7 @@ class StereoDetectionHead(nn.Module):
                     "keypoints_right": (N_allbatch, num_keypts*3), this is gt.
                     "batch_idx": (N_allbatch,). Index in this batch for this instance.
         """
-        list_sbboxes_priors, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts = preds  # Note: number of positive in each can be different after nms.
+        list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts = preds  # Note: number of positive in each can be different after nms.
         left_fg_mask, left_target_gt_idx, left_nms_topk_mask, stereo_objdet_targets, batch_img_metas = labels["left_fg_mask"], labels["left_target_gt_idx"], labels["left_nms_topk_mask"], labels["stereo_objdet_targets"], labels["batch_img_metas"]
 
         loss_dict = {}
@@ -653,6 +974,7 @@ class StereoDetectionHead(nn.Module):
             mask_this_batch = stereo_objdet_targets["batch_idx"] == indexInBatch
             pos_gt_mask_one = left_fg_mask[indexInBatch]
             pos_gt_mask_one = pos_gt_mask_one[left_nms_topk_mask[indexInBatch]]
+            num_pos_detections = pos_gt_mask_one.sum()
             
             if list_sbboxes_priors[indexInBatch] is None or pos_gt_mask_one.sum() == 0:
                 # No detections from left
@@ -665,62 +987,63 @@ class StereoDetectionHead(nn.Module):
 
             bbox_targetset_one = stereo_objdet_targets["bboxes"][mask_this_batch]
             idx_gt2left = left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]][pos_gt_mask_one]
-            bbox_targets_one = bbox_targetset_one[idx_gt2left]
-            # Note: assume left_fg_mask has same number as GT labels. pos_gt_mask_one tells which detections from predict() have avialable GT label.
-            assert pos_gt_mask_one.sum() == bbox_targets_one.shape[0], "number of positive detections (priors) from predict() not equal to number of gt bboxes. Biprojection not valid. can not continue loss computation."
+            # TODO: need to discard hypotheses generated by leftdets that are not postive in pos_gt_mask_one.
+            bbox_targets_one = bbox_targetset_one[idx_gt2left]  # one-to-one corresponding to leftdets with positive gt.
+            idx_righthypos_corresponding_leftdet_ids = list_corresponding_leftdet_ids[indexInBatch].squeeze(0)
+            hypotheses_mask_gtexist = pos_gt_mask_one[idx_righthypos_corresponding_leftdet_ids]  # Hypotheses whose leftdet is negative should be discarded.
+            # rescale idx_righthypos_corresponding_leftdet_ids to indexing to bbox_targets_one. E.g. [0, 1, 5, 4] -> [0 , 1, 3, 2]
+            idx_righthypos_corresponding_targets_ids = idx_righthypos_corresponding_leftdet_ids[hypotheses_mask_gtexist]
+            idx_righthypos_corresponding_targets_ids = torch.unique(idx_righthypos_corresponding_targets_ids, sorted=True, return_inverse=True)[1]
 
             rbboxes_targets = torch.concat([
                 bbox_targets_one[:, 4].unsqueeze(-1),
                 bbox_targets_one[:, 1].unsqueeze(-1),
                 bbox_targets_one[:, 5].unsqueeze(-1),
                 bbox_targets_one[:, 3].unsqueeze(-1)
-            ], dim=1)  # (num_detections, 4)
+            ], dim=1)  # (num_targets, 4)
+
+            rbboxes_targets = rbboxes_targets[idx_righthypos_corresponding_targets_ids]
             rcls_targets = stereo_objdet_targets['cls'][mask_this_batch]
             # align gt with left detections' order
-            rcls_targets = rcls_targets[idx_gt2left]  # (num_detections,)
-
-            sbboxes_priors = list_sbboxes_priors[indexInBatch].squeeze(0)  # shape [1, num_detections, k*k, 6]. (tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r) format bbox, all in global scale.
-            variation_size_squared = sbboxes_priors.shape[1]
-            sbboxes_priors = sbboxes_priors[pos_gt_mask_one]
-            num_detections = sbboxes_priors.shape[0]
-            right_priors = sbboxes_priors[..., [4, 1, 5, 3]]  # (num_detections, k*k, 4)
-            right_bboxes = list_refined_right_bboxes[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
-            right_bboxes = right_bboxes[pos_gt_mask_one]
-            right_scores = list_right_scores_refine[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
-            right_scores = right_scores[pos_gt_mask_one]
-            right_keypts = list_predicted_right_keypts[indexInBatch].view(pos_gt_mask_one.shape[0], variation_size_squared, -1)
-            right_keypts = right_keypts[pos_gt_mask_one]
+            rcls_targets = rcls_targets[idx_gt2left]  # (num_targets,)
+            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            rcls_targets = rcls_targets[idx_righthypos_corresponding_leftdet_ids]  # (num_hypotheses,)
+            sbboxes_priors = list_sbboxes_priors[indexInBatch].squeeze(0)[hypotheses_mask_gtexist]  # shape [1, num_hypotheses, 8]. (tl_x, tl_y, br_x, br_y, tl_x_r, tl_y_r, br_x_r, br_y_r) format bbox, all in global scale.
+            num_hypotheses_gtexist = sbboxes_priors.shape[0]
+            right_priors = sbboxes_priors[:, 4:]  # (num_hypotheses_gtexist, 4)
+            right_bboxes = list_refined_right_bboxes[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
+            right_scores = list_right_scores_refine[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
+            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
             # print("stereoNet time cost (loss data uncollapse): {}".format(time.time() - starttime))
             # starttime = time.time()
-            
-            rbboxes_refined = right_bboxes.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
+            rbboxes_refined = right_bboxes.view(num_hypotheses_gtexist, self._config['num_classes'], -1)
 
             # advanced indexing to select bboxes for correct class.
             rbboxes_refined_selected = rbboxes_refined[
-                torch.arange(num_detections).view(-1, 1).expand(-1, variation_size_squared),
-                torch.arange(variation_size_squared).unsqueeze(0),
-                rcls_targets.view(num_detections, 1).expand(-1, variation_size_squared)
-            ]  # rbboxes_refined_selected shape is (num_detections, variation_size_squared, 4)
+                torch.arange(num_hypotheses_gtexist),
+                rcls_targets
+            ]
 
             # decoding pred right bboxes
-            rbboxes_refined_decoded = self.bbox_coder.decode(right_priors.view(-1, 4), rbboxes_refined_selected.view(-1, 4)).view(num_detections, -1, 4)
-            
-            ious, indices_best_right = self.batch_iou_calculator_simple(rbboxes_refined_decoded, rbboxes_targets.unsqueeze(1))
-            pos_mask, rbboxes_refined_selected, rbboxes_gt_selected = self.batch_sampler(
-                rbboxes_refined_selected,
+            rbboxes_refined_decoded = self.bbox_coder.decode(right_priors.view(-1, 4), rbboxes_refined_selected.view(-1, 4)).view(-1, 4)
+            ious = self.batch_iou_calculator_simple(rbboxes_refined_decoded, rbboxes_targets)
+
+            pos_mask, sampled_indices, rbboxes_refined_decoded_sampled, rbboxes_gt_sampled = self.batch_sampler(
+                rbboxes_refined_decoded,
                 ious,
                 rbboxes_targets,
                 self._config['r_iou_threshold'],
                 self._config['candidates_k']
             )
+            rbboxes_refined_decoded_sampled = rbboxes_refined_decoded_sampled[:pos_mask.sum()]
+            rbboxes_gt_sampled = rbboxes_gt_sampled[:pos_mask.sum()]
 
             # Note: encoding target and pred right bboxes before computing loss. See mmdet, bbox_head.py::BBoxHead::loss()
             # priors, gts -> encoded priors
-            right_priors_selected = right_priors[:, :self._config['candidates_k']].clone()
-            right_priors_selected[torch.sum(rbboxes_gt_selected, dim=-1) == 0.00] *= 0.0  # for zero columns in gt, make the priors zero as well.
-            rbboxes_targets_selected_encoded = self.bbox_coder.encode(right_priors_selected, rbboxes_gt_selected)
-            rbboxes_targets_selected_encoded[torch.isnan(rbboxes_targets_selected_encoded)] = 0.0
-            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected, rbboxes_targets_selected_encoded)
+            right_priors_sampled = right_priors[sampled_indices].clone()
+            rbboxes_targets_sampled_encoded = self.bbox_coder.encode(right_priors_sampled, rbboxes_gt_sampled)
+            rbboxes_targets_sampled_encoded[torch.isnan(rbboxes_targets_sampled_encoded)] = 0.0
+            loss_rbbox_one = self.loss_rbbox(rbboxes_refined_selected[sampled_indices], rbboxes_targets_sampled_encoded)
             if "loss_rbbox" not in loss_dict:
                 loss_dict["loss_rbbox"] = loss_rbbox_one
             else:
@@ -729,10 +1052,9 @@ class StereoDetectionHead(nn.Module):
             # starttime = time.time()
 
             # right bboxes scores
-            rbboxes_scores = right_scores.view(num_detections * variation_size_squared, -1)
+            rbboxes_scores = right_scores.view(num_hypotheses_gtexist, -1)
             ious = ious.view(-1)
-            # negative samples (iou < thres) are assigned to the background class. See mmdet, bbox_head.py::BBoxHead::_get_targets_single()
-            rbboxes_cls_targets = rcls_targets.unsqueeze(1).repeat(1, variation_size_squared).view(num_detections * variation_size_squared)
+            rbboxes_cls_targets = rcls_targets.clone()
             foreground_mask = ious >= self._config.get('r_iou_bkg', 0.0)
             rbboxes_cls_targets[~foreground_mask] = self._config['num_classes']
             rbboxes_cls_targets_onehot = F.one_hot(rbboxes_cls_targets, num_classes=self._config['num_classes'] + 1).float()
@@ -753,54 +1075,33 @@ class StereoDetectionHead(nn.Module):
             # loss for right keypts
             keypts_targetset_one = stereo_objdet_targets["keypoints_right"][mask_this_batch]
             # align gt order with left detections' order
-            keypts_targets_one = keypts_targetset_one[idx_gt2left].view(num_detections, -1)
+            keypts_targets_one = keypts_targetset_one[idx_gt2left].view(num_pos_detections, -1)
+            keypts_targets_one = keypts_targets_one[idx_righthypos_corresponding_targets_ids]
+
             # encode gt keypoints
             keypts_targets_one_encoded = keypts_targets_one.clone()
             for indexKeypt in range(self._config["max_num_keypoints"]):
                 keypts_targets_one_encoded[:, (3 * indexKeypt):(2 + 3 * indexKeypt)] = EncodeKeypts(
-                    right_priors[:, 0, :],
+                    right_priors[:, :],
                     keypts_targets_one_encoded[:, (3 * indexKeypt):(2 + 3 * indexKeypt)],
                 )
             # select keypooints by predicted class labels
-            right_keypts_pred = right_keypts.view(num_detections, variation_size_squared, self._config['num_classes'], -1)
+            right_keypts_pred = right_keypts.view(num_hypotheses_gtexist, self._config['num_classes'], -1)
             right_keypts_selected = right_keypts_pred[
-                torch.arange(num_detections).view(-1, 1).expand(-1, variation_size_squared),
-                torch.arange(variation_size_squared).unsqueeze(0),
-                rcls_targets.view(num_detections, 1).expand(-1, variation_size_squared)
+                torch.arange(num_hypotheses_gtexist),
+                rcls_targets
             ]
 
-            list_right_keypts_selected_pos = []
-            list_keypts_targets_selected_encoded = []
-            list_areas = []
-            for indexDet in range(num_detections):
-                right_keypts_selected_one = right_keypts_selected[indexDet][pos_mask[indexDet]]
-                no_keypts_selected = right_keypts_selected_one.shape[0] == 0
-                if no_keypts_selected:
-                    right_keypts_selected_one = right_keypts_selected[indexDet][0, :].unsqueeze(0) * 0.0
-                list_right_keypts_selected_pos.append(
-                    right_keypts_selected_one
-                )
-                keypts_targets_selected_one_encoded = keypts_targets_one_encoded[indexDet].unsqueeze(0).repeat(right_keypts_selected_one.shape[0], 1)
-                if no_keypts_selected:
-                    keypts_targets_selected_one_encoded = keypts_targets_one_encoded[indexDet].unsqueeze(0) * 0.0
-                list_keypts_targets_selected_encoded.append(
-                    keypts_targets_selected_one_encoded
-                )
-                right_priors_selected_xywh = xyxy2xywh(right_priors[indexDet][pos_mask[indexDet]])
-                if no_keypts_selected:
-                    right_priors_selected_xywh = right_priors[indexDet][0, :].unsqueeze(0) * 0.0
-                area_one = right_priors_selected_xywh[:, 2:].prod(1, keepdim=True)
-                list_areas.append(area_one)
-            right_keypts_selected_pos = torch.cat(list_right_keypts_selected_pos, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
-            keypts_targets_selected_encoded = torch.cat(list_keypts_targets_selected_encoded, dim=0).view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
-
+            right_keypts_selected_pos = right_keypts_selected[sampled_indices].view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
+            keypts_targets_selected_encoded = keypts_targets_one_encoded[sampled_indices].view(-1, self._config["max_num_keypoints"], 3)  # (num_pos, num_keypts, 3)
+            right_priors_selected_xywh = xyxy2xywh(right_priors[sampled_indices])
+            areas = right_priors_selected_xywh[:, 2:].prod(1, keepdim=True)
             kpt_mask = keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3)[..., 2] > 0
-            area = torch.cat(list_areas, dim=0)
             loss_rkeypts = self.loss_keypoint(
                 right_keypts_selected_pos,
-                keypts_targets_selected_encoded.view(-1, self._config["max_num_keypoints"], 3),
+                keypts_targets_selected_encoded,
                 kpt_mask,
-                area
+                areas
             )
             loss_rkeypts_obj = self.loss_bce_pose(
                 right_keypts_selected_pos[..., 2],
@@ -842,10 +1143,11 @@ class StereoDetectionHead(nn.Module):
         loss_dict["loss_rbbox"] /= num_batch
         loss_dict["loss_rbbox"] *= self._config["loss_cfg"]["rbbox_loss_weight"]
 
+        loss_dict["loss_rscore"] *= self._config["loss_cfg"]["rscore_loss_weight"]
         loss_dict["loss_rscore"] /= num_batch
 
         loss_dict["loss_rkeypts"] /= num_batch
-        loss_dict["loss_rkeypts"] *= self._config["loss_cfg"]["rkeypts_loss_weight"]  # Note: scale it to a reasonable magnitude
+        loss_dict["loss_rkeypts"] *= self._config["loss_cfg"]["rkeypts_loss_weight"]
 
         loss_dict["loss_rkeypts_obj"] /= num_batch
         if torch.isnan(loss_dict["loss_rbbox"]) or torch.isnan(loss_dict["loss_rscore"]) or torch.isnan(loss_dict["loss_rkeypts"]) or torch.isnan(loss_dict["loss_rkeypts_obj"]):
@@ -992,10 +1294,10 @@ class StereoDetectionHead(nn.Module):
         """
         Extract inference results from the model's predictions.
         Args:
-            sbboxes_priors: (num_detections, variation_size_squared, 6) shape, containing the right priors from preivous network.
-            refined_right_bboxes: (num_detections*variation_size_squared, num_classes, 4) shape.
-            refined_right_scores: (num_detections*variation_size_squared, num_classes+1) shape.
-            right_keypts_pred: (num_detections*variation_size_squared, num_classes, num_keypts*3) shape.
+            sbboxes_priors: (num_hypotheses_gtexist, 8) shape, containing the right priors from preivous network.
+            refined_right_bboxes: (num_hypotheses_gtexist, num_classes, 4) shape.
+            refined_right_scores: (num_hypotheses_gtexist, num_classes+1) shape.
+            right_keypts_pred: (num_hypotheses_gtexist, num_classes, num_keypts*3) shape.
         
         Returns:
             mask_nonbackground: (num_detections,) shape.
@@ -1003,54 +1305,39 @@ class StereoDetectionHead(nn.Module):
             refined_right_scores_pred: (<num_detections>, 1) shape.
             right_keypts_pred: (<num_detections>, num_keypts*3) shape.
         """
-        num_detections, variation_size_squared = sbboxes_priors.shape[:2]
+        num_hypotheses_gtexist = sbboxes_priors.shape[:2]
         num_classes = refined_right_bboxes.shape[-2]
-        sbboxes_priors = sbboxes_priors.view(num_detections, variation_size_squared, 6)
-
-        refined_right_bboxes = refined_right_bboxes.view(num_detections, variation_size_squared, num_classes, 4)
-        refined_right_scores = refined_right_scores.view(num_detections, variation_size_squared, (num_classes + 1))
-        right_keypts_pred = right_keypts_pred.view(num_detections, variation_size_squared, num_classes, 3 * self._config["max_num_keypoints"])
 
         best_scores_of_classes, best_class_labels = torch.max(F.softmax(refined_right_scores, dim=-1), dim=-1)
-        indices_highest_score = torch.argmax(best_scores_of_classes, dim=1)
-        batchIndices = torch.arange(num_detections)
-        class_labels_pred = best_class_labels[batchIndices, indices_highest_score]
+        class_labels_pred = best_class_labels
         mask_nonbackground = class_labels_pred != num_classes
         if mask_nonbackground.sum() == 0:
             print("Warning: all detections are classified as bkground, no valid detections.")
             return mask_nonbackground, None, None, None
         else:
             sbboxes_priors_nobkg = sbboxes_priors[mask_nonbackground]
-            refined_sbboxes_nobkg = sbboxes_priors_nobkg[:, 0, :].view(-1, 6).clone()
+            refined_sbboxes_nobkg = sbboxes_priors_nobkg.view(-1, 8).clone()
             refined_right_bboxes_nobkg = refined_right_bboxes[mask_nonbackground]
             right_keypts_pred_nobkg = right_keypts_pred[mask_nonbackground]
             class_labels_pred_nobkg = class_labels_pred[mask_nonbackground]
             # select the highest score as confidence score
-            refined_right_scores_pred = best_scores_of_classes[torch.arange(num_detections), indices_highest_score]
-            indices_highest_score_nobkg = indices_highest_score[mask_nonbackground]
-            refined_right_scores_pred = refined_right_scores_pred[mask_nonbackground]
+            refined_right_scores_pred = best_scores_of_classes[mask_nonbackground]
             # select data based on the class label
             refined_right_bboxes_nobkg = refined_right_bboxes_nobkg[
-                torch.arange(mask_nonbackground.sum()).view(-1, 1).expand(-1, variation_size_squared),
-                torch.arange(variation_size_squared).unsqueeze(0),
-                class_labels_pred_nobkg.view(mask_nonbackground.sum(), 1).expand(-1, variation_size_squared)
+                torch.arange(mask_nonbackground.sum()),
+                class_labels_pred_nobkg
             ]
-            refined_right_bboxes_nobkg = refined_right_bboxes_nobkg[torch.arange(mask_nonbackground.sum()), indices_highest_score_nobkg]
-            right_priors_nobkg = sbboxes_priors_nobkg[..., [4, 1, 5, 3]]  # (num_detections, k*k, 4)
-            refined_right_bboxes_nobkg_decoded = self.bbox_coder.decode(right_priors_nobkg[:, 0, :], refined_right_bboxes_nobkg.view(-1, 4))
-            refined_sbboxes_nobkg[:, [4, 5]] = refined_right_bboxes_nobkg_decoded[:, [0, 2]]
-            refined_sbboxes_nobkg = refined_sbboxes_nobkg.view(mask_nonbackground.sum(), 6)
+            right_priors_nobkg = sbboxes_priors_nobkg[..., 4:]  # (num_hypotheses_nobkg, 4)
+            refined_right_bboxes_nobkg_decoded = self.bbox_coder.decode(right_priors_nobkg, refined_right_bboxes_nobkg.view(-1, 4))
+            refined_sbboxes_nobkg[:, 4:] = refined_right_bboxes_nobkg_decoded
             # select best keypoints
             right_keypts_pred_nobkg = right_keypts_pred_nobkg[
-                torch.arange(mask_nonbackground.sum()).view(-1, 1).expand(-1, variation_size_squared),
-                torch.arange(variation_size_squared).unsqueeze(0),
-                class_labels_pred_nobkg.view(mask_nonbackground.sum(), 1).expand(-1, variation_size_squared)
+                torch.arange(mask_nonbackground.sum()),
+                class_labels_pred_nobkg
             ]
-            right_keypts_pred_nobkg = right_keypts_pred_nobkg[torch.arange(mask_nonbackground.sum()), indices_highest_score_nobkg]
-            right_keypts_pred_nobkg = right_keypts_pred_nobkg.clone()
             for indexKeypt in range(self._config["max_num_keypoints"]):
                 right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)] = DecodeKeypts(
-                    right_priors_nobkg[:, 0, :],
+                    right_priors_nobkg,
                     right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)],
                 )
             return mask_nonbackground, refined_sbboxes_nobkg, refined_right_scores_pred, right_keypts_pred_nobkg.view(mask_nonbackground.sum(), -1, 3)
@@ -1084,15 +1371,12 @@ class StereoDetectionHead(nn.Module):
         """
         compute IoU between each preds group and the corresponding ref bboxes.
         Args:
-            bboxes_preds: [N, num_grids, 4]. box format (tl_x, tl_y, br_x, br_y). N is the number of detection instances.
+            bboxes_preds: [N, 4]. box format (tl_x, tl_y, br_x, br_y). N is the number of detection instances.
             bboxes_ref: [N, 4].
 
         Returns: 
-            ious: [N,  num_grids]
-            indicies_best_right: [N]
+            ious: [N,]
         """
-        num_grids = bboxes_preds.shape[1]
-        bboxes_ref = bboxes_ref.expand(-1, num_grids, -1)
         intersectionBox_tl_x = torch.max(torch.stack((bboxes_preds[..., 0], bboxes_ref[..., 0]), dim=-1), dim=-1)[0]
         intersectionBox_br_x = torch.min(torch.stack((bboxes_preds[..., 2], bboxes_ref[..., 2]), dim=-1), dim=-1)[0]
         
@@ -1100,11 +1384,11 @@ class StereoDetectionHead(nn.Module):
         intersectionBox_tl_y = torch.max(torch.stack((bboxes_preds[..., 1], bboxes_ref[..., 1]), dim=-1), dim=-1)[0]
         intersectionBox_br_y = torch.min(torch.stack((bboxes_preds[..., 3], bboxes_ref[..., 3]), dim=-1), dim=-1)[0]
         hs = torch.clamp(intersectionBox_br_y - intersectionBox_tl_y, min=0, max=None)
-        intersectionAreas = ws * hs  # [B, num_grids]
+        intersectionAreas = ws * hs
         unionAreas = (bboxes_ref[..., 2] - bboxes_ref[..., 0]) * (bboxes_ref[..., 3] - bboxes_ref[..., 1]) + (bboxes_preds[..., 2] - bboxes_preds[..., 0]) * (bboxes_preds[..., 3] - bboxes_preds[..., 1])
         unionAreas = unionAreas - intersectionAreas
         ious = intersectionAreas / unionAreas
-        return ious, torch.max(ious, dim=-1)[1]
+        return ious
 
     def batch_sampler(self, bboxes_preds: Tensor, iou_scores: Tensor, batch_gt_bboxes: Tensor, iou_thres: float, candidates_k: int):
         """
@@ -1112,8 +1396,8 @@ class StereoDetectionHead(nn.Module):
         If candidates within IoU_thres are less than candidates_k, 0 pad them.
 
         Args:
-            bboxes_preds: shape (N, num_grids, 4)
-            iou_scores: shape (N, num_grids, 1)
+            bboxes_preds: shape (N, 4)
+            iou_scores: shape (N,)
             batch_gt_bboxes: shape (N, 4)
 
         Returns:
@@ -1121,26 +1405,26 @@ class StereoDetectionHead(nn.Module):
             bboxes_preds_selected: shape (N, k, 4). Note some of the k elements can be just 0s.
             bboxes_gt_selected: shape (N, k, 4). Note some of the k elements can be just 0s.
         """
-        bboxes_gt_selected = batch_gt_bboxes.view(-1, 1, 4).repeat(1, candidates_k, 1)
-        num_detections, num_grids = bboxes_preds.shape[:2]
+        num_detections = bboxes_preds.shape[0]
         with torch.no_grad():
-            topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=1)
+            topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=0)
             valid_mask = topk_scores > iou_thres
-            valid_mask[:, :1] = True  # Note: make sure at least 1 candidate for each gt; torch.topk sorted topk_scores and the first one is sorted to be the best.
-            topk_indices = topk_indices.masked_fill(~valid_mask, num_grids)  # shape (N, k)
-        pseudo_bboxes = torch.zeros(num_detections, 1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
-        bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=1)
-        bboxes_preds_selected = torch.gather(bboxes_preds_padded, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 4))
-        bboxes_gt_selected = bboxes_gt_selected.masked_fill(~valid_mask.unsqueeze(-1).expand(-1, -1, 4), 0)
+            valid_mask[:1] = True  # Note: make sure at least 1 candidate for each gt; torch.topk sorted topk_scores and the first one is sorted to be the best.
+            topk_indices = topk_indices.masked_fill(~valid_mask, num_detections)
+
+        pseudo_bboxes = torch.zeros(1, 4, dtype=bboxes_preds.dtype, device=bboxes_preds.device)
+        bboxes_preds_padded = torch.cat([bboxes_preds, pseudo_bboxes], dim=0)
+        bboxes_preds_selected = torch.gather(bboxes_preds_padded, 0, topk_indices.unsqueeze(-1).expand(-1, 4))
+        bboxes_gt_selected = torch.cat([batch_gt_bboxes, pseudo_bboxes], dim=0)
+        bboxes_gt_selected = bboxes_gt_selected[topk_indices].masked_fill(~valid_mask.unsqueeze(-1).expand(-1, 4), 0)
 
         # make sure at least one candidate for each gt
         # candidates_mask[torch.arange(0, num_detections, device=candidates_mask.device), topk_indices[:, 0]] = True
         pos_mask = torch.zeros_like(iou_scores, dtype=torch.bool)  # build a new mask with only topk being True.
-        valid_mask = topk_indices < num_grids
-        for indexInstance in range(num_detections):
-            pos_mask[indexInstance, topk_indices[indexInstance][valid_mask[indexInstance]]] = True
+        valid_mask = topk_indices < num_detections
+        pos_mask[topk_indices[valid_mask]] = True
 
-        return pos_mask, bboxes_preds_selected, bboxes_gt_selected
+        return pos_mask, topk_indices[valid_mask], bboxes_preds_selected, bboxes_gt_selected
     
     def batch_assigner_keypts(self, keypts_preds: Tensor, distances: Tensor, batch_gt_keypts: Tensor, distance_threshold: float, candidates_k: int):
         """

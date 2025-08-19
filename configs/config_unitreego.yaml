@@ -174,7 +174,7 @@ MODEL:
       right_roi_feat_size: 28
       r_iou_bkg: 0.3
       r_iou_threshold: 0.5
-      candidates_k: 8
+      candidates_k: 49
       # inference:
       right_confidence_threshold_inference: 0.1
       left_right_confidence_diff_inference: 1.0

@@ -5,7 +5,36 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 import copy
-import cv2
+from typing import Tuple
+
+
+def unmap(data, count, inds, fill=0):
+    """Unmap a subset of item (data) back to the original set of items (of size
+    count)"""
+    if data.dim() == 1:
+        ret = data.new_full((count, ), fill)
+        ret[inds.type(torch.bool)] = data
+    else:
+        new_size = (count, ) + data.size()[1:]
+        ret = data.new_full(new_size, fill)
+        ret[inds.type(torch.bool), :] = data
+    return ret
+
+
+def images_to_levels(target, num_levels):
+    """Convert targets by image to targets by feature level.
+
+    [target_img0, target_img1] -> [target_level0, target_level1, ...]
+    """
+    target = torch.stack(target, dim=0)
+    level_targets = []
+    start = 0
+    for n in num_levels:
+        end = start + n
+        # level_targets.append(target[:, start:end].squeeze(0))
+        level_targets.append(target[:, start:end])
+        start = end
+    return level_targets
 
 
 def convert_tensor_to_numpy(inputs):

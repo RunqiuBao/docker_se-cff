@@ -16,6 +16,34 @@ from mmdet.registry import TASK_UTILS
 from mmcv.ops import batched_nms
 
 
+def compute_ious_pertarget(bboxes_pred: torch.Tensor, bboxes_ref: torch.Tensor) -> torch.Tensor:
+    """
+    Args:
+        bboxes_pred: (N, 4) tensor [x1, y1, x2, y2]
+        bboxes_ref: (K, 4) tensor [x1, y1, x2, y2]
+
+    Returns: 
+        ious: (N, K), tensor of IoUs.
+    """
+    # Intersection top-left & bottom-right
+    lt = torch.max(bboxes_pred[:, None, :2], bboxes_ref[:, :2])   # (N, K, 2)
+    rb = torch.min(bboxes_pred[:, None, 2:], bboxes_ref[:, 2:])   # (N, K, 2)
+
+    wh = (rb - lt).clamp(min=0)   # (N, K, 2)
+    inter = wh[:, :, 0] * wh[:, :, 1]   # (N, K)
+
+    # Areas
+    area1 = ((bboxes_pred[:, 2] - bboxes_pred[:, 0]) *
+             (bboxes_pred[:, 3] - bboxes_pred[:, 1]))[:, None]     # (N, 1)
+    area2 = ((bboxes_ref[:, 2] - bboxes_ref[:, 0]) *
+             (bboxes_ref[:, 3] - bboxes_ref[:, 1]))              # (K,)
+
+    union = area1 + area2 - inter
+    ious = inter / union.clamp(min=1e-6)
+
+    return ious
+
+
 @torch.no_grad()
 def SelectTopkCandidates_single(
     cls_scores: Tuple[Tensor],

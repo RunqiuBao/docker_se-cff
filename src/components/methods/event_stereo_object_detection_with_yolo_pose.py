@@ -216,7 +216,12 @@ def train(
         )[0]
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
-        batch_img_metas = {"h": imageHeight, "w": imageWidth}
+        batch_img_metas = {
+            "h": imageHeight,
+            "w": imageWidth,
+            'h_recti': batch_data['image_metadata']['h_recti'],
+            'w_recti': batch_data['image_metadata']['w_recti']
+        }
 
         # ---------- disp pred net ----------
         pred_disparity_pyramid, lossDictAll = _forward_one_batch(
@@ -345,7 +350,7 @@ def train(
                         },
                         {
                             "left_fg_mask": left_fg_mask,
-                            "left_target_gt_idx": left_target_gt_idx,  # Note: mapping gt order to left detections' order
+                            "left_target_gt_idx": left_target_gt_idx,  # Note: gt index for each anchor.
                             "left_nms_topk_mask": nms_topk_mask,
                             "stereo_objdet_targets": stereo_objdet_targets,
                             "batch_img_metas": batch_img_metas
@@ -353,6 +358,7 @@ def train(
                         lossDictAll,
                         {}
                     )
+                    import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None:
@@ -489,7 +495,12 @@ def valid(
         )[0]
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
-        batch_img_metas = {"h": imageHeight, "w": imageWidth}
+        batch_img_metas = {
+            "h": imageHeight,
+            "w": imageWidth,
+            'h_recti': batch_data['image_metadata']['h_recti'],
+            'w_recti': batch_data['image_metadata']['w_recti']
+        }
 
         # ---------- disp pred net ----------
         pred_disparity_pyramid, lossDictAll = _forward_one_batch(
@@ -783,7 +794,12 @@ def test(
             )
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
-        batch_img_metas = {"h": imageHeight, "w": imageWidth}
+        batch_img_metas = {
+            "h": imageHeight,
+            "w": imageWidth,
+            'h_recti': batch_data['image_metadata']['h_recti'],
+            'w_recti': batch_data['image_metadata']['w_recti']
+        }
         num_classes = models["objdet_head"].module.config["num_classes"]
 
         # ---------- disp pred net ----------
@@ -956,7 +972,7 @@ def test(
                 # os.makedirs("/root/data/debug_test/", exist_ok=True)
                 # h, w = stereo_visz[0].shape[:2]
                 # h = h // 2
-                # cv2.imwrite("/root/data/debug_test/" + str(previous_prediction_dict['ts']) + ".png", numpy.vstack([previous_prediction_dict['disp'][:h, :w], stereo_visz[0]]))
+                # cv2.imwrite("/root/data/debug_test/" + str(prediction_dict['ts']) + ".png", numpy.vstack([prediction_dict['disp'][:h, :w], stereo_visz[0]]))
                 # # -------------- debug code --------------
 
                 previous_preds = preds

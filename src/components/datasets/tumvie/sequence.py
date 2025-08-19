@@ -95,7 +95,9 @@ class SequenceDataset(torch.utils.data.Dataset):
             # 'h': self.event_dataset.event_h,
             # 'w': self.event_dataset.event_w,
             "h": crop_height,  # Note: disparity generation is based on objdet after cropping or padding.
-            "w": crop_width
+            "w": crop_width,
+            "h_recti": kwargs["event_rectified_height"],
+            "w_recti": kwargs["event_rectified_width"]
         }
         self.disparity_dataset = disparity_module.DisparityDataset(
             img_metadata=img_metadata,
@@ -222,8 +224,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         output["image_metadata"] = {
             "h": self.crop_height,
             "w": self.crop_width,
-            "h_cam": self.event_dataset.event_h,
-            "w_cam": self.event_dataset.event_w
+            "h_recti": self.event_dataset.event_h,
+            "w_recti": self.event_dataset.event_w
         }
         if "EVENT_TENSOR_TYPE" in self.event_cfg and self.event_cfg.EVENT_TENSOR_TYPE == "secff":
             output["event"]["left"] = (

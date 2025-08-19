@@ -83,14 +83,14 @@ class EventDataset(torch.utils.data.Dataset):
         idx = idx % self.sequence_length
         timestamp = self._timestamps[idx]
         if self.lmdb_txn is not None:
-            code = "%03d_%d_l" % (int(self.sequence_name.split("seq")[-1]), timestamp)
+            code = "%03d_%06d_l" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             left_events = self.lmdb_txn.get(code)
             left_events = np.frombuffer(left_events, dtype="int8")
             left_events = left_events.reshape(
                 self.event_h, self.event_w, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
-            code = "%03d_%d_r" % (int(self.sequence_name.split("seq")[-1]), timestamp)
+            code = "%03d_%06d_r" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             right_events = self.lmdb_txn.get(code)
             right_events = np.frombuffer(right_events, dtype="int8")
