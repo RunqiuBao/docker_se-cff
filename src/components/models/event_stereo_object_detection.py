@@ -251,7 +251,7 @@ class RPNWithTargetsHead(RPNBaseClass):
             batch_targets,
             batch_img_metas
         )
-        return list_hypotheses
+        return list_hypotheses, listfeat_rpn_cls_score, listfeat_rpn_bbox_pred
 
     def predict_single(self, x):
         """
@@ -403,7 +403,7 @@ class RPNWithTargetsHead(RPNBaseClass):
             device=device
         )
         batch_labels = [{
-                'bboxes': labels['stereo_objdet_targets']['bboxes'][labels['stereo_objdet_targets']['batch_idx'] == indexInBatch],
+                'bboxes': labels['stereo_objdet_targets']['bboxes'][labels['stereo_objdet_targets']['batch_idx'] == indexInBatch][:, [4, 1, 5, 3]],
                 'labels': cls_scores_gt[labels['stereo_objdet_targets']['batch_idx'] == indexInBatch]
             } for indexInBatch in range(batch_size)
         ]
@@ -862,7 +862,7 @@ class StereoDetectionHead(nn.Module):
         right_feats = self.backbone(right_event_voxel)
         right_feats = self.neck(right_feats)
         warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=batch_img_metas['h'], imageWidth=batch_img_metas['w'])
-        batch_hypotheses = self.rpn_head.predict(right_feats, warped_left_bboxes, batch_img_metas)
+        batch_hypotheses, rpn_cls_scores, rpn_bbox_preds = self.rpn_head.predict(right_feats, warped_left_bboxes, batch_img_metas)
         for indexInBatch, left_bboxes_oneimage in enumerate(left_bboxes):
             # starttime = time.time()
             if left_bboxes_oneimage.shape[0] == 0:
@@ -908,7 +908,15 @@ class StereoDetectionHead(nn.Module):
             list_corresponding_leftdet_ids.append(hypotheses.target_ids)
             # print("stereoNet time cost (one left dets proposals pass): {}".format(time.time() - starttime))
 
-        return list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts
+        return list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts, rpn_cls_scores, rpn_bbox_preds
+
+    def mask_lefttargets_withnogt(self, left_bboxes: List[Tensor], left_fg_mask: Tensor, left_nms_topk_mask: Tensor) -> List[Tensor]:
+        left_bboxes_posgt = []
+        for indexInBatch, bboxes_oneimage in enumerate(left_bboxes):
+            pos_gt_mask_one = left_fg_mask[indexInBatch]
+            pos_gt_mask_one = pos_gt_mask_one[left_nms_topk_mask[indexInBatch]]
+            left_bboxes_posgt.append(bboxes_oneimage[pos_gt_mask_one])
+        return left_bboxes_posgt
 
     def forward(
         self,
@@ -924,6 +932,8 @@ class StereoDetectionHead(nn.Module):
         """
         if batch_img_metas is None:
             batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
+        if labels is not None:
+            left_bboxes = self.mask_lefttargets_withnogt(left_bboxes, labels["left_fg_mask"], labels["left_nms_topk_mask"])
 
         preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, self._config["bbox_move_anchor_ticks"])
 
@@ -935,8 +945,8 @@ class StereoDetectionHead(nn.Module):
             elif kwargs["detector_format"] == "yolox":
                 losses, artifacts = self.compute_loss_yoloxformat(preds, labels)
             elif kwargs["detector_format"] == "yolopose":
-                losses, sbboxes, masks, selected_keypts = self.compute_loss_yoloposeformat(preds, labels)
-                artifacts = [sbboxes, masks, selected_keypts]
+                losses, sbboxes, selected_keypts = self.compute_loss_yoloposeformat(preds, labels)
+                artifacts = [sbboxes, selected_keypts]
         return preds, losses, artifacts
 
     def compute_loss_yoloposeformat(self, preds: Tuple[List, List, List], labels: Dict):
@@ -959,13 +969,25 @@ class StereoDetectionHead(nn.Module):
                     "keypoints_right": (N_allbatch, num_keypts*3), this is gt.
                     "batch_idx": (N_allbatch,). Index in this batch for this instance.
         """
-        list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_right_scores_refine, list_predicted_right_keypts = preds  # Note: number of positive in each can be different after nms.
+        (
+            list_sbboxes_priors,
+            list_corresponding_leftdet_ids,
+            list_refined_right_bboxes,
+            list_right_scores_refine,
+            list_predicted_right_keypts,
+            rpn_cls_scores,
+            rpn_bbox_preds
+        ) = preds  # Note: number of positive in each can be different after nms.
         left_fg_mask, left_target_gt_idx, left_nms_topk_mask, stereo_objdet_targets, batch_img_metas = labels["left_fg_mask"], labels["left_target_gt_idx"], labels["left_nms_topk_mask"], labels["stereo_objdet_targets"], labels["batch_img_metas"]
 
         loss_dict = {}
+        # rpn losses
+        rpn_losses_cls, rpn_losses_bbox = self.rpn_head.compute_loss(rpn_cls_scores, rpn_bbox_preds, labels, batch_img_metas)
+        loss_dict["loss_rrpn_cls"] = torch.stack(rpn_losses_cls).sum() * self._config["loss_cfg"]["rpn_losses_cls_weight"]
+        loss_dict["loss_rrpn_bbox"] = torch.stack(rpn_losses_bbox).sum() * self._config["loss_cfg"]["rpn_losses_bbox_weight"]
+
         num_batch = len(list_sbboxes_priors)
         list_sbboxes_pred_refined = []
-        pos_gt_nobkg_masks = []
         list_right_keypts_pred = []
         iou_epsilon = 5e-2
         # right bboxes related loss
@@ -979,7 +1001,6 @@ class StereoDetectionHead(nn.Module):
             if list_sbboxes_priors[indexInBatch] is None or pos_gt_mask_one.sum() == 0:
                 # No detections from left
                 list_sbboxes_pred_refined.append(None)
-                pos_gt_nobkg_masks.append(None)
                 list_right_keypts_pred.append(None)
                 num_batch -= 1
                 print("{}-th image in batch has no detections, skip.".format(indexInBatch))
@@ -989,11 +1010,7 @@ class StereoDetectionHead(nn.Module):
             idx_gt2left = left_target_gt_idx[indexInBatch][left_nms_topk_mask[indexInBatch]][pos_gt_mask_one]
             # TODO: need to discard hypotheses generated by leftdets that are not postive in pos_gt_mask_one.
             bbox_targets_one = bbox_targetset_one[idx_gt2left]  # one-to-one corresponding to leftdets with positive gt.
-            idx_righthypos_corresponding_leftdet_ids = list_corresponding_leftdet_ids[indexInBatch].squeeze(0)
-            hypotheses_mask_gtexist = pos_gt_mask_one[idx_righthypos_corresponding_leftdet_ids]  # Hypotheses whose leftdet is negative should be discarded.
-            # rescale idx_righthypos_corresponding_leftdet_ids to indexing to bbox_targets_one. E.g. [0, 1, 5, 4] -> [0 , 1, 3, 2]
-            idx_righthypos_corresponding_targets_ids = idx_righthypos_corresponding_leftdet_ids[hypotheses_mask_gtexist]
-            idx_righthypos_corresponding_targets_ids = torch.unique(idx_righthypos_corresponding_targets_ids, sorted=True, return_inverse=True)[1]
+            idx_righthypos_corresponding_targets_ids = list_corresponding_leftdet_ids[indexInBatch].squeeze(0)
 
             rbboxes_targets = torch.concat([
                 bbox_targets_one[:, 4].unsqueeze(-1),
@@ -1006,14 +1023,13 @@ class StereoDetectionHead(nn.Module):
             rcls_targets = stereo_objdet_targets['cls'][mask_this_batch]
             # align gt with left detections' order
             rcls_targets = rcls_targets[idx_gt2left]  # (num_targets,)
-            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
-            rcls_targets = rcls_targets[idx_righthypos_corresponding_leftdet_ids]  # (num_hypotheses,)
-            sbboxes_priors = list_sbboxes_priors[indexInBatch].squeeze(0)[hypotheses_mask_gtexist]  # shape [1, num_hypotheses, 8]. (tl_x, tl_y, br_x, br_y, tl_x_r, tl_y_r, br_x_r, br_y_r) format bbox, all in global scale.
+            rcls_targets = rcls_targets[idx_righthypos_corresponding_targets_ids]  # (num_hypotheses,)
+            sbboxes_priors = list_sbboxes_priors[indexInBatch].squeeze(0)  # shape [1, num_hypotheses, 8]. (tl_x, tl_y, br_x, br_y, tl_x_r, tl_y_r, br_x_r, br_y_r) format bbox, all in global scale.
             num_hypotheses_gtexist = sbboxes_priors.shape[0]
             right_priors = sbboxes_priors[:, 4:]  # (num_hypotheses_gtexist, 4)
-            right_bboxes = list_refined_right_bboxes[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
-            right_scores = list_right_scores_refine[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
-            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0)[hypotheses_mask_gtexist].view(num_hypotheses_gtexist, -1)
+            right_bboxes = list_refined_right_bboxes[indexInBatch].squeeze(0).view(num_hypotheses_gtexist, -1)
+            right_scores = list_right_scores_refine[indexInBatch].squeeze(0).view(num_hypotheses_gtexist, -1)
+            right_keypts = list_predicted_right_keypts[indexInBatch].squeeze(0).view(num_hypotheses_gtexist, -1)
             # print("stereoNet time cost (loss data uncollapse): {}".format(time.time() - starttime))
             # starttime = time.time()
             rbboxes_refined = right_bboxes.view(num_hypotheses_gtexist, self._config['num_classes'], -1)
@@ -1129,31 +1145,43 @@ class StereoDetectionHead(nn.Module):
                 rbboxes_scores,
                 right_keypts_pred
             )
-            # # ----------- debug code -----------
-            # refined_sbboxes_nobkg = sbboxes_priors[:, 16, :]
-            # right_keypts_pred_nobkg = right_keypts_pred[:, 16, 0, :].view(-1, 2, 3)
-            # mask_nonbackground = torch.ones_like(mask_nonbackground, dtype=torch.bool)
-            # # ----------- debug code -----------
+            if refined_sbboxes_nobkg is not None:
+                # select only the highest scoring right bboxes and keypoints to pair with left
+                selected_refined_sbboxes_nobkg = []
+                selected_right_keypts_pred_nobkg = []
+                indices_leftDet = torch.unique(idx_righthypos_corresponding_targets_ids[mask_nonbackground])
+                for indexLeftDet in indices_leftDet:
+                    mask_indexleftdet = idx_righthypos_corresponding_targets_ids[mask_nonbackground] == indexLeftDet
+                    index_highest_score = torch.argmax(refined_right_scored_pred[mask_indexleftdet])
+                    selected_refined_sbboxes_nobkg.append(refined_sbboxes_nobkg[mask_indexleftdet][index_highest_score].unsqueeze(0))
+                    selected_right_keypts_pred_nobkg.append(right_keypts_pred_nobkg[mask_indexleftdet][index_highest_score].unsqueeze(0))
 
-            list_sbboxes_pred_refined.append(refined_sbboxes_nobkg)
-            pos_gt_nobkg_masks.append(mask_nonbackground)
-            list_right_keypts_pred.append(right_keypts_pred_nobkg)
-            # print("stereoNet time cost (rkeypts pred): {}".format(time.time() - starttime))
+                # # ----------- debug code -----------
+                # refined_sbboxes_nobkg = sbboxes_priors[:, 16, :]
+                # right_keypts_pred_nobkg = right_keypts_pred[:, 16, 0, :].view(-1, 2, 3)
+                # mask_nonbackground = torch.ones_like(mask_nonbackground, dtype=torch.bool)
+                # # ----------- debug code -----------
+                list_sbboxes_pred_refined.append(torch.cat(selected_refined_sbboxes_nobkg, dim=0))
+                list_right_keypts_pred.append(torch.cat(selected_right_keypts_pred_nobkg, dim=0))
+            else:
+                list_sbboxes_pred_refined.append(None)
+                list_right_keypts_pred.append(None)
 
         loss_dict["loss_rbbox"] /= num_batch
         loss_dict["loss_rbbox"] *= self._config["loss_cfg"]["rbbox_loss_weight"]
 
-        loss_dict["loss_rscore"] *= self._config["loss_cfg"]["rscore_loss_weight"]
         loss_dict["loss_rscore"] /= num_batch
+        loss_dict["loss_rscore"] *= self._config["loss_cfg"]["rscore_loss_weight"]
 
         loss_dict["loss_rkeypts"] /= num_batch
         loss_dict["loss_rkeypts"] *= self._config["loss_cfg"]["rkeypts_loss_weight"]
 
         loss_dict["loss_rkeypts_obj"] /= num_batch
+        loss_dict["loss_rkeypts_obj"] *= self._config["loss_cfg"]["rkeypts_obj_loss_weight"]
         if torch.isnan(loss_dict["loss_rbbox"]) or torch.isnan(loss_dict["loss_rscore"]) or torch.isnan(loss_dict["loss_rkeypts"]) or torch.isnan(loss_dict["loss_rkeypts_obj"]):
             import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
-        return loss_dict, list_sbboxes_pred_refined, pos_gt_nobkg_masks, list_right_keypts_pred
+        return loss_dict, list_sbboxes_pred_refined, list_right_keypts_pred
 
     @staticmethod
     def kpts_decode(anchor_points, pred_kpts):
@@ -1407,6 +1435,7 @@ class StereoDetectionHead(nn.Module):
         """
         num_detections = bboxes_preds.shape[0]
         with torch.no_grad():
+            candidates_k = min(candidates_k, num_detections)
             topk_scores, topk_indices = torch.topk(iou_scores, candidates_k, dim=0)
             valid_mask = topk_scores > iou_thres
             valid_mask[:1] = True  # Note: make sure at least 1 candidate for each gt; torch.topk sorted topk_scores and the first one is sorted to be the best.

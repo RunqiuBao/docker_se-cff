@@ -46,9 +46,7 @@ class RPNBaseClass(nn.Module):
         self,
         flat_anchors: Tensor,
         valid_flags: Tensor,
-        gt_instances: dict,
-        img_meta: dict,
-        unmap_outputs: bool = True
+        gt_instances: dict
     ) -> tuple:
         """Compute regression and classification targets for anchors in a
         single image.
@@ -63,9 +61,6 @@ class RPNBaseClass(nn.Module):
             gt_instances (dict): Ground truth of instance
                 annotations. It should includes ``bboxes`` and ``labels``
                 keys.
-            img_meta (dict): Meta information for current image.
-            unmap_outputs (bool): Whether to map outputs back to the original
-                set of anchors.  Defaults to True.
 
         Returns:
             tuple:
@@ -100,8 +95,7 @@ class RPNBaseClass(nn.Module):
             gt_instances)
 
         num_valid_anchors = anchors.shape[0]
-        target_dim = gt_instances.bboxes.size(-1) if self.reg_decoded_bbox \
-            else self.bbox_coder.encode_size
+        target_dim = self.bbox_coder.encode_size
         bbox_targets = anchors.new_zeros(num_valid_anchors, target_dim)
         bbox_weights = anchors.new_zeros(num_valid_anchors, target_dim)
 
@@ -125,10 +119,7 @@ class RPNBaseClass(nn.Module):
             bbox_weights[pos_inds, :] = 1.0
 
             labels[pos_inds] = sampling_result.pos_gt_labels
-            if self.train_cfg['pos_weight'] <= 0:
-                label_weights[pos_inds] = 1.0
-            else:
-                label_weights[pos_inds] = self.train_cfg['pos_weight']
+            label_weights[pos_inds] = 1.0
         if len(neg_inds) > 0:
             label_weights[neg_inds] = 1.0
 
@@ -153,7 +144,6 @@ class RPNBaseClass(nn.Module):
                     valid_flag_list: List[List[Tensor]],
                     batch_gt_instances: List[dict],
                     batch_img_metas: List[dict],
-                    unmap_outputs: bool = True,
                     return_sampling_results: bool = False) -> tuple:
         """Compute regression and classification targets for anchors in
         multiple images.
@@ -172,8 +162,6 @@ class RPNBaseClass(nn.Module):
                 keys.
             batch_img_metas (list[dict]): Meta information of each image, e.g.,
                 image size, scaling factor, etc.
-            unmap_outputs (bool): Whether to map outputs back to the original
-                set of anchors. Defaults to True.
             return_sampling_results (bool): Whether to return the sampling
                 results. Defaults to False.
 
@@ -214,9 +202,7 @@ class RPNBaseClass(nn.Module):
             self._get_targets_single,
             concat_anchor_list,
             concat_valid_flag_list,
-            batch_gt_instances,
-            batch_img_metas,
-            unmap_outputs=unmap_outputs)
+            batch_gt_instances)
         (all_labels, all_label_weights, all_bbox_targets, all_bbox_weights,
          pos_inds_list, neg_inds_list, sampling_results_list) = results[:7]
         rest_results = list(results[7:])  # user-added return values
@@ -226,9 +212,6 @@ class RPNBaseClass(nn.Module):
         # `avg_factor` is usually equal to the number of positive priors.
         avg_factor = sum(
             [results.avg_factor for results in sampling_results_list])
-        # update `_raw_positive_infos`, which will be used when calling
-        # `get_positive_infos`.
-        self._raw_positive_infos.update(sampling_results=sampling_results_list)
         # split targets to a list w.r.t. multiple levels
         labels_list = images_to_levels(all_labels, num_level_anchors)
         label_weights_list = images_to_levels(all_label_weights,
@@ -245,3 +228,51 @@ class RPNBaseClass(nn.Module):
             rest_results[i] = images_to_levels(r, num_level_anchors)
 
         return res + tuple(rest_results)
+
+    def compute_loss_single(
+        self,
+        cls_score: Tensor,
+        bbox_pred: Tensor,
+        anchors: Tensor,
+        labels: Tensor,
+        label_weights: Tensor,
+        bbox_targets: Tensor,
+        bbox_weights: Tensor,
+        avg_factor: int
+    ) -> tuple:
+        """Calculate the loss of a single scale level based on the features
+        extracted by the detection head.
+
+        Args:
+            cls_score (Tensor): Box scores for each scale level
+                Has shape (N, num_anchors * num_classes, H, W).
+            bbox_pred (Tensor): Box energies / deltas for each scale
+                level with shape (N, num_anchors * 4, H, W).
+            anchors (Tensor): Box reference for each scale level with shape
+                (N, num_total_anchors, 4).
+            labels (Tensor): Labels of each anchors with shape
+                (N, num_total_anchors).
+            label_weights (Tensor): Label weights of each anchor with shape
+                (N, num_total_anchors)
+            bbox_targets (Tensor): BBox regression targets of each anchor
+                weight shape (N, num_total_anchors, 4).
+            bbox_weights (Tensor): BBox regression loss weights of each anchor
+                with shape (N, num_total_anchors, 4).
+            avg_factor (int): Average factor that is used to average the loss.
+
+        Returns:
+            tuple: loss components.
+        """
+        # classification loss
+        labels = labels.reshape(-1)
+        label_weights = label_weights.reshape(-1)
+        cls_score = cls_score.permute(0, 2, 3, 1).reshape(-1, self.cls_out_channels)
+        loss_cls = self.loss_cls(cls_score, labels, label_weights, avg_factor=avg_factor)
+        # regression loss
+        target_dim = bbox_targets.size(-1)
+        bbox_targets = bbox_targets.reshape(-1, target_dim)
+        bbox_weights = bbox_weights.reshape(-1, target_dim)
+        bbox_pred = bbox_pred.permute(0, 2, 3, 1).reshape(-1, self.bbox_coder.encode_size)
+
+        loss_bbox = self.loss_bbox(bbox_pred, bbox_targets, bbox_weights, avg_factor=avg_factor)
+        return loss_cls, loss_bbox

@@ -358,7 +358,6 @@ def train(
                         lossDictAll,
                         {}
                     )
-                    import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None:
@@ -368,7 +367,7 @@ def train(
                                     # not a valid detection
                                     continue
                                 right_bboxes_one = artifacts[0][indexInBatch].detach()
-                                right_bboxes_one = right_bboxes_one[..., [4, 1, 5, 3]]
+                                right_bboxes_one = right_bboxes_one[..., [4, 5, 6, 7]]
                                 rightimage_visz = RenderImageWithBboxesAndKeypts(
                                     right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
                                     {
@@ -660,7 +659,7 @@ def valid(
                                     # not a valid detection
                                     continue
                                 right_bboxes_one = artifacts[0][indexInBatch].detach()
-                                right_bboxes_one = right_bboxes_one[..., [4, 1, 5, 3]] 
+                                right_bboxes_one = right_bboxes_one[..., [4, 5, 6, 7]] 
                                 rightimage_visz = RenderImageWithBboxesAndKeypts(
                                     right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
                                     {
