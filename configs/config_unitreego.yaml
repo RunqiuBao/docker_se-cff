@@ -205,7 +205,7 @@ OPTIMIZER:
     is_enable: True
     NAME: AdamW
     PARAMS:
-      lr: 0.0001
+      lr: 0.0005
       weight_decay: 0.01
   optimizer1:
     is_enable: False
