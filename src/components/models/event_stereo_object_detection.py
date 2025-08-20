@@ -833,6 +833,8 @@ class StereoDetectionHead(nn.Module):
             xindi = ((bboxes_oneimage[..., 0] + bboxes_oneimage[..., 2]) / 2).to(torch.int).clamp(0, imageWidth - 1).squeeze()
             yindi = ((bboxes_oneimage[..., 1] + bboxes_oneimage[..., 3]) / 2).to(torch.int).clamp(0, imageHeight - 1).squeeze()
             bbox_disps = disp_prior[indexInBatch][yindi, xindi]
+            if bbox_disps.dim() == 0:
+                bbox_disps = bbox_disps.unsqueeze(0)
             bboxes_oneimage[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(-1, 2)
             warped_bboxes.append(bboxes_oneimage)
         return warped_bboxes
@@ -842,15 +844,13 @@ class StereoDetectionHead(nn.Module):
         right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
-        batch_img_metas: Dict,
-        bbox_move_anchor_ticks: List[float]
+        batch_img_metas: Dict
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
             right_event_voxel: shape is [B, 10, h, w]
             bboxes_pred: list of B tensors of shape [?, 4]. [tl_x, tl_y, br_x, br_y] format bbox, all in global scale.
             disp_prior: [B, h, w] shape.
-            bbox_move_anchor_ticks: from 0.5 to 2.0, use multiple ticks to resize the bboxes horizontally and vertically to search for different regions.
 
         Returns:
             sbboxes_priors: list of shape [N, 8]. format [tl_x, tl_y, br_x, br_y, tl_x_r, br_x_r] rough stereo bbox

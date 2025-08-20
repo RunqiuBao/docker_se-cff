@@ -176,7 +176,8 @@ MODEL:
       r_iou_threshold: 0.5
       candidates_k: 49
       # inference:
-      right_confidence_threshold_inference: 0.1
+      right_nms_iou_threshold_inference: 0.2
+      right_confidence_threshold_inference: 0.5
       left_right_confidence_diff_inference: 1.0
 LOSSES:
   concentration_net_cfg:
@@ -243,7 +244,7 @@ SCHEDULER:
       first_cycle_steps: 100
       gamma: 1.0
       lr_ratio: 0.0001
-      warmup_steps: 3
+      warmup_steps: 0
   scheduler1:
     is_enable: False
     NAME: DETR_SCHEDULER

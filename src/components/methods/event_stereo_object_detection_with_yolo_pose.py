@@ -6,6 +6,8 @@ import time
 import torchvision
 from typing import Optional
 from torch import Tensor
+from torch.nn.utils import clip_grad_norm_
+from torchvision.ops import nms
 import torch.nn.functional as F
 
 from tqdm import tqdm
@@ -20,6 +22,7 @@ from .base import batch_to_cuda
 from ..models.yolo_pose_utils import non_max_suppression
 
 from..models.utils.misc import freeze_module_grads
+from utils.metrics import AverageMeter
 
 import logging
 logger = logging.getLogger(__name__)
@@ -106,6 +109,10 @@ def _backward_and_optimize(
         scaler.update()
     else:
         loss.backward()  # Note: PyTorch’s autograd engine ensures that gradients are only computed for parameters that contribute to a given loss term.
+        for key, model in models.items():
+            if not model.module.is_freeze:
+                total_norm = clip_grad_norm_(model.module.parameters(), max_norm=float('inf')) # for logging, no clip
+                lossRecords["grad_norm_" + key].update(total_norm, batchSize)
         for key, suboptimizer in optimizer.items():
             if not models[key].module.is_freeze:
                 suboptimizer.step()
@@ -181,6 +188,10 @@ def train(
             model.train()
 
     log_dict = GetLogDict(is_train=True, is_secff=(hasattr(models["disp_head"].module, 'is_freeze') and not models["disp_head"].module.is_freeze))
+    # create grad norm logger
+    for key, model in models.items():
+        if not model.module.is_freeze:
+            log_dict["grad_norm_" + key] = AverageMeter(string_format="%6.3lf")
     lossDictAll = {}
 
     pbar = tqdm(total=len(data_loader))
@@ -403,7 +414,7 @@ def train(
                                 #     }
                                 # )
                                 # debug_path = "/root/data/debug_train/"
-                                # stereo_visz = numpy.hstack([leftimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']], rightimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]])
+                                # stereo_visz = numpy.hstack([leftimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
                                 # cv2.imwrite(debug_path + str(indexInBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", stereo_visz)
                                 # # ------- debug code --------
 
@@ -706,11 +717,11 @@ def valid(
                                 #     }
                                 # )
                                 # disparity_visz = numpy.vstack([
-                                #     pred_disparity_pyramid[-1][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']],
-                                #     batch_data["gt_labels"]["disparity"][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]
+                                #     pred_disparity_pyramid[-1][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']],
+                                #     batch_data["gt_labels"]["disparity"][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]
                                 # ])
                                 # disparity_visz = cv2.cvtColor(disparity_visz, cv2.COLOR_GRAY2BGR)
-                                # stereo_visz = numpy.vstack([leftimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']], rightimage_visz[:batch_data['image_metadata']['h_cam'], :batch_data['image_metadata']['w_cam']]])
+                                # stereo_visz = numpy.vstack([leftimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
                                 # all_visz = numpy.hstack([disparity_visz, stereo_visz])
                                 # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", all_visz)
                                 # # ------- debug code --------
@@ -773,6 +784,7 @@ def test(
     prediction_dict = None
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
+        assert batch_data["event"]["left"].shape[0] == 1, "batch size should be 1 for test mode."
         starttime = time.time()
         # ---------- concentration net ----------
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
@@ -851,13 +863,19 @@ def test(
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
             # ---------- stereo detection head ----------
             left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
-            batch_sbboxes_priors, batch_refined_right_bboxes, batch_refined_right_scores, batch_predicted_right_keypts = models["stereo_detection_head"].module.predict(
+            (
+                batch_sbboxes_priors,
+                batch_corresponding_leftdet_ids,
+                batch_refined_right_bboxes,
+                batch_refined_right_scores,
+                batch_predicted_right_keypts,
+                rpn_cls_scores,
+                rpn_bbox_preds
+            ) = models["stereo_detection_head"].module.predict(
                 batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
-                batch_img_metas,
-                models["stereo_detection_head"].module.config["bbox_move_anchor_ticks"],
-                models["stereo_detection_head"].module.config["bbox_expand_factor"],
+                batch_img_metas
             )
             if is_save_onnx:
                 torch.onnx.export(
@@ -901,7 +919,36 @@ def test(
             #                                                                 class_label, confidence, confidence_right,
             #                                                                                                           l_kpt0_x, l_kpt0_y, visibility_l0, l_kpt1_x, l_kpt1_y, visibility_l1, ..., r_kpt0_x, r_kpt0_y, visibility_r0, r_kpt1_x, r_kpt1_y, visibility_r1, ...)
             # TODO: mark right confidences on the result visz image.
-            left_bboxes_final = left_bboxesClsKeypts_nmsed_topked[0][mask_nonbackground][:, 0:4]
+            corresponding_leftdet_indices = batch_corresponding_leftdet_ids[0][mask_nonbackground]
+            corresponding_leftdets = left_bboxesClsKeypts_nmsed_topked[0][corresponding_leftdet_indices]
+            left_bboxes_final = corresponding_leftdets[:, :4]
+            raw_preds = torch.concat([
+                left_bboxes_final,
+                # torch.concat([
+                #     refined_sbboxes_nobkg[:, 4].view(-1, 1),
+                #     left_bboxes_final[:, 1].view(-1, 1),
+                #     refined_sbboxes_nobkg[:, 5].view(-1, 1),
+                #     left_bboxes_final[:, 3].view(-1, 1)
+                # ], dim=-1),
+                refined_sbboxes_nobkg[:, 4:8],
+                torch.argmax(corresponding_leftdets[:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1),
+                torch.max(corresponding_leftdets[:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1),
+                refined_right_scored_pred.view(-1, 1),
+                corresponding_leftdets[:, (4 + models["objdet_head"].module.config["num_classes"]):],
+                right_keypts_pred_nobkg.view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3),
+            ], dim=1)
+            right_keep_indices = nms(
+                raw_preds[:, 4:8],
+                raw_preds[:, 10],
+                iou_threshold=models["stereo_detection_head"].module.config["right_nms_iou_threshold_inference"]
+            )
+            raw_preds = raw_preds[right_keep_indices]
+            left_keep_indices = nms(
+                raw_preds[:, 0:4],
+                raw_preds[:, 9],
+                iou_threshold=models["objdet_head"].module.config["confidence_threshold_inference"]
+            )
+            raw_preds = raw_preds[left_keep_indices]
             # # -------------- debug code --------------
             # dummy_results = batch_sbboxes_priors[0][0, :, 16, :]
             # dummy_results = torch.concat([
@@ -920,22 +967,9 @@ def test(
             # # -------------- debug code --------------
 
             preds = FilterBadDetections(
-                torch.concat([
-                    left_bboxes_final,
-                    torch.concat([
-                        refined_sbboxes_nobkg[:, 4].view(-1, 1),
-                        left_bboxes_final[:, 1].view(-1, 1),
-                        refined_sbboxes_nobkg[:, 5].view(-1, 1),
-                        left_bboxes_final[:, 3].view(-1, 1)
-                    ], dim=-1),
-                    torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1)[mask_nonbackground],
-                    torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1)[mask_nonbackground],
-                    refined_right_scored_pred.view(-1, 1),
-                    left_bboxesClsKeypts_nmsed_topked[0][:, (4 + models["objdet_head"].module.config["num_classes"]):][mask_nonbackground],
-                    right_keypts_pred_nobkg.view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3),
-                ], dim=1),
-                imageHeight=batch_data["image_metadata"]["h_cam"],
-                imageWidth=batch_data["image_metadata"]["w_cam"],
+                raw_preds,
+                imageHeight=batch_data["image_metadata"]["h_recti"],
+                imageWidth=batch_data["image_metadata"]["w_recti"],
                 margin=4,
                 right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"],
                 left_right_confidence_diff=models["stereo_detection_head"].module.config["left_right_confidence_diff_inference"],
@@ -1189,7 +1223,7 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
     os.makedirs(path_det_visz_folder, exist_ok=True)
     os.makedirs(path_concentrate_left_folder, exist_ok=True)
     os.makedirs(path_concentrate_right_folder, exist_ok=True)
-    imgHeight, imgWidth = img_metas['h_cam'], img_metas['w_cam']
+    imgHeight, imgWidth = img_metas['h_recti'], img_metas['w_recti']
     facets_info_batch = []
     stereo_visz = []
     for indexInBatch, detection in enumerate(pred['objdet']):
@@ -1202,8 +1236,10 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         left_bboxes = numpy.stack([tl_x, tl_y, br_x, br_y], axis=1)
         right_bboxes = detection[:, 4:8].cpu().numpy()
         tl_x_r = numpy.clip(right_bboxes[:, 0], 0, imgWidth)
+        tl_y_r = numpy.clip(right_bboxes[:, 1], 0, imgHeight)
         br_x_r = numpy.clip(right_bboxes[:, 2], 0, imgWidth)
-        right_bboxes = numpy.stack([tl_x_r, br_x_r], axis=1)
+        br_y_r = numpy.clip(right_bboxes[:, 3], 0, imgHeight)
+        right_bboxes = numpy.stack([tl_x_r, tl_y_r, br_x_r, br_y_r], axis=1)
         sbboxes = numpy.concatenate([left_bboxes, right_bboxes], axis=-1)
         classes = detection[:, 8].cpu().numpy().astype('int')
         confidences = detection[:, 9:11].cpu().numpy()
@@ -1211,8 +1247,8 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
             keypts_left = detection[:, 11:(11+max_num_keypoints*3)].cpu().numpy()
             keypts_right = detection[:, (11+max_num_keypoints*3):].cpu().numpy()
             visz_left, visz_right = DrawResultBboxesAndKeyptsOnStereoEventFrame(
-                pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']],
-                pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas["w_cam"]],
+                pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_recti'], :img_metas['w_recti']],
+                pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_recti'], :img_metas["w_recti"]],
                 sbboxes,
                 classes,
                 confidences[:, 0],
@@ -1223,10 +1259,10 @@ def SaveTestResultsAndVisualize(pred: dict, indexBatch: int, timestamp: int, seq
         visz = numpy.concatenate([visz_left, visz_right], axis=-2)
         visz = cv2.cvtColor(visz, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(path_det_visz_folder, str(timestamp) + ".png"), visz)
-        left_concentrated = pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        left_concentrated = pred['concentrate']['left'].squeeze().cpu().numpy()[:img_metas['h_recti'], :img_metas['w_recti']]
         left_concentrated = left_concentrated - left_concentrated.min()
         left_concentrated = (left_concentrated * 255 / left_concentrated.max()).astype('uint8')
-        right_concentrated = pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_cam'], :img_metas['w_cam']]
+        right_concentrated = pred['concentrate']['right'].squeeze().cpu().numpy()[:img_metas['h_recti'], :img_metas['w_recti']]
         right_concentrated = right_concentrated - right_concentrated.min()
         right_concentrated = (right_concentrated * 255 / right_concentrated.max()).astype('uint8')
         cv2.imwrite(os.path.join(path_concentrate_left_folder, str(timestamp) + ".png"), left_concentrated)

@@ -16,7 +16,7 @@ from components import datasets
 from components import methods
 
 from utils.logger import ExpLogger, TimeCheck
-from utils.metrics import SummationMeter, Metric
+from utils.metrics import SummationMeter, Metric, AverageMeter
 
 import logging
 logger = logging.getLogger(__name__)
@@ -130,6 +130,11 @@ class DLManager:
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
         smallestValidEPE = sys.float_info.max
+
+        learning_rate_log_dict = {}
+        for key, scheduler in self.scheduler.items():
+            learning_rate_log_dict["lr_" + key] = AverageMeter(string_format="%6.3lf")
+
         for epoch in range(self.args.start_epoch, self.cfg.TOTAL_EPOCH):
             if self.args.is_distributed:
                 dist.barrier()
@@ -149,9 +154,10 @@ class DLManager:
             )
 
             for key, scheduler in self.scheduler.items():
-                scheduler.step()
                 if self.args.is_master:
+                    learning_rate_log_dict["lr_" + key].update(scheduler.get_lr()[0])
                     print(key + "'s lr: {}".format(scheduler.get_lr()))
+                scheduler.step()
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:

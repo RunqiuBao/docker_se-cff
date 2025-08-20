@@ -124,9 +124,8 @@ def appx_best_fit_ngon(mask_cv2_gray, n: int = 4) -> list[(int, int)]:
 def LimitBboxWithInImage(bbox: numpy.ndarray, imageHeight: int, imageWidth: int):
     newBbox = numpy.ones_like(bbox)
     newBbox[0::2] = numpy.clip(bbox[0::2], 0, imageWidth)
-    if newBbox.shape[0] > 4:
-        newBbox[5] = numpy.clip(bbox[5], 0, imageWidth)
-    newBbox[[1, 3]] = numpy.clip(bbox[[1, 3]], 0, imageHeight)
+    assert newBbox.shape[0] == 8, "stereo bbox should be 8 elements, but got {}".format(newBbox.shape[0])
+    newBbox[1::2] = numpy.clip(bbox[1::2], 0, imageHeight)
     return newBbox
 
 
@@ -234,12 +233,12 @@ def DrawResultBboxesAndKeyptsOnEventFrame(
         top_right = (int(bbox[2]), int(bbox[1]))
         bottom_right = (int(bbox[2]), int(bbox[3]))
         if True:#facets is None and keypts1 is None:
-            cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
+            cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=1)
         try:
             text = 'cf:{:.4f},cl:{}'.format(float(confidence), classindex)
         except:
             import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
-        textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
+        textposition = (int(top_left[0] - 20), int(top_left[1] - 20))
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
         if keypts is not None:
@@ -385,9 +384,9 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         bottom_right = (int(bbox[2]), int(bbox[3]))
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-        text = 'cf:{:.3f},cl:{}'.format(confidence.item(), classindex)
-        textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
-        cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
+        text = '{}:{:.1f}'.format(ii, confidence.item() * 100)
+        textposition = (int(top_left[0]), int(top_left[1] - 10))
+        cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
         if keypts_left is not None:
             max_num_keypts = keypts_left.shape[1] // 3
@@ -396,7 +395,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
                     keypt_int = (int(keypts_left[ii, iKeypt * 3 + 0]), int(keypts_left[ii, iKeypt * 3 + 1]))
                     color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
                     cv2.circle(left_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
-        if facets is not None:
+        if False:#facets is not None:
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
             # instances_facets = draw_featmap_on_view(top_left, bottom_right, facets[ii], instances_facets, enlarge_facet_factor)
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_GRAY2BGR)
@@ -409,15 +408,15 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
                 "confidence": confidence + stereo_confidences[ii].item() * 0.5
             }
 
-        top_left = (int(bbox[4]), int(bbox[1]))
-        top_right = (int(bbox[5]), int(bbox[1]))
-        bottom_right = (int(bbox[5]), int(bbox[3]))
+        top_left = (int(bbox[4]), int(bbox[5]))
+        top_right = (int(bbox[6]), int(bbox[5]))
+        bottom_right = (int(bbox[6]), int(bbox[7]))
         if True:#facets is None and keypts1 is None:
-            cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
+            cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=1)
         if stereo_confidences is not None:
-            text = '{:.3f},cl:{}'.format(stereo_confidences[ii].item() * 100, classindex)
-            textposition = (int(top_right[0] + bottom_right[0]) // 2, int(top_right[1] + bottom_right[1]) // 2)
-            cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(0, 255, 0))
+            text = '{}:{:.1f}'.format(ii, stereo_confidences[ii].item() * 100)
+            textposition = (int(top_left[0]), int(top_left[1] - 10))
+            cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
         if keypts_right is not None:
             max_num_keypts = keypts_right.shape[1] // 3
@@ -426,7 +425,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
                     keypt_int = (int(keypts_right[ii, iKeypt * 3 + 0]), int(keypts_right[ii, iKeypt * 3 + 1]))
                     color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
                     cv2.circle(right_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
-        if facets_right is not None:
+        if False:#facets_right is not None:
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_BGR2GRAY)
             # instances_facets_right = draw_featmap_on_view(top_left, bottom_right, facets_right[ii], instances_facets_right, enlarge_facet_factor)
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_GRAY2BGR)
