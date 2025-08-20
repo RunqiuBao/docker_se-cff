@@ -197,8 +197,8 @@ LOSSES:
     rkeypts_loss_weight: 1
     rscore_loss_weight: 1
     rkeypts_obj_loss_weight: 1
-    rpn_losses_cls_weight: 0.0
-    rpn_losses_bbox_weight: 0.0
+    rpn_losses_cls_weight: 1.0
+    rpn_losses_bbox_weight: 1.0
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:
