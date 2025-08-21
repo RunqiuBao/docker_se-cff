@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 500
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -173,7 +173,8 @@ MODEL:
       # right bbox regression
       right_roi_feat_size: 28
       r_iou_bkg: 0.3
-      r_iou_threshold: 0.5
+      r_iou_threshold: 0.8
+      rpn_min_iou_with_target: 0.5
       candidates_k: 49
       # inference:
       right_nms_iou_threshold_inference: 0.2

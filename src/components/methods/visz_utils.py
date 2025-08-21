@@ -124,7 +124,7 @@ def appx_best_fit_ngon(mask_cv2_gray, n: int = 4) -> list[(int, int)]:
 def LimitBboxWithInImage(bbox: numpy.ndarray, imageHeight: int, imageWidth: int):
     newBbox = numpy.ones_like(bbox)
     newBbox[0::2] = numpy.clip(bbox[0::2], 0, imageWidth)
-    assert newBbox.shape[0] == 8, "stereo bbox should be 8 elements, but got {}".format(newBbox.shape[0])
+    assert newBbox.shape[0] != 6, "stereo bbox should be either 4 or 8 elements, but got {}".format(newBbox.shape[0])
     newBbox[1::2] = numpy.clip(bbox[1::2], 0, imageHeight)
     return newBbox
 
