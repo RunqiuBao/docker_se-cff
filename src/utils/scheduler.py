@@ -3,6 +3,8 @@
 import math
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
+import bisect
+from typing import Any
 
 
 class CosineAnnealingWarmupRestarts(_LRScheduler):
@@ -128,3 +130,27 @@ class CosineAnnealingWarmupRestarts(_LRScheduler):
         self.last_epoch = math.floor(epoch)
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group["lr"] = lr
+
+
+class CustomStepLRScheduler(_LRScheduler):
+    def __init__(
+        self,
+        optimizer: Any,
+        lr_scheduler_cfg: dict,
+        lr_warmup_scheduler_cfg: dict,
+    ):
+        self.milestones = sorted(int(milestone) for milestone in lr_scheduler_cfg["milestones"])
+        self.warmup_start_factor = lr_warmup_scheduler_cfg.get("start_factor", 0.0)
+        self.gamma = lr_scheduler_cfg.get("gamma", 1.0)
+        self.warmup_end_epoch = lr_warmup_scheduler_cfg.get("end", 0)
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        if self.last_epoch <= self.warmup_end_epoch:
+            warmup_progress_factor = self.last_epoch / max(1, self.warmup_end_epoch)
+            mult = self.warmup_start_factor + warmup_progress_factor * (1 - self.warmup_start_factor)
+            return [base_lr * mult for base_lr in self.base_lrs]
+        
+        step_index = bisect.bisect_right(self.milestones, self.last_epoch)
+        mult = self.gamma ** step_index
+        return [base_lr * mult for base_lr in self.base_lrs]
