@@ -376,6 +376,12 @@ def _prepare_scheduler(schedulers_cfg: dict, optimizers):
                     scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)
 
                 dict_scheduler[key] = scheduler
+            elif scheduler_cfg.get("NAME", None) == "MASKRCNN_SCHEDULER":
+                name = scheduler_cfg.NAME
+                parameters = scheduler_cfg.PARAMS
+                from utils.scheduler import CustomStepLRScheduler
+                scheduler = CustomStepLRScheduler(optimizer, **parameters)
+                dict_scheduler[key] = scheduler
             else:
                 raise NotImplementedError
         break
@@ -404,19 +410,6 @@ def _prepare_ema(learning_cfg, models):
         return ema
     else:
         return None
-
-
-class CustomStepLRScheduler(_LRScheduler):
-    def __init__(self, optimizer: Optimizer, milestones: list, factor: float = 0.1, last_epoch: int = -1):
-        self.milestones = milestones
-        self.factor = factor
-        super().__init__(optimizer, last_epoch)
-
-    def get_lr(self):
-        if self.last_epoch in self.milestones:
-            return [base_lr * self.factor for base_lr in self.base_lrs]
-        else:
-            return [group['lr'] for group in self.optimizer.param_groups]
 
 
 def get_optim_params(cfg: dict, model: nn.Module):
