@@ -895,18 +895,19 @@ def test(
                 )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
-            # select best right bboxes and keypts for visualization.
-            (
-                mask_nonbackground,
-                refined_sbboxes_nobkg,
-                refined_right_scored_pred,
-                right_keypts_pred_nobkg
-            ) = models["stereo_detection_head"].module.extract_inference_results(
-                batch_sbboxes_priors[0].squeeze(0),
-                batch_refined_right_bboxes[0].view(-1, num_classes, 4),
-                batch_refined_right_scores[0],
-                batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
-            )
+            if batch_sbboxes_priors[0] is not None:
+                # select best right bboxes and keypts for visualization.
+                (
+                    mask_nonbackground,
+                    refined_sbboxes_nobkg,
+                    refined_right_scored_pred,
+                    right_keypts_pred_nobkg
+                ) = models["stereo_detection_head"].module.extract_inference_results(
+                    batch_sbboxes_priors[0].squeeze(0),
+                    batch_refined_right_bboxes[0].view(-1, num_classes, 4),
+                    batch_refined_right_scores[0],
+                    batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+                )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
         if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0):
@@ -949,14 +950,18 @@ def test(
                 iou_threshold=models["objdet_head"].module.config["confidence_threshold_inference"]
             )
             raw_preds = raw_preds[left_keep_indices]
+
             # # -------------- debug code --------------
-            # dummy_results = batch_sbboxes_priors[0][0, :, 16, :]
+            # dummy_results = left_bboxesClsKeypts_nmsed_topked[0][:, :4]
+            # warped_left_bboxes = models["stereo_detection_head"].module.warp_bboxes(
+            #     [dummy_results],
+            #     pred_disparity_pyramid[-1],
+            #     imageHeight,
+            #     imageWidth
+            # )[0]
             # dummy_results = torch.concat([
             #     dummy_results[:, :4],
-            #     dummy_results[:, 4].unsqueeze(-1),
-            #     dummy_results[:, 1].unsqueeze(-1),
-            #     dummy_results[:, 5].unsqueeze(-1),
-            #     dummy_results[:, 3].unsqueeze(-1)
+            #     warped_left_bboxes
             # ], dim=-1)
             # dummy_results = torch.concat([
             #     dummy_results,

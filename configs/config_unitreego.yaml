@@ -178,7 +178,7 @@ MODEL:
       candidates_k: 49
       # inference:
       right_nms_iou_threshold_inference: 0.2
-      right_confidence_threshold_inference: 0.5
+      right_confidence_threshold_inference: 0.1
       left_right_confidence_diff_inference: 1.0
 LOSSES:
   concentration_net_cfg:
