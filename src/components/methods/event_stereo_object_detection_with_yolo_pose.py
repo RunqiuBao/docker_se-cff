@@ -923,20 +923,32 @@ def test(
             corresponding_leftdet_indices = batch_corresponding_leftdet_ids[0][mask_nonbackground]
             corresponding_leftdets = left_bboxesClsKeypts_nmsed_topked[0][corresponding_leftdet_indices]
             left_bboxes_final = corresponding_leftdets[:, :4]
+            # limit keypts y to bbox range.
+            right_keypts_pred_nobkg = right_keypts_pred_nobkg.view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+            right_keypts_pred_nobkg[:, 1::3] = torch.clamp(
+                right_keypts_pred_nobkg[:, 1::3],
+                min=left_bboxes_final[:, 1].unsqueeze(-1),
+                max=left_bboxes_final[:, 3].unsqueeze(-1)
+            )
+            left_keypts_pred = corresponding_leftdets[:, (4 + models["objdet_head"].module.config["num_classes"]):]
+            left_keypts_pred[:, 1::3] = torch.clamp(
+                left_keypts_pred[:, 1::3],
+                min=left_bboxes_final[:, 1].unsqueeze(-1),
+                max=left_bboxes_final[:, 3].unsqueeze(-1)
+            )
             raw_preds = torch.concat([
                 left_bboxes_final,
-                # torch.concat([
-                #     refined_sbboxes_nobkg[:, 4].view(-1, 1),
-                #     left_bboxes_final[:, 1].view(-1, 1),
-                #     refined_sbboxes_nobkg[:, 5].view(-1, 1),
-                #     left_bboxes_final[:, 3].view(-1, 1)
-                # ], dim=-1),
-                refined_sbboxes_nobkg[:, 4:8],
+                torch.concat([
+                    refined_sbboxes_nobkg[:, 4].view(-1, 1),
+                    left_bboxes_final[:, 1].view(-1, 1),
+                    refined_sbboxes_nobkg[:, 6].view(-1, 1),
+                    left_bboxes_final[:, 3].view(-1, 1)
+                ], dim=-1),
                 torch.argmax(corresponding_leftdets[:, 4:(4 + num_classes)], dim=-1).unsqueeze(-1),
                 torch.max(corresponding_leftdets[:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1),
                 refined_right_scored_pred.view(-1, 1),
-                corresponding_leftdets[:, (4 + models["objdet_head"].module.config["num_classes"]):],
-                right_keypts_pred_nobkg.view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3),
+                left_keypts_pred,
+                right_keypts_pred_nobkg,
             ], dim=1)
             right_keep_indices = nms(
                 raw_preds[:, 4:8],
@@ -978,14 +990,7 @@ def test(
                 margin=4,
                 right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"],
                 left_right_confidence_diff=models["stereo_detection_head"].module.config["left_right_confidence_diff_inference"],
-            )
-            # preds = FilterIrregularBboxes(preds, hw_ratiorange_class0=[1.9, 3.15])
-            preds = FilterTemporal(
-                preds,
-                previous_preds,
-                iou_threshold_for_matching=0.4,
-                iou_leftright_for_filtering=0.7,
-                area_change_threshold=0.7
+                left_right_width_diff_threshold=models["stereo_detection_head"].module.config["left_right_width_diff_threshold"],
             )
 
             if preds is not None:
@@ -1041,7 +1046,7 @@ def FilterIrregularBboxes(preds: Tensor, hw_ratiorange_class0: list):
     return torch.concat(new_preds, dim=0) if len(new_preds) > 0 else None
 
 
-def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int, right_confidence_threshold: float, left_right_confidence_diff: float):
+def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin: int, right_confidence_threshold: float, left_right_confidence_diff: float, left_right_width_diff_threshold: float):
     """
     delete objects whose bboxes are within 4 edges' margin of the image.
     delete objects whose keypoints are outside of the bbox.
@@ -1079,6 +1084,13 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
         if (preds[i][2] - preds[i][0]) * (preds[i][3] - preds[i][1]) < 600:  # bbox area should be larger than 2000 pixels
             print("{}-th object is filtered out due to too small bbox area.".format(i))
             continue
+        # filter width change:
+        left_width = preds[i][2] - preds[i][0]
+        right_width = preds[i][6] - preds[i][4]
+        if (max(left_width, right_width) / min(left_width, right_width)) > left_right_width_diff_threshold:
+            print("{}-th object is filtered out due to too much left right width diff.".format(i))
+            continue
+
         # isKeyptsOutsideBbox = False
         # for indexKeypt in range(max_num_keypoints):
         #     if preds[i][11 + indexKeypt * 3 + 2] > 0:
