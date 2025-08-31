@@ -148,7 +148,7 @@ MODEL:
       nms_iou_threshold: 0.5
       # inference param
       nms_iou_threshold_inference: 0.2
-      confidence_threshold_inference: 0.1
+      confidence_threshold_inference: 0.4
   stereo_detection_head_cfg:
     DICTKEY: stereo_detection_head
     CLASSNAME: StereoDetectionHead
@@ -178,9 +178,9 @@ MODEL:
       candidates_k: 49
       # inference:
       right_nms_iou_threshold_inference: 0.1
-      right_confidence_threshold_inference: 0.2
+      right_confidence_threshold_inference: 0.6
       left_right_confidence_diff_inference: 1.0
-      left_right_width_diff_threshold: 2.0
+      left_right_width_diff_threshold: 1.5
   local_tracking_head_cfg:
     DICTKEY: local_tracking_head
     CLASSNAME: StereoDetectionHead
