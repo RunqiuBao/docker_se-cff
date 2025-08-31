@@ -331,41 +331,51 @@ class RPNWithTargetsHead(RPNBaseClass):
             # restore bboxes to image pixel coordinates
             bboxes_xyxy = self.bbox_coder.decode(priors, bbox_pred, max_shape=(imageHeight, imageWidth))
             num_targets = targets[indexInBatch].shape[0]
-            ious = compute_ious_pertarget(bboxes_xyxy, targets[indexInBatch])
-            # remove targets with no ious larger than 0
-            notarget_mask = ious.max(dim=1).values <= min_iou_with_target
-            bboxes_xyxy = bboxes_xyxy[~notarget_mask]
-            mlvl_scores = torch.cat(mlvl_scores)[~notarget_mask]
-            level_ids = torch.cat(level_ids)[~notarget_mask]
-            target_ids = ious.argmax(dim=1)[~notarget_mask]
-            results = RPNHypothesesGroup(bboxes=bboxes_xyxy, scores=mlvl_scores, level_ids=level_ids, target_ids=target_ids)
 
-            # filter small size bboxes
-            w, h = results.bboxes[:, 2] - results.bboxes[:, 0], results.bboxes[:, 3] - results.bboxes[:, 1]
-            valid_mask = (w > min_bbox_size) & (h > min_bbox_size)
-            if not valid_mask.all():
-                results = results[valid_mask]
-
-            # another round of nms to reduce number to max_hypotheses_per_img
-            if results.bboxes.numel() > 0:
-                det_bboxes, keep_idxs = batched_nms(
-                    results.bboxes,
-                    results.scores,
-                    results.level_ids * num_targets + results.target_ids,  # Note: hypotheses of differnet level and different target id will not merge.
-                    {'type': 'nms', 'iou_threshold': 0.7}
-                )
-                results = results[keep_idxs]
-                results.scores = det_bboxes[:, -1]
-                results = prune_hypotheses_equally_for_targets(results, max_hypotheses_per_img)
-                del results.level_ids
-                results.bboxes = results.bboxes.detach().clone()  # in RPN, no need to use prediction results to compute losses.
-                results.scores = results.scores.detach().clone()
+            foundNoResults = False
+            if num_targets == 0:
+                foundNoResults = True
             else:
+                ious = compute_ious_pertarget(bboxes_xyxy, targets[indexInBatch])
+                # remove targets with no ious larger than 0
+                try:
+                    notarget_mask = ious.max(dim=1).values <= min_iou_with_target
+                except:
+                    import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+                bboxes_xyxy = bboxes_xyxy[~notarget_mask]
+                mlvl_scores = torch.cat(mlvl_scores)[~notarget_mask]
+                level_ids = torch.cat(level_ids)[~notarget_mask]
+                target_ids = ious.argmax(dim=1)[~notarget_mask]
+                results = RPNHypothesesGroup(bboxes=bboxes_xyxy, scores=mlvl_scores, level_ids=level_ids, target_ids=target_ids)
+
+                # filter small size bboxes
+                w, h = results.bboxes[:, 2] - results.bboxes[:, 0], results.bboxes[:, 3] - results.bboxes[:, 1]
+                valid_mask = (w > min_bbox_size) & (h > min_bbox_size)
+                if not valid_mask.all():
+                    results = results[valid_mask]
+
+                # another round of nms to reduce number to max_hypotheses_per_img
+                if results.bboxes.numel() > 0:
+                    det_bboxes, keep_idxs = batched_nms(
+                        results.bboxes,
+                        results.scores,
+                        results.level_ids * num_targets + results.target_ids,  # Note: hypotheses of differnet level and different target id will not merge.
+                        {'type': 'nms', 'iou_threshold': 0.7}
+                    )
+                    results = results[keep_idxs]
+                    results.scores = det_bboxes[:, -1]
+                    results = prune_hypotheses_equally_for_targets(results, max_hypotheses_per_img)
+                    del results.level_ids
+                    results.bboxes = results.bboxes.detach().clone()  # in RPN, no need to use prediction results to compute losses.
+                    results.scores = results.scores.detach().clone()
+                else:
+                    foundNoResults = True
+
+            if foundNoResults:
                 # To avoid some potential error
                 results_ = RPNHypothesesGroup()
-                results_.bboxes = results.bboxes.new_zeros(0)
-                results_.scores = results.scores.new_zeros(0)
-                results_.labels = results.scores.new_zeros(0)
+                results_.bboxes = bbox_pred.new_zeros(0)
+                results_.scores = bbox_pred[:, 0].new_zeros(0)
                 results = results_
             batch_results.append(results)
         return batch_results
@@ -1062,7 +1072,7 @@ class StereoDetectionHead(nn.Module):
                 ious,
                 rbboxes_targets,
                 self._config['r_iou_threshold'],
-                self._config['candidates_k']
+                self._config['candidates_k'],
             )
             rbboxes_refined_decoded_sampled = rbboxes_refined_decoded_sampled[:pos_mask.sum()]
             rbboxes_gt_sampled = rbboxes_gt_sampled[:pos_mask.sum()]
@@ -1176,8 +1186,8 @@ class StereoDetectionHead(nn.Module):
                     selected_right_keypts_pred_nobkg.append(right_keypts_pred_nobkg[mask_indexleftdet][index_highest_score].unsqueeze(0))
 
                 # # ----------- debug code -----------
-                # refined_sbboxes_nobkg = sbboxes_priors[:, 16, :]
-                # right_keypts_pred_nobkg = right_keypts_pred[:, 16, 0, :].view(-1, 2, 3)
+                # refined_sbboxes_nobkg = sbboxes_priors
+                # right_keypts_pred_nobkg = right_keypts_pred[:, 0, :].view(-1, self._config['max_num_keypoints'], 3)
                 # mask_nonbackground = torch.ones_like(mask_nonbackground, dtype=torch.bool)
                 # # ----------- debug code -----------
                 list_sbboxes_pred_refined.append(torch.cat(selected_refined_sbboxes_nobkg, dim=0))
