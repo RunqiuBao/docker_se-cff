@@ -266,7 +266,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         disparity_data = self.disparity_dataset[(idx, objdet_data)]
 
         data["file_index"] = idx
-        data["end_timestamp"] = self.timestamps[idx // self._num_repeat]
+        data["end_timestamp"] = event_data['timestamp']
+        assert event_data['timestamp'] == objdet_data['timestamp'], "Error: event ({}) and objdet timestamp ({}) do not match.".format(event_data['timestamp'], objdet_data['timestamp'])
         if event_data is not None:
             data["event"] = event_data
         if objdet_data is not None:

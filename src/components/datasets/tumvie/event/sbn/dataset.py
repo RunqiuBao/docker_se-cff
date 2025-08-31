@@ -86,7 +86,11 @@ class EventDataset(torch.utils.data.Dataset):
             code = "%03d_%d_l" % (int(self.sequence_name.split("seq")[-1]), timestamp)
             code = code.encode()
             left_events = self.lmdb_txn.get(code)
-            left_events = np.frombuffer(left_events, dtype="int8")
+            try:
+                left_events = np.frombuffer(left_events, dtype="int8")
+            except:
+                print("code: ", code)
+                raise
             left_events = left_events.reshape(
                 self.event_h, self.event_w, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
@@ -103,7 +107,7 @@ class EventDataset(torch.utils.data.Dataset):
             event_data = self._post_load_event_data(event_data)
             for key, value in event_data.items():
                 event_data[key] = value.squeeze().transpose(2, 0, 1)
-        event_data["timestamp"] = str(timestamp)
+        event_data["timestamp"] = str(timestamp)  #self.sequence_name + "_" + str(timestamp)
         return event_data
 
     def _pre_load_event_data(self, timestamp):

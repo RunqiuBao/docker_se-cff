@@ -85,7 +85,7 @@ class StereoObjDetDataset(torch.utils.data.Dataset):
                 labels_data = self._cvatDataset[indexFrame].annotations
                 # print("frame ({}), labels_data_0: {}".format(indexFrame, labels_data[0]["bbox"]))
                 labels_data = self.FormatLabels(labels_data, indexFrame, self._cvatDataset[indexFrame].media.data, self._cvatDataset[indexFrame].id)
-                labels_data["timestamp"] = self._cvatDataset[indexFrame].id
+                labels_data["timestamp"] = str(int(self._cvatDataset[indexFrame].id))
             except Exception as e:
                 print("Error in loading labels({}) for frame {}: {}".format(self.path_to_labels, indexFrame, e))
                 raise
