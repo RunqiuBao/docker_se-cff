@@ -203,6 +203,7 @@ def main(args):
         batch_size = (
             cfg.DATALOADER.TEST.PARAMS.batch_size
         )
+    dataset_cfg['PARAMS']['seqsToUse'] = None
     data_loader = get_data_loader(
         args=args,
         dataset_cfg=dataset_cfg,
@@ -242,10 +243,9 @@ def main(args):
         for indexBatch in range(len(data_loader.dataset) // batch_size):
             batch_data = next(data_iter)
             for indexInBatch in range(batch_size):
-                ts = int(batch_data["end_timestamp"][indexInBatch].numpy())
+                ts = int(batch_data["end_timestamp"][indexInBatch])
                 tsFile.write(str(ts) + "\n")
                 
-                print("seq_idx: {}, index frame: {}, ts: {}".format(args.seq_idx, indexSavedBatch * batch_size + indexInBatch, ts))
                 code_l = "%03d_%d_l" % (
                     args.seq_idx,
                     ts,
