@@ -413,9 +413,18 @@ def train(
                                 #         "keypts": left_selected_keypts[left_selected_batchidx == indexInBatch][:, :, :].detach().cpu().numpy(),
                                 #     }
                                 # )
+                                # leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
+                                #     left_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                #     {
+                                #         "bboxes": batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy(),
+                                #         "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
+                                #         "confidences": torch.ones_like(batch_data["gt_labels"]["objdet"][indexInBatch]["labels"]).cpu().numpy(),
+                                #         "keypts": batch_data["gt_labels"]["objdet"][indexInBatch]["keypts"][:, :, :2].detach().cpu().numpy(),
+                                #     }
+                                # )
                                 # debug_path = "/root/data/debug_train/"
-                                # stereo_visz = numpy.hstack([leftimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
-                                # cv2.imwrite(debug_path + str(indexInBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", stereo_visz)
+                                # stereo_visz = numpy.hstack([leftimage_gt_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_gt_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
+                                # cv2.imwrite(debug_path + str(indexInBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch]) + ".png", stereo_visz)
                                 # # ------- debug code --------
 
         # backward and optimize
@@ -721,9 +730,9 @@ def valid(
                                 #     batch_data["gt_labels"]["disparity"][indexInBatch].detach().cpu().numpy().astype('uint8')[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]
                                 # ])
                                 # disparity_visz = cv2.cvtColor(disparity_visz, cv2.COLOR_GRAY2BGR)
-                                # stereo_visz = numpy.vstack([leftimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
+                                # stereo_visz = numpy.vstack([leftimage_gt_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']], rightimage_gt_visz[:batch_data['image_metadata']['h_recti'], :batch_data['image_metadata']['w_recti']]])
                                 # all_visz = numpy.hstack([disparity_visz, stereo_visz])
-                                # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch].item()) + ".png", all_visz)
+                                # cv2.imwrite(debug_path + str(indexBatch) + "_" + str(batch_data['end_timestamp'][indexInBatch]) + ".png", all_visz)
                                 # # ------- debug code --------
 
         batchSize = batch_data["event"]["left"].shape[0]
@@ -743,7 +752,6 @@ def valid(
 
         if tensorBoardLogger is not None:
             pbar.update(1)
-
 
     if tensorBoardLogger is not None:
         pbar.close()
