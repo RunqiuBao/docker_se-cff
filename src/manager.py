@@ -16,7 +16,7 @@ from components import datasets
 from components import methods
 
 from utils.logger import ExpLogger, TimeCheck
-from utils.metrics import SummationMeter, Metric, AverageMeter
+from utils.metrics import SummationMeter, Metric, AverageMeter, ValidMetrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -184,11 +184,11 @@ class DLManager:
                     time_checker,
                     valid_log_dict,
                     "valid",
-                    isSaveBest=valid_log_dict["Loss"].avg < smallestValidEPE,
+                    isSaveBest=valid_log_dict["BestIndex"].avg < smallestValidEPE,
                 )
 
-            if valid_log_dict["Loss"].avg < smallestValidEPE:
-                smallestValidEPE = valid_log_dict["Loss"].avg
+            if valid_log_dict["BestIndex"].avg < smallestValidEPE:
+                smallestValidEPE = valid_log_dict["BestIndex"].avg
 
     def test(self):
         test_loader = self.get_test_loader(
@@ -239,9 +239,7 @@ class DLManager:
             return None
 
         for key in log_dict.keys():
-            if isinstance(log_dict[key], SummationMeter) or isinstance(
-                log_dict[key], Metric
-            ):
+            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric) or isinstance(log_dict[key], ValidMetrics):
                 log_dict[key].all_gather(self.args.world_size)
 
         return log_dict
@@ -272,9 +270,7 @@ class DLManager:
         log = "%5s" % part
         for key in log_dict.keys():
             log += " | %s: %s" % (key, str(log_dict[key]))
-            if isinstance(log_dict[key], SummationMeter) or isinstance(
-                log_dict[key], Metric
-            ):
+            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric) or isinstance(log_dict[key], ValidMetrics):
                 self.logger.add_scalar(
                     "%s/%s" % (part, key), log_dict[key].value, epoch
                 )

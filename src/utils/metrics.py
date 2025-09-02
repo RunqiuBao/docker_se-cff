@@ -1,7 +1,29 @@
+from typing import Optional
 import copy
 import numpy
 import torch
 import torch.distributed as dist
+from dataclasses import dataclass
+
+
+@dataclass
+class ValidMetrics:
+    avg: Optional[torch.Tensor] = None
+
+    @property
+    def value(self):
+        return copy.deepcopy(self.avg)
+    
+    def __str__(self):
+        return "%.5f" % self.avg.item()
+    
+    def all_gather(self, world_size):
+        tensor_list = [
+            torch.zeros([1], dtype=torch.float, device=self.avg.device) for indexInWorld in range(world_size)
+        ]
+        cur_tensor = self.avg
+        dist.all_gather(tensor_list, cur_tensor)
+        self.avg = torch.stack(tensor_list).mean()
 
 
 class SummationMeter:

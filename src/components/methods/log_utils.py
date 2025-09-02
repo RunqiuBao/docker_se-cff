@@ -63,6 +63,6 @@ def GetLogDict(is_train: bool, is_secff: bool):
                 ("loss_facet", AverageMeter(string_format="%6.3lf")),
                 ("loss_pmap", AverageMeter(string_format="%6.3lf")),
                 ("loss_rtdetr", AverageMeter(string_format="%6.3lf")),
-                ("loss_pickable_region", AverageMeter(string_format="%6.3lf"))
+                ("loss_pickable_region", AverageMeter(string_format="%6.3lf")),
             ]
         )

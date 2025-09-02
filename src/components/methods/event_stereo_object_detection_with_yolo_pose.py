@@ -9,8 +9,8 @@ from torch import Tensor
 from torch.nn.utils import clip_grad_norm_
 from torchvision.ops import nms
 import torch.nn.functional as F
-
 from tqdm import tqdm
+import copy
 
 from .visz_utils import DrawResultBboxesAndKeyptsOnStereoEventFrame, RenderImageWithBboxes
 from ..models.utils.misc import freeze_module_grads, DetachCopyNested
@@ -22,7 +22,7 @@ from .base import batch_to_cuda
 from ..models.yolo_pose_utils import non_max_suppression
 
 from..models.utils.misc import freeze_module_grads
-from utils.metrics import AverageMeter
+from utils.metrics import AverageMeter, ValidMetrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -482,6 +482,7 @@ def valid(
 
     log_dict = GetLogDict(is_train=False, is_secff=(hasattr(models["disp_head"], 'is_freeze') and not models["disp_head"].is_freeze))
     lossDictAll = {}
+    metricsDict = {}
 
     if tensorBoardLogger is not None:
         pbar = tqdm(total=len(data_loader))
@@ -670,6 +671,9 @@ def valid(
                         lossDictAll,
                         {}
                     )
+                    if "right_dets_mAP@0.5" not in metricsDict:
+                        metricsDict["right_dets_recall@0.9"] = AverageMeter(string_format="%6.3lf")
+                    metricsDict["right_dets_recall@0.9"].update(artifacts[1], 1)
 
                     # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
                     if tensorBoardLogger is not None and artifacts[0][0] is not None:
@@ -758,6 +762,19 @@ def valid(
     
     evalResults = EvaluateObjDetPerformance(preds_evaluation, targets_evaluation)
     logger.info("evalResults:\n{}".format(evalResults))
+
+    log_dict.update(metricsDict)  # print metrics as well.
+    if metricsDict:
+        val_metrics = (
+            log_dict['loss_rbbox'].avg
+            + log_dict['loss_rscore'].avg
+            + log_dict['loss_rkeypts'].avg
+            + log_dict['loss_rkeypts_obj'].avg
+            + 1 - metricsDict['right_dets_recall@0.9'].avg
+        )
+        deviceThisProcess = batch_data["event"]["left"].device
+        val_metrics = torch.tensor([val_metrics], device=deviceThisProcess)
+        log_dict['BestIndex'] = ValidMetrics(val_metrics)
 
     return log_dict
 
@@ -1008,13 +1025,13 @@ def test(
                         "left": left_event_sharp,
                         "right": right_event_sharp
                     },
-                    "ts": batch_data["end_timestamp"].item(),
+                    "ts": batch_data["end_timestamp"][0],
                     "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR)
                 }
                 stereo_visz = SaveTestResultsAndVisualize(
                     prediction_dict,
                     indexBatch,
-                    batch_data["end_timestamp"].item(),
+                    batch_data["end_timestamp"][0],
                     sequence_name,
                     save_root,
                     batch_data["image_metadata"]

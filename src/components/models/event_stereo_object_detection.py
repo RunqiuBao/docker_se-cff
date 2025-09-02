@@ -964,8 +964,44 @@ class StereoDetectionHead(nn.Module):
                 losses, artifacts = self.compute_loss_yoloxformat(preds, labels)
             elif kwargs["detector_format"] == "yolopose":
                 losses, sbboxes, selected_keypts = self.compute_loss_yoloposeformat(preds, labels)
-                artifacts = [sbboxes, selected_keypts]
+                # TODO: need a val_evaluator to count both precision and recall performance.
+                right_gt_bboxes = [labels['stereo_objdet_targets']['bboxes'][labels['stereo_objdet_targets']['batch_idx'].view(-1) == indexBatch][:, [4, 1, 5, 3]] for indexBatch in range(len(sbboxes))]
+                right_pred_bboxes = [sbboxes_oneimage[:, 4:] if sbboxes_oneimage is not None else None for sbboxes_oneimage in sbboxes]
+                recallBatch = self.compute_recall(
+                    right_pred_bboxes,
+                    right_gt_bboxes,
+                    iou_threshold=0.9,
+                )  # recall @ 0.9 iou.
+                artifacts = [sbboxes, recallBatch, selected_keypts]
         return preds, losses, artifacts
+    
+    def compute_recall(self, preds: list[Tensor], gt_bboxes: list[Tensor], iou_threshold: float) -> float:
+        """
+        Compute recall for the batch.
+        Args:
+            preds: list of shape [N, 4]. format [tl_x_r, tl_y_r, br_x_r, br_y_r] predicted right bboxes.
+            gt_bboxes: list of shape [N, 4]. format [tl_x_r, tl_y_r, br_x_r, br_y_r] gt right bboxes.
+            iou_threshold: iou threshold to determine a match.
+
+        Returns:
+            recall: float number.
+        """
+        assert len(preds) == len(gt_bboxes)
+        total_gt = 0
+        total_matched = 0
+        for indexInBatch in range(len(preds)):
+            if gt_bboxes[indexInBatch] is None:
+                continue
+            if preds[indexInBatch] is None:
+                total_gt += gt_bboxes[indexInBatch].shape[0]
+                continue
+            ious_per_gt = compute_ious_pertarget(preds[indexInBatch], gt_bboxes[indexInBatch])  # [num_preds, num_gt]
+            max_ious_per_gt = torch.max(ious_per_gt, dim=1)[0]
+            matched = (max_ious_per_gt >= iou_threshold).sum().item()
+            total_matched += matched
+            total_gt += gt_bboxes[indexInBatch].shape[0]
+        recall = total_matched / total_gt if total_gt > 0 else 0.0
+        return recall
 
     def compute_loss_yoloposeformat(self, preds: Tuple[List, List, List], labels: Dict):
         """

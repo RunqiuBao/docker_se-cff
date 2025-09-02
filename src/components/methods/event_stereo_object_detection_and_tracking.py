@@ -336,13 +336,13 @@ def test(
                         "left": left_event_sharp,
                         "right": right_event_sharp
                     },
-                    "ts": batch_data["end_timestamp"].item(),
+                    "ts": batch_data["end_timestamp"][0],
                     "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR)
                 }
                 stereo_visz = SaveTestResultsAndVisualize(
                     prediction_dict,
                     indexBatch,
-                    batch_data["end_timestamp"].item(),
+                    batch_data["end_timestamp"][0],
                     sequence_name,
                     save_root,
                     batch_data["image_metadata"]
