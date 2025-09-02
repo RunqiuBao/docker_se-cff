@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 24
+TOTAL_EPOCH: 300
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -241,7 +241,7 @@ LEARNING_CONFIG:
 SCHEDULER:
 # one type of scheduler being enabled at a time
   scheduler0:
-    is_enable: False
+    is_enable: True
     NAME: CosineAnnealingWarmupRestarts
     PARAMS:
       cycle_mult: 1.0
@@ -263,7 +263,7 @@ SCHEDULER:
         params:
           warmup_duration: 2000
   scheduler2:
-    is_enable: True
+    is_enable: False
     NAME: MASKRCNN_SCHEDULER
     PARAMS:
       lr_warmup_scheduler:
