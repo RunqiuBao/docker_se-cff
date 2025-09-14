@@ -139,7 +139,7 @@ def test(
                     mask_track_nonbackground,
                     tracked_bboxes_nobkg,
                     tracked_scores,
-                    tracked_keypts_nobkg
+                    tracked_keypts_nobkg,
                 ) = models["local_tracking_head"].module.extract_inference_results(
                     batch_track_bboxes_priors[0].squeeze(0),
                     batch_track_refined_bboxes[0].view(-1, num_classes, 4),
@@ -150,6 +150,14 @@ def test(
                 corresponding_previousdets = previous_detections[corresponding_previousdets_indices]
                 tracked_class_labels = corresponding_previousdets[:, 8].unsqueeze(-1)
                 tracked_confidences = corresponding_previousdets[:, 9].unsqueeze(-1)
+                # filter these tracked bboxes with tracking threshold (same magitude as stereo threshold)
+                score_threshold = models["local_tracking_head"].module.config["right_confidence_threshold_inference"]
+                mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)
+                tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
+                tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
+                tracked_class_labels = tracked_class_labels[mask_good_tracked]
+                tracked_confidences = tracked_confidences[mask_good_tracked]
+                corresponding_previousdets = corresponding_previousdets[mask_good_tracked]
 
         refined_sbboxes_nobkg = None
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
@@ -203,18 +211,19 @@ def test(
                 )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
-            # select best right bboxes and keypts for visualization.
-            (
-                mask_nonbackground,
-                refined_sbboxes_nobkg,
-                refined_right_scored_pred,
-                right_keypts_pred_nobkg
-            ) = models["stereo_detection_head"].module.extract_inference_results(
-                batch_sbboxes_priors[0].squeeze(0),
-                batch_refined_right_bboxes[0].view(-1, num_classes, 4),
-                batch_refined_right_scores[0],
-                batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
-            )
+            if batch_sbboxes_priors[0] is not None:
+                # select best right bboxes and keypts for visualization.
+                (
+                    mask_nonbackground,
+                    refined_sbboxes_nobkg,
+                    refined_right_scored_pred,
+                    right_keypts_pred_nobkg
+                ) = models["stereo_detection_head"].module.extract_inference_results(
+                    batch_sbboxes_priors[0].squeeze(0),
+                    batch_refined_right_bboxes[0].view(-1, num_classes, 4),
+                    batch_refined_right_scores[0],
+                    batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+                )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
         if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0):
@@ -251,11 +260,12 @@ def test(
                     left_confidences_final,
                     leftdets_tracked[:, 9].unsqueeze(-1),
                 ], dim=0)
+                max_num_keypoints = models["stereo_detection_head"].module.config["max_num_keypoints"]
                 left_keypts_final = torch.concat([
                     left_keypts_final,
-                    leftdets_tracked[:, 11:17].view(-1, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+                    leftdets_tracked[:, 11:(11 + max_num_keypoints * 3)].view(-1, max_num_keypoints * 3),
                 ])
-
+                
             # # -------------- debug code --------------
             # dummy_results = batch_sbboxes_priors[0][0, :, 16, :]
             # dummy_results = torch.concat([
@@ -306,7 +316,7 @@ def test(
                 raw_preds,
                 imageHeight=batch_data["image_metadata"]["h_recti"],
                 imageWidth=batch_data["image_metadata"]["w_recti"],
-                margin=0,
+                margin=models["stereo_detection_head"].module.config["invalid_distance_from_image_border"],
                 right_confidence_threshold=models["stereo_detection_head"].module.config["right_confidence_threshold_inference"],
                 left_right_confidence_diff=models["stereo_detection_head"].module.config["left_right_confidence_diff_inference"],
                 left_right_width_diff_threshold=models["stereo_detection_head"].module.config["left_right_width_diff_threshold"],
