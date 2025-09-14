@@ -1083,23 +1083,18 @@ def FilterBadDetections(preds: Tensor, imageHeight: int, imageWidth: int, margin
         if (
             preds[i][0] < margin
             or preds[i][1] < margin
-            or preds[i][0] > (imageWidth - margin)
-            or preds[i][1] > (imageWidth - margin)
             or preds[i][4] < margin
             or preds[i][5] < margin
-            or preds[i][4] > (imageWidth - margin)
-            or preds[i][5] > (imageWidth - margin)
-            or preds[i][2] < margin
-            or preds[i][3] < margin
             or preds[i][2] > (imageWidth - margin)
             or preds[i][3] > (imageHeight - margin)
-            or preds[i][6] < margin
-            or preds[i][7] < margin
             or preds[i][6] > (imageWidth - margin)
-            or preds[i][7] > (imageWidth - margin)
+            or preds[i][7] > (imageHeight - margin)
         ):
             print("{}-th object is filtered out due to inside image edge margin.".format(i))
             continue
+        else:
+            preds[:, [0, 2, 4, 6]] = torch.clamp(preds[:, [0, 2, 4, 6]], 0, imageWidth)
+            preds[:, [1, 3, 5, 7]] = torch.clamp(preds[:, [1, 3, 5, 7]], 0, imageHeight)
         if preds[i][10] < right_confidence_threshold:
             print("{}-th object is filtered out due to low right confidence.".format(i))
             continue
