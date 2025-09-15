@@ -373,7 +373,6 @@ class YoloPose(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             x = m(x)  # run
             y.append(x if m.i in self._save else None)  # save for using in following layers
-
         return x
 
     def forward(
@@ -396,8 +395,9 @@ class YoloPose(nn.Module):
         preds = self.predict(left_event_voxel)
 
         losses = None
-        artifacts = [None, None, None, None, None, None, None]
+        artifacts = None
         if labels is not None:
+            artifacts = [None] * 7
             losses_and_artifacts = self.compute_loss(preds, labels)
             artifacts[0] = losses_and_artifacts[1]
             artifacts[1] = losses_and_artifacts[2]

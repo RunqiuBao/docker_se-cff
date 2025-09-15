@@ -1,6 +1,7 @@
 import os.path
 import torch
 import cv2
+import copy
 import torchvision
 from torchvision.ops import nms
 import time
@@ -43,6 +44,8 @@ def test(
     data_iter = iter(data_loader)
     previous_preds = None
     prediction_dict = None
+    start_collect_onnx = False  # start collecting when enough detections emerged.
+    batch_data_for_onnx = None
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         if not batch_data['event'] or batch_data['event'].get('left') is None:
@@ -50,11 +53,20 @@ def test(
             logger.warning("batch {} has no event data.".format(indexBatch))
             continue
 
+        if is_save_onnx and start_collect_onnx and batch_data_for_onnx is not None:
+            batch_data = batch_data_for_onnx
+
         starttime = time.time()
         # ---------- concentration net ----------
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
         right_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["right"])
-        if is_save_onnx:
+        if is_save_onnx and start_collect_onnx:
+            onnx_inputs = {
+                "concentration_net": {
+                    "left_img": batch_data["event"]["left"].detach().cpu().numpy(),
+                    "right_img": batch_data["event"]["right"].detach().cpu().numpy(),
+                },
+            }
             torch.onnx.export(
                 models['concentration_net'].module,
                 (
@@ -66,8 +78,9 @@ def test(
                 opset_version=16,
                 do_constant_folding=True,
                 input_names=["left_img", "right_img"],
-                output_names=["left_preds", "right_preds"]
+                output_names=["left_preds", "right_preds"],
             )
+            
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
         batch_img_metas = {"h": imageHeight, "w": imageWidth}
@@ -75,7 +88,11 @@ def test(
 
         # ---------- disp pred net ----------
         pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
-        if is_save_onnx:
+        if is_save_onnx and start_collect_onnx:
+            onnx_inputs["disp_head"] = {
+                "left_img": left_event_sharp.detach().cpu().numpy(),
+                "right_img": right_event_sharp.detach().cpu().numpy(),
+            }
             torch.onnx.export(
                 models['disp_head'].module,
                 (
@@ -87,12 +104,15 @@ def test(
                 opset_version=16,
                 do_constant_folding=True,
                 input_names=["left_img", "right_img"],
-                output_names=["preds"]
+                output_names=["preds"],
             )
 
         # ---------- objdet net ----------
         left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
-        if is_save_onnx:
+        if is_save_onnx and start_collect_onnx:
+            onnx_inputs["objdet_head"] = {
+                "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
+            }
             torch.onnx.export(
                 models['objdet_head'].module,
                 (
@@ -102,8 +122,8 @@ def test(
                 export_params=True,
                 opset_version=16,
                 do_constant_folding=True,
-                input_names=["left_event_voxel", "right_event_voxel"],
-                output_names=["preds0", "preds100", "preds101", "preds102", "preds11", "artifacts00", "artifacts01", "artifacts02"]
+                input_names=["left_event_voxel"],
+                output_names=["preds0", "preds100", "preds101", "preds102", "preds11"],
             )
 
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
@@ -136,8 +156,31 @@ def test(
                 batch_data["event"]["left"],
                 [previous_detections[..., :4]],
                 torch.zeros((1, imageHeight, imageWidth), device=device, dtype=dtype),
-                batch_img_metas
+                batch_img_metas,
             )
+
+            if is_save_onnx and start_collect_onnx:
+                onnx_inputs["local_tracking_head"] = {
+                    "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
+                    "left_bboxes": [previous_detections[..., :4].detach().cpu().numpy()],
+                    "disp_prior": torch.zeros((1, imageHeight, imageWidth), device="cpu", dtype=dtype).numpy(),
+                    "batch_img_metas": {key: value.detach().cpu() if isinstance(value, torch.Tensor) else value for key, value in batch_img_metas.items()},
+                }                
+                torch.onnx.export(
+                    models['local_tracking_head'].module,
+                    (
+                        batch_data["event"]["left"],
+                        [previous_detections[..., :4]],
+                        torch.zeros((1, imageHeight, imageWidth), device=device, dtype=dtype),
+                        batch_img_metas,
+                    ),
+                    os.path.join(save_root, "local_tracking_head.onnx"),
+                    export_params=True,
+                    opset_version=16,
+                    do_constant_folding=True,
+                    input_names=["left_event_voxel", "left_bboxes", "disp_prior", "batch_img_metas"],
+                    output_names=["batch_sbboxes_priors", "batch_refined_bboxes", "batch_refined_scores", "batch_predicted_keypts", "rpn_cls_scores", "rpn_bbox_preds"]
+                )
             
             if batch_track_bboxes_priors[0] is not None:
                 (
@@ -198,7 +241,14 @@ def test(
                 pred_disparity_pyramid[-1],
                 batch_img_metas,
             )
-            if is_save_onnx:
+            if is_save_onnx and start_collect_onnx:
+                onnx_inputs["stereo_detection_head"] = {
+                    "right_feat": batch_data["event"]["right"].detach().cpu().numpy(),
+                    "left_bboxes": [onetensor.detach().cpu().numpy() for onetensor in left_bboxes_nmsed_topked],
+                    "disp_prior": pred_disparity_pyramid[-1].detach().cpu().numpy(),
+                    "batch_img_metas": {key: value.detach().cpu() if type(value) is torch.Tensor else value for key, value in batch_img_metas.items()},
+                }
+                torch.save(onnx_inputs, "onnx_inputs.pth")
                 torch.onnx.export(
                     models['stereo_detection_head'].module,
                     (
@@ -231,7 +281,7 @@ def test(
                 )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
-        if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0):
+        if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0) and start_collect_onnx:
             print("==================================== finished onnx model (event_stereo_object_detection_with_yolo_pose) export! ====================================")
             break
 
@@ -374,6 +424,12 @@ def test(
                     save_root,
                     batch_data["image_metadata"],
                 )
+
+                if is_save_onnx and not start_collect_onnx:
+                    if preds.shape[0] >= 3:
+                        start_collect_onnx = True
+                        batch_data_for_onnx = copy.deepcopy(batch_data)
+                        print("start to collect onnx inputs and outputs...")
                 # # -------------- debug code --------------
                 # os.makedirs("/root/data/debug_test/", exist_ok=True)
                 # h, w = stereo_visz[0].shape[:2]

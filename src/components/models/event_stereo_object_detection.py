@@ -338,10 +338,7 @@ class RPNWithTargetsHead(RPNBaseClass):
             else:
                 ious = compute_ious_pertarget(bboxes_xyxy, targets[indexInBatch])
                 # remove targets with no ious larger than 0
-                try:
-                    notarget_mask = ious.max(dim=1).values <= min_iou_with_target
-                except:
-                    import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+                notarget_mask = ious.max(dim=1).values <= min_iou_with_target
                 bboxes_xyxy = bboxes_xyxy[~notarget_mask]
                 mlvl_scores = torch.cat(mlvl_scores)[~notarget_mask]
                 level_ids = torch.cat(level_ids)[~notarget_mask]
@@ -896,10 +893,7 @@ class StereoDetectionHead(nn.Module):
             rois_right = right_priors.clone()
             rois_right = torch.cat((batch_number, rois_right), dim=1)
 
-            try:
-                right_roi_feats = self.bbox_roi_extractor(right_feats, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
-            except:
-                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+            right_roi_feats = self.bbox_roi_extractor(right_feats, rois_right)  # Note: Based on the bbox size to decide from which level to extract feats.
             # print("stereoNet time cost (until roi extract): {}".format(time.time() - starttime))
             # starttime = time.time()
 
