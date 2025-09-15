@@ -193,7 +193,8 @@ class SequenceDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = self.load_data(idx)
-        data = self.transforms(data)
+        if data["event"].get("left", None) is not None:  # event must exist
+            data = self.transforms(data)
         # print("baodebug: event timestamp: ", data['event']['timestamp'])
         # print("baodebug2: objdet timestamp: ", data['objdet']['timestamp'])
         return data
@@ -244,10 +245,10 @@ class SequenceDataset(torch.utils.data.Dataset):
             )
         else:
             output["event"]["left"] = (
-                output["event"]["left"].to(torch.float32)
+                output["event"]["left"].to(torch.float32) if "left" in output["event"] else None
             )
             output["event"]["right"] = (
-                output["event"]["right"].to(torch.float32)
+                output["event"]["right"].to(torch.float32) if "right" in output["event"] else None
             )
 
         if 'disparity' in output or 'objdet' in output:

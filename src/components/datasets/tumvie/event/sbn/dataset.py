@@ -89,8 +89,8 @@ class EventDataset(torch.utils.data.Dataset):
             try:
                 left_events = np.frombuffer(left_events, dtype="int8")
             except:
-                print("code: ", code)
-                raise
+                print("code not existing: ", code)
+                return {"timestamp": str(timestamp)}
             left_events = left_events.reshape(
                 self.event_h, self.event_w, constant.EVENT_CHANNELS
             ).transpose(2, 0, 1)
