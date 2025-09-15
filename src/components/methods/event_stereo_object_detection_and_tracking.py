@@ -45,6 +45,11 @@ def test(
     prediction_dict = None
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
+        if not batch_data['event'] or batch_data['event'].get('left') is None:
+            pbar.update(1)
+            logger.warning("batch {} has no event data.".format(indexBatch))
+            continue
+
         starttime = time.time()
         # ---------- concentration net ----------
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
@@ -321,6 +326,7 @@ def test(
                 left_right_confidence_diff=models["stereo_detection_head"].module.config["left_right_confidence_diff_inference"],
                 left_right_width_diff_threshold=models["stereo_detection_head"].module.config["left_right_width_diff_threshold"],
             )
+
             # preds = FilterIrregularBboxes(preds, hw_ratiorange_class0=[1.9, 3.15])
             # preds = FilterTemporal(
             #     preds,
@@ -339,6 +345,17 @@ def test(
                     preds[preds[::, 9] <= 1.0],
                     preds_track[keep_indices]
                 ])
+                # mask redundant keypts
+                max_num_keypoints = models["stereo_detection_head"].module.config["max_num_keypoints"]
+                class_num_keypoints = {
+                    0: 2,
+                    1: 4,
+                }
+                for indexPred in range(preds.shape[0]):
+                    class_label = int(preds[indexPred, 8].item())
+                    num_keypoints = class_num_keypoints.get(class_label, 0)
+                    preds[indexPred, (11 + num_keypoints * 3):(11 + max_num_keypoints * 3)] = -1
+                    preds[indexPred, (11 + max_num_keypoints * 3 + num_keypoints * 3):(11 + max_num_keypoints * 3 * 2)] = -1
 
                 prediction_dict = {
                     "objdet": [preds],
@@ -347,7 +364,7 @@ def test(
                         "right": right_event_sharp
                     },
                     "ts": batch_data["end_timestamp"][0],
-                    "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR)
+                    "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR),
                 }
                 stereo_visz = SaveTestResultsAndVisualize(
                     prediction_dict,
@@ -355,7 +372,7 @@ def test(
                     batch_data["end_timestamp"][0],
                     sequence_name,
                     save_root,
-                    batch_data["image_metadata"]
+                    batch_data["image_metadata"],
                 )
                 # # -------------- debug code --------------
                 # os.makedirs("/root/data/debug_test/", exist_ok=True)

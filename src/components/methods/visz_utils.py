@@ -377,6 +377,12 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         instances_facets = numpy.zeros_like(left_event_sharp, dtype='uint8')
     if facets_right is not None:
         instances_facets_right = numpy.zeros_like(right_event_sharp, dtype='uint8')
+    keypts_colormap = {
+        0: (0, 255, 0),
+        1: (0, 0, 255),
+        2: (80, 201, 0),
+        3: (10, 0, 30),
+    }
     for ii, (bbox, classindex, confidence) in enumerate(zip(sbboxes, classes, confidences)):
         bbox = LimitBboxWithInImage(bbox, *left_event_sharp.shape[:2])
         top_left = (int(bbox[0]), int(bbox[1]))
@@ -384,7 +390,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         bottom_right = (int(bbox[2]), int(bbox[3]))
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(left_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
-        text = '{}:{:.1f}'.format(ii, confidence.item() * 100)
+        text = '{}:{:.1f}:{}'.format(ii, confidence.item() * 100, int(classindex))
         textposition = (int(top_left[0]), int(top_left[1] - 10))
         cv2.putText(left_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
@@ -393,7 +399,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             for iKeypt in range(max_num_keypts):
                 if keypts_left[ii, iKeypt * 3 + 2] > 0:
                     keypt_int = (int(keypts_left[ii, iKeypt * 3 + 0]), int(keypts_left[ii, iKeypt * 3 + 1]))
-                    color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
+                    color = keypts_colormap[iKeypt]
                     cv2.circle(left_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
         if False:#facets is not None:
             # instances_facets = cv2.cvtColor(instances_facets, cv2.COLOR_BGR2GRAY)
@@ -414,7 +420,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
         if True:#facets is None and keypts1 is None:
             cv2.rectangle(right_event_sharp, top_left, bottom_right, (255, 0, 0), thickness=3)
         if stereo_confidences is not None:
-            text = '{}:{:.1f}'.format(ii, stereo_confidences[ii].item() * 100)
+            text = '{}:{:.1f}:{}'.format(ii, stereo_confidences[ii].item() * 100, int(classindex))
             textposition = (int(top_left[0]), int(top_left[1] - 10))
             cv2.putText(right_event_sharp, text, textposition, fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 255, 0))
         w, h = bottom_right[0] - top_left[0], bottom_right[1] - top_right[1]
@@ -423,7 +429,7 @@ def DrawResultBboxesAndKeyptsOnStereoEventFrame(
             for iKeypt in range(max_num_keypts):
                 if keypts_right[ii, iKeypt * 3 + 2] > 0:
                     keypt_int = (int(keypts_right[ii, iKeypt * 3 + 0]), int(keypts_right[ii, iKeypt * 3 + 1]))
-                    color = (0, 255, 0) if (iKeypt % 2) == 0 else (0, 0, 255)
+                    color = keypts_colormap[iKeypt]
                     cv2.circle(right_event_sharp, keypt_int, radius=5, color=color, thickness=-1)
         if False:#facets_right is not None:
             # instances_facets_right = cv2.cvtColor(instances_facets_right, cv2.COLOR_BGR2GRAY)
