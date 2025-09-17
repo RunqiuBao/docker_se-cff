@@ -357,10 +357,9 @@ class YoloPose(nn.Module):
     @staticmethod
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        left_event_voxel = torch.randn(4, 1, 480, 672).to(device)
-        right_event_voxel = torch.randn(4, 1, 480, 672).to(device)
+        left_event_voxel = torch.randn(4, 10, 480, 672).to(device)
         model = model.to(device)
-        flops, numParams = profile(model, inputs=(left_event_voxel, right_event_voxel), verbose=False)
+        flops, numParams = profile(model, inputs=(left_event_voxel,), verbose=False)
         return flops, numParams
 
     def predict(

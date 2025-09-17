@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 from torch import Tensor
 import numpy
-from typing import List, Dict, Tuple, Optional, Sequence
+from typing import List, Dict, Tuple, Optional, Sequence, Union
 from thop import profile
 import cv2
 import time
@@ -109,20 +109,25 @@ class RPNHypothesesGroup:
     level_ids: Optional[Tensor] = None
     target_ids: Optional[Tensor] = None
 
-    def __getitem__(self, maskOrIndices: Tensor) -> 'RPNHypothesesGroup':
+    def __getitem__(self, maskOrIndicesOrString: Tensor) -> Union['RPNHypothesesGroup', dict]:
         """
         Args:
-            maskOrIndices: mask tensor or indices tensor of existing hypotheses.
+            maskOrIndicesOrString: mask tensor or indices tensor of existing hypotheses.
 
         Returns:
-            RPNHypothesesGroup with all member variables filtered by mask.
+            - attr: behave like a dict if key is a string same as an attr variable.
+            - RPNHypothesesGroup with all member variables filtered by mask or indices tensor.
         """
-        return RPNHypothesesGroup(
-            bboxes=self.bboxes[maskOrIndices],
-            scores=self.scores[maskOrIndices],
-            level_ids=self.level_ids[maskOrIndices],
-            target_ids=self.target_ids[maskOrIndices]
-        )
+        if isinstance(maskOrIndicesOrString, str):
+            # behave like a dict if key is a string
+            return getattr(self, maskOrIndicesOrString)
+        else:
+            return RPNHypothesesGroup(
+                bboxes=self.bboxes[maskOrIndicesOrString],
+                scores=self.scores[maskOrIndicesOrString],
+                level_ids=self.level_ids[maskOrIndicesOrString],
+                target_ids=self.target_ids[maskOrIndicesOrString]
+            )
 
     def __add__(self, other: 'RPNHypothesesGroup') -> 'RPNHypothesesGroup':
         return RPNHypothesesGroup(
@@ -140,6 +145,24 @@ class RPNHypothesesGroup:
             level_ids=torch.zeros((0,), dtype=torch.long, device=device),
             target_ids=torch.zeros((0,), dtype=torch.long, device=device)
         )
+
+    def numpy(self) -> 'RPNHypothesesGroup':
+        return RPNHypothesesGroup(
+            bboxes=self.bboxes.detach().cpu().numpy() if self.bboxes is not None else None,
+            scores=self.scores.detach().cpu().numpy() if self.scores is not None else None,
+            level_ids=self.level_ids.detach().cpu().numpy() if self.level_ids is not None else None,
+            target_ids=self.target_ids.detach().cpu().numpy() if self.target_ids is not None else None,
+        )
+    
+    def get_dict(self) -> dict:
+        dictData = {
+            "bboxes": self.bboxes,
+            "scores": self.scores,
+            "target_ids": self.target_ids
+        }
+        if self.level_ids is not None:
+            dictData["level_ids"] = self.level_ids
+        return dictData
 
 
 def prune_hypotheses_equally_for_targets(hypotheses: RPNHypothesesGroup, max_hypotheses_per_image: int) -> RPNHypothesesGroup:
@@ -219,6 +242,10 @@ class RPNWithTargetsHead(RPNBaseClass):
         )
         self.init_layers()
 
+    @property
+    def config(self):
+        return self._config
+
     def init_layers(self)->tuple:
         self.rpn_conv = nn.Conv2d(
             self.in_channels,
@@ -239,22 +266,13 @@ class RPNWithTargetsHead(RPNBaseClass):
             1
         )
     
-    def predict(self, xs: list[Tensor], batch_targets: List[Tensor], batch_img_metas: Dict) -> tuple[List[Tensor], List[Tensor]]:
+    def predict(self, xs: list[Tensor]) -> tuple[List[Tensor], List[Tensor]]:
         """
         Args:
             xs: list of feature maps, each of shape (B, feat_channels, H//k, W//k).
-            batch_targets: list of B tensors of (N, 4) shape, where N is number of targets in the image.
-            batch_img_metas: h, w.
         """
         listfeat_rpn_cls_score, listfeat_rpn_bbox_pred = multi_apply(self.predict_single, xs)
-        list_hypotheses = self.allocate_hypotheses_to_targets(
-            listfeat_rpn_cls_score,
-            listfeat_rpn_bbox_pred,
-            batch_targets,
-            batch_img_metas,
-            min_iou_with_target=self._config["rpn_min_iou_with_target"],
-        )
-        return list_hypotheses, listfeat_rpn_cls_score, listfeat_rpn_bbox_pred
+        return listfeat_rpn_cls_score, listfeat_rpn_bbox_pred
 
     def predict_single(self, x):
         """
@@ -268,6 +286,23 @@ class RPNWithTargetsHead(RPNBaseClass):
         return rpn_cls_score, rpn_bbox_pred
     
     def allocate_hypotheses_to_targets(
+        self,
+        listfeat_rpn_cls_score,
+        listfeat_rpn_bbox_pred,
+        batch_targets,
+        batch_img_metas,
+        min_iou_with_target,
+    ):
+        list_hypotheses = self._allocate_hypotheses_to_targets(
+            listfeat_rpn_cls_score,
+            listfeat_rpn_bbox_pred,
+            batch_targets,
+            batch_img_metas,
+            min_iou_with_target=min_iou_with_target,
+        )
+        return list_hypotheses
+    
+    def _allocate_hypotheses_to_targets(
         self,
         listfeat_cls_score: list[Tensor],
         listfeat_bbox_pred: list[Tensor],
@@ -718,16 +753,12 @@ class StereoDetectionHead(nn.Module):
     def ComputeCostProfile(model):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         h, w = 480, 672
-        input_feats = [
-            torch.randn(4, 128, int(h / 8), int(w / 8)).to(device),
-            torch.randn(4, 128, int(h / 16), int(w / 16)).to(device),
-            torch.randn(4, 128, int(h / 32), int(w / 32)).to(device)
-        ]
+        event_voxel = torch.randn(4, 10, 480, 672).to(device)
         bboxes = [torch.randn(120, 4).to(device)]
         disp_prior = torch.randn(4, h, w).to(device)
         batch_img_metas = {"h": h, "w": w}
         model = model.to(device)
-        flops, numParams = profile(model, inputs=(input_feats,  bboxes, disp_prior, batch_img_metas), verbose=False)
+        flops, numParams = profile(model, inputs=(event_voxel,  bboxes, disp_prior), verbose=False)
         return flops, numParams
     
     # def _right_bbox_decode(self, sbboxes_pred: Tensor, right_boxes_refine: Tensor) -> Tensor:
@@ -854,7 +885,8 @@ class StereoDetectionHead(nn.Module):
         right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
-        batch_img_metas: Dict
+        batch_img_metas: Dict,
+        batch_hypotheses: Optional[List[RPNHypothesesGroup]] = None
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
         Args:
@@ -871,12 +903,18 @@ class StereoDetectionHead(nn.Module):
         list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts = [], [], [], [], []
         right_feats = self.backbone(right_event_voxel)
         right_feats = self.neck(right_feats)
-        warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=batch_img_metas['h'], imageWidth=batch_img_metas['w'])
-        batch_hypotheses, rpn_cls_scores, rpn_bbox_preds = self.rpn_head.predict(right_feats, warped_left_bboxes, batch_img_metas)
+        if batch_hypotheses is None:
+            warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=batch_img_metas['h'], imageWidth=batch_img_metas['w'])
+            rpn_cls_scores, rpn_bbox_preds = self.rpn_head.predict(right_feats)
+            batch_hypotheses = self.rpn_head.allocate_hypotheses_to_targets(rpn_cls_scores, rpn_bbox_preds, warped_left_bboxes, batch_img_metas, self.rpn_head.config["rpn_min_iou_with_target"])
+        else:
+            # batch_hypotheses is given. Probably during ONNX export.
+            rpn_cls_scores, rpn_bbox_preds = None, None
+
         for indexInBatch, left_bboxes_oneimage in enumerate(left_bboxes):
             # starttime = time.time()
             hypotheses = batch_hypotheses[indexInBatch]
-            num_hypotheses = hypotheses.bboxes.shape[0]
+            num_hypotheses = hypotheses["bboxes"].shape[0]
             if left_bboxes_oneimage.shape[0] == 0 or num_hypotheses == 0:
                 # No detections in left
                 list_sbboxes_priors.append(None)
@@ -886,10 +924,10 @@ class StereoDetectionHead(nn.Module):
                 list_corresponding_leftdet_ids.append(None)
                 continue
 
-            left_priors = left_bboxes_oneimage[hypotheses.target_ids]
-            right_priors = hypotheses.bboxes
+            left_priors = left_bboxes_oneimage[hypotheses["target_ids"]]
+            right_priors = hypotheses["bboxes"]
             
-            batch_number = indexInBatch * torch.ones((num_hypotheses)).unsqueeze(1).to(hypotheses.bboxes.device)
+            batch_number = indexInBatch * torch.ones((num_hypotheses)).unsqueeze(1).to(hypotheses["bboxes"].device)
             rois_right = right_priors.clone()
             rois_right = torch.cat((batch_number, rois_right), dim=1)
 
@@ -917,10 +955,10 @@ class StereoDetectionHead(nn.Module):
             list_refined_right_bboxes.append(right_bboxes_refine)
             list_refined_right_scores.append(cls_score)
             list_predicted_right_keypts.append(right_keypts_pred)
-            list_corresponding_leftdet_ids.append(hypotheses.target_ids)
+            list_corresponding_leftdet_ids.append(hypotheses["target_ids"])
             # print("stereoNet time cost (one left dets proposals pass): {}".format(time.time() - starttime))
 
-        return list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts, rpn_cls_scores, rpn_bbox_preds
+        return list_sbboxes_priors, list_corresponding_leftdet_ids, list_refined_right_bboxes, list_refined_right_scores, list_predicted_right_keypts, rpn_cls_scores, rpn_bbox_preds, batch_hypotheses
 
     def mask_lefttargets_withnogt(self, left_bboxes: List[Tensor], left_fg_mask: Tensor, left_nms_topk_mask: Tensor) -> List[Tensor]:
         left_bboxes_posgt = []
@@ -932,22 +970,27 @@ class StereoDetectionHead(nn.Module):
 
     def forward(
         self,
-        right_event_voxel: List[Tensor],
+        right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
-        batch_img_metas: Dict,
+        batch_hypotheses_bboxes=None,
+        batch_hypotheses_target_ids=None,
         labels=None,
         **kwargs
     ):
         """
         Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
         """
-        if batch_img_metas is None:
-            batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
+        batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
         if labels is not None:
             left_bboxes = self.mask_lefttargets_withnogt(left_bboxes, labels["left_fg_mask"], labels["left_nms_topk_mask"])
 
-        preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas)
+        if torch.onnx.is_in_onnx_export():
+            assert batch_hypotheses_bboxes is not None and batch_hypotheses_target_ids is not None, "need given batch_hypotheses during onnx export."
+            batch_hypotheses = [{"bboxes": batch_hypotheses_bboxes[indexInBatch], "target_ids": batch_hypotheses_target_ids[indexInBatch]} for indexInBatch in range(len(batch_hypotheses_bboxes))]
+            preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, batch_hypotheses)
+        else:
+            preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas)
 
         losses = None
         artifacts = None
@@ -1024,7 +1067,8 @@ class StereoDetectionHead(nn.Module):
             list_right_scores_refine,
             list_predicted_right_keypts,
             rpn_cls_scores,
-            rpn_bbox_preds
+            rpn_bbox_preds,
+            batch_hypotheses,
         ) = preds  # Note: number of positive in each can be different after nms.
         left_fg_mask, left_target_gt_idx, left_nms_topk_mask, stereo_objdet_targets, batch_img_metas = labels["left_fg_mask"], labels["left_target_gt_idx"], labels["left_nms_topk_mask"], labels["stereo_objdet_targets"], labels["batch_img_metas"]
 

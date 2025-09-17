@@ -46,6 +46,7 @@ def test(
     prediction_dict = None
     start_collect_onnx = False  # start collecting when enough detections emerged.
     batch_data_for_onnx = None
+    infer_time = []
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         if not batch_data['event'] or batch_data['event'].get('left') is None:
@@ -55,10 +56,12 @@ def test(
 
         if is_save_onnx and start_collect_onnx and batch_data_for_onnx is not None:
             batch_data = batch_data_for_onnx
-
+        
         starttime = time.time()
         # ---------- concentration net ----------
+        start_subtime = time.time()
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
+        print("concentration_net costs: {} sec.".format(time.time() - start_subtime))
         right_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["right"])
         if is_save_onnx and start_collect_onnx:
             onnx_inputs = {
@@ -87,7 +90,9 @@ def test(
         num_classes = models["objdet_head"].module.config["num_classes"]
 
         # ---------- disp pred net ----------
+        start_subtime = time.time()
         pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
+        print("disp_head costs: {} sec.".format(time.time() - start_subtime))
         if is_save_onnx and start_collect_onnx:
             onnx_inputs["disp_head"] = {
                 "left_img": left_event_sharp.detach().cpu().numpy(),
@@ -108,7 +113,9 @@ def test(
             )
 
         # ---------- objdet net ----------
+        start_subtime = time.time()
         left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
+        print("objdet_head costs: {} sec.".format(time.time() - start_subtime))
         if is_save_onnx and start_collect_onnx:
             onnx_inputs["objdet_head"] = {
                 "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
@@ -144,6 +151,7 @@ def test(
             # ---------- local tracking head ----------
             previous_detections = prediction_dict['objdet'][0]
             device, dtype = previous_detections.device, previous_detections.dtype
+            start_subtime = time.time()
             (
                 batch_track_bboxes_priors,
                 batch_corresponding_previousdet_ids,
@@ -152,35 +160,38 @@ def test(
                 batch_track_predicted_keypts,
                 rpn_cls_scores,
                 rpn_bbox_preds,
+                batch_rpn_hypotheses,
             ) = models["local_tracking_head"].module.predict(
                 batch_data["event"]["left"],
                 [previous_detections[..., :4]],
                 torch.zeros((1, imageHeight, imageWidth), device=device, dtype=dtype),
                 batch_img_metas,
             )
+            print("local_tracking_head costs: {} sec.".format(time.time() - start_subtime))
 
             if is_save_onnx and start_collect_onnx:
-                onnx_inputs["local_tracking_head"] = {
-                    "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
-                    "left_bboxes": [previous_detections[..., :4].detach().cpu().numpy()],
-                    "disp_prior": torch.zeros((1, imageHeight, imageWidth), device="cpu", dtype=dtype).numpy(),
-                    "batch_img_metas": {key: value.detach().cpu() if isinstance(value, torch.Tensor) else value for key, value in batch_img_metas.items()},
-                }                
                 torch.onnx.export(
                     models['local_tracking_head'].module,
                     (
                         batch_data["event"]["left"],
                         [previous_detections[..., :4]],
                         torch.zeros((1, imageHeight, imageWidth), device=device, dtype=dtype),
-                        batch_img_metas,
+                        [rpn_hypotheses.get_dict()["bboxes"] for rpn_hypotheses in batch_rpn_hypotheses],
+                        [rpn_hypotheses.get_dict()["target_ids"] for rpn_hypotheses in batch_rpn_hypotheses],
                     ),
                     os.path.join(save_root, "local_tracking_head.onnx"),
                     export_params=True,
                     opset_version=16,
                     do_constant_folding=True,
-                    input_names=["left_event_voxel", "left_bboxes", "disp_prior", "batch_img_metas"],
+                    input_names=["left_event_voxel", "left_bboxes", "disp_prior", "batch_hypotheses_bboxes", "batch_hypotheses_target_ids"],
                     output_names=["batch_sbboxes_priors", "batch_refined_bboxes", "batch_refined_scores", "batch_predicted_keypts", "rpn_cls_scores", "rpn_bbox_preds"]
                 )
+                onnx_inputs["local_tracking_head"] = {
+                    "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
+                    "left_bboxes": previous_detections[..., :4].detach().cpu().numpy(),
+                    "batch_hypotheses_bboxes": batch_rpn_hypotheses[0].numpy().get_dict()["bboxes"],
+                    "batch_hypotheses_target_ids": batch_rpn_hypotheses[0].numpy().get_dict()["target_ids"],
+                }     
             
             if batch_track_bboxes_priors[0] is not None:
                 (
@@ -194,18 +205,19 @@ def test(
                     batch_track_refined_scores[0],
                     batch_track_predicted_keypts[0].view(-1, num_classes, models["local_tracking_head"].module.config["max_num_keypoints"] * 3)
                 )
-                corresponding_previousdets_indices = batch_corresponding_previousdet_ids[0][mask_track_nonbackground]
-                corresponding_previousdets = previous_detections[corresponding_previousdets_indices]
-                tracked_class_labels = corresponding_previousdets[:, 8].unsqueeze(-1)
-                tracked_confidences = corresponding_previousdets[:, 9].unsqueeze(-1)
-                # filter these tracked bboxes with tracking threshold (same magitude as stereo threshold)
-                score_threshold = models["local_tracking_head"].module.config["right_confidence_threshold_inference"]
-                mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)
-                tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
-                tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
-                tracked_class_labels = tracked_class_labels[mask_good_tracked]
-                tracked_confidences = tracked_confidences[mask_good_tracked]
-                corresponding_previousdets = corresponding_previousdets[mask_good_tracked]
+                if mask_track_nonbackground is not None and mask_track_nonbackground.sum() > 0:
+                    corresponding_previousdets_indices = batch_corresponding_previousdet_ids[0][mask_track_nonbackground]
+                    corresponding_previousdets = previous_detections[corresponding_previousdets_indices]
+                    tracked_class_labels = corresponding_previousdets[:, 8].unsqueeze(-1)
+                    tracked_confidences = corresponding_previousdets[:, 9].unsqueeze(-1)
+                    # filter these tracked bboxes with tracking threshold (same magitude as stereo threshold)
+                    score_threshold = models["local_tracking_head"].module.config["right_confidence_threshold_inference"]
+                    mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)
+                    tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
+                    tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
+                    tracked_class_labels = tracked_class_labels[mask_good_tracked]
+                    tracked_confidences = tracked_confidences[mask_good_tracked]
+                    corresponding_previousdets = corresponding_previousdets[mask_good_tracked]
 
         refined_sbboxes_nobkg = None
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
@@ -227,6 +239,7 @@ def test(
                 tracked_confidences = tracked_confidences[keep_mask_fromtracked]
                 left_bboxes_nmsed_topked[0] = left_bboxes_nmsed_topked[0][keep_mask]
 
+            start_subtime = time.time()
             (
                 batch_sbboxes_priors,
                 batch_corresponding_leftdet_ids,
@@ -235,35 +248,38 @@ def test(
                 batch_predicted_right_keypts,
                 rpn_cls_scores,
                 rpn_bbox_preds,
+                batch_rpn_hypotheses,
             ) = models["stereo_detection_head"].module.predict(
                 batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
                 batch_img_metas,
             )
+            print("stereo_detection_head costs: {} sec.".format(time.time() - start_subtime))
             if is_save_onnx and start_collect_onnx:
-                onnx_inputs["stereo_detection_head"] = {
-                    "right_feat": batch_data["event"]["right"].detach().cpu().numpy(),
-                    "left_bboxes": [onetensor.detach().cpu().numpy() for onetensor in left_bboxes_nmsed_topked],
-                    "disp_prior": pred_disparity_pyramid[-1].detach().cpu().numpy(),
-                    "batch_img_metas": {key: value.detach().cpu() if type(value) is torch.Tensor else value for key, value in batch_img_metas.items()},
-                }
-                torch.save(onnx_inputs, "onnx_inputs.pth")
                 torch.onnx.export(
                     models['stereo_detection_head'].module,
                     (
                         batch_data["event"]["right"],
                         left_bboxes_nmsed_topked,
                         pred_disparity_pyramid[-1],
-                        batch_img_metas,
+                        [rpn_hypotheses.get_dict()["bboxes"] for rpn_hypotheses in batch_rpn_hypotheses],
+                        [rpn_hypotheses.get_dict()["target_ids"] for rpn_hypotheses in batch_rpn_hypotheses],
                     ),
                     os.path.join(save_root, "stereo_detection_head.onnx"),
                     export_params=True,
                     opset_version=16,
                     do_constant_folding=True,
-                    input_names=["right_feat", "left_bboxes", "disp_prior", "batch_img_metas"],
+                    input_names=["right_event_voxel", "left_bboxes", "disp_prior", "batch_hypotheses_bboxes", "batch_hypotheses_target_ids"],
                     output_names=["batch_sbboxes_priors", "batch_refined_right_bboxes", "batch_refined_right_scores", "batch_predicted_right_keypts", "rpn_cls_scores", "rpn_bbox_preds"],
                 )
+                onnx_inputs["stereo_detection_head"] = {
+                    "right_event_voxel": batch_data["event"]["right"].detach().cpu().numpy(),
+                    "left_bboxes": left_bboxes_nmsed_topked[0].detach().cpu().numpy(),
+                    "batch_hypotheses_bboxes": batch_rpn_hypotheses[0].numpy().get_dict()["bboxes"],
+                    "batch_hypotheses_target_ids": batch_rpn_hypotheses[0].numpy().get_dict()["target_ids"],
+                }
+                torch.save(onnx_inputs, "onnx_inputs.pth")
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
             if batch_sbboxes_priors[0] is not None:
@@ -281,6 +297,7 @@ def test(
                 )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
+        infer_time.append(time.time() - starttime)
         if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0) and start_collect_onnx:
             print("==================================== finished onnx model (event_stereo_object_detection_with_yolo_pose) export! ====================================")
             break
@@ -426,7 +443,7 @@ def test(
                 )
 
                 if is_save_onnx and not start_collect_onnx:
-                    if preds.shape[0] >= 3:
+                    if preds.shape[0] >= 7:
                         start_collect_onnx = True
                         batch_data_for_onnx = copy.deepcopy(batch_data)
                         print("start to collect onnx inputs and outputs...")
@@ -446,5 +463,6 @@ def test(
             logger.error("batch {} has no valid detections.".format(indexBatch))
 
         pbar.update(1)
+    print("average infer time: {} sec.".format(sum(infer_time) / len(infer_time)))
     pbar.close()
     return
