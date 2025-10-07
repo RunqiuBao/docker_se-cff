@@ -895,7 +895,8 @@ def test(
                 batch_refined_right_scores,
                 batch_predicted_right_keypts,
                 rpn_cls_scores,
-                rpn_bbox_preds
+                rpn_bbox_preds,
+                batch_hypotheses,
             ) = models["stereo_detection_head"].module.predict(
                 batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
