@@ -5,6 +5,8 @@ import copy
 import torchvision
 from torchvision.ops import nms
 import time
+import numpy
+import pickle
 from tqdm import tqdm
 
 from ..models.utils.misc import DetachCopyNested
@@ -47,6 +49,7 @@ def test(
     start_collect_onnx = False  # start collecting when enough detections emerged.
     batch_data_for_onnx = None
     infer_time = []
+    num_final_detections = {}
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         if not batch_data['event'] or batch_data['event'].get('left') is None:
@@ -212,7 +215,8 @@ def test(
                     tracked_confidences = corresponding_previousdets[:, 9].unsqueeze(-1)
                     # filter these tracked bboxes with tracking threshold (same magitude as stereo threshold)
                     score_threshold = models["local_tracking_head"].module.config["right_confidence_threshold_inference"]
-                    mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)
+                    mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)  # Hack:  do not track the class:0
+                    # mask_good_tracked = tracked_scores.view(-1) >= score_threshold
                     tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
                     tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
                     tracked_class_labels = tracked_class_labels[mask_good_tracked]
@@ -441,6 +445,7 @@ def test(
                     save_root,
                     batch_data["image_metadata"],
                 )
+                num_final_detections[batch_data["end_timestamp"][0]] = preds.shape[0]
 
                 if is_save_onnx and not start_collect_onnx:
                     if preds.shape[0] >= 7:
@@ -462,7 +467,31 @@ def test(
             prediction_dict = None
             logger.error("batch {} has no valid detections.".format(indexBatch))
 
+        # if no detection, save an empty stereo image
+        if prediction_dict is None:
+            left_image = left_event_sharp.cpu().squeeze().numpy()
+            left_image = left_image - left_image.min()
+            left_image = (left_image / left_image.max() * 255.0).astype('uint8')
+            right_image = right_event_sharp.cpu().squeeze().numpy()
+            right_image = right_image - right_image.min()
+            right_image = (right_image / right_image.max() * 255.0).astype('uint8')
+            stereo_image = numpy.hstack([left_image[:418, :578], right_image[:418, :578]])
+            ts = batch_data["end_timestamp"][0]
+            cv2.imwrite(
+                os.path.join(save_root, "inference", "det_visz", sequence_name, f"{ts:s}.png"),
+                stereo_image,
+            )
+            cv2.imwrite(
+                os.path.join(save_root, "inference", "left", sequence_name, f"{ts:s}.png"),
+                left_image[:418, :578],
+            )
+
+        if batch_data["end_timestamp"][0] not in num_final_detections:
+            num_final_detections[batch_data["end_timestamp"][0]] = 0
         pbar.update(1)
     print("average infer time: {} sec.".format(sum(infer_time) / len(infer_time)))
+    print("mean detections: {}".format(numpy.array(list(num_final_detections.values())).mean()))
+    with open(os.path.join(save_root, f"{sequence_name}_num_final_detections.pkl"), "wb") as f:
+        pickle.dump(num_final_detections, f)
     pbar.close()
     return
