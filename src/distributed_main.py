@@ -29,6 +29,7 @@ parser.add_argument(
     "--local-rank", type=int, default=0
 )  # Note: deprecated. But required by torch.distributed.launch
 parser.add_argument("--only_test", action="store_true", help="only run test")
+parser.add_argument("--do_evaluate_mAP", action="store_true", help="evaluate mAP using the annotated test sequences")
 args = parser.parse_args()
 assert int(os.environ["WORLD_SIZE"]) >= 1
 

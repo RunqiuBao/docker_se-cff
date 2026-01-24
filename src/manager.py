@@ -196,12 +196,12 @@ class DLManager:
             dataset_cfg=self.cfg.DATASET.TEST,
             dataloader_cfg=self.cfg.DATALOADER.TEST,
         )
-
         self.logger.test()
-
+        
+        test_method = self.method.evaluate_mAP if self.args.do_evaluate_mAP else self.method.test
         for sequence_dataloader in test_loader:            
             sequence_name = sequence_dataloader.dataset.sequence_name
-            self.method.test(
+            test_method(
                 models=self.models,
                 data_loader=sequence_dataloader,
                 sequence_name=sequence_name,  # Note: for saving debug images
