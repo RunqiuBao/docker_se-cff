@@ -1,5 +1,5 @@
 TOTAL_EPOCH: 300
-METHOD: event_stereo_object_detection_with_yolo_pose
+METHOD: event_stereo_object_detection_and_tracking
 DATASET:
   TRAIN:
     NAME: binpicking
@@ -184,6 +184,37 @@ MODEL:
       left_right_confidence_diff_inference: 1.0
       left_right_width_diff_threshold: 1.3
       invalid_distance_from_image_border: -100
+  local_tracking_head_cfg:
+    DICTKEY: local_tracking_head
+    CLASSNAME: StereoDetectionHead
+    is_freeze: False
+    PARAMS:
+      # detection
+      num_classes: 1
+      max_num_keypoints: 2
+      in_channels: 10
+      channels_roi_extraction: 256
+      feat_channels: 256
+      num_stacked_convs: 2
+      bbox_expand_anchor_ticks: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+      OKS_SIGMA: [0.26, 0.25, 0.25, 0.35]
+      norm_cfg:
+        type: BN
+        momentum: 0.03
+        eps: 0.001
+      act_cfg:
+        type: ReLU
+      # right bbox regression
+      right_roi_feat_size: 28
+      r_iou_bkg: 0.3
+      r_iou_threshold: 0.8
+      rpn_min_iou_with_target: 0.5
+      candidates_k: 49
+      # inference:
+      right_nms_iou_threshold_inference: 0.2
+      right_confidence_threshold_inference: 0.1
+      left_right_confidence_diff_inference: 1.0
+      left_right_width_diff_threshold: 1.3
 LOSSES:
   concentration_net_cfg:
     skiplossconf: True
@@ -205,6 +236,8 @@ LOSSES:
     rkeypts_obj_loss_weight: 1
     rpn_losses_cls_weight: 1.0
     rpn_losses_bbox_weight: 1.0
+  local_tracking_head_cfg:
+    skiplossconf: True
 OPTIMIZER:
   # one type of optimizer being enabled
   optimizer0:

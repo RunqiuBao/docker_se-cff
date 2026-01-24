@@ -18,13 +18,14 @@ class BinpickingDataset(torch.utils.data.Dataset):
         self,
         root,
         split,
-        sampling_ratio,
         event_cfg,
         crop_height,
         crop_width,
+        sampling_ratio=1,
         num_workers=0,
         defineSeqIdx=None,
         isDisableLmdbRead=False,
+        seqsToUse=None,
         **kwargs,
     ):
         self.root = root
@@ -34,7 +35,7 @@ class BinpickingDataset(torch.utils.data.Dataset):
         self.crop_height = crop_height
         self.crop_width = crop_width
         self.num_workers = num_workers
-        assert split in DATA_SPLIT.keys()
+        assert split in DATA_SPLIT[kwargs.get("config_name", "default")]
 
         # moving events into lmdb
         if not isDisableLmdbRead and os.path.isdir(os.path.join(root, split, "lmdb")) and os.path.getsize(os.path.join(root, split, "lmdb", "data.mdb")) > 1024**2:  # Note: the dataset need to be larger than 1MB
@@ -45,13 +46,18 @@ class BinpickingDataset(torch.utils.data.Dataset):
         else:
             print("baodebug: ==========================: skip lmdb due to isDisableLmdbRead {} and isDir", str(isDisableLmdbRead), str(os.path.isdir(os.path.join(root, split, "lmdb"))))
 
-        sequence_list = DATA_SPLIT[split]
+        sequence_list = DATA_SPLIT[kwargs.get("config_name", "default")][split]
         if defineSeqIdx is not None:
             sequence_list = [sequence_list[defineSeqIdx]]
+        if seqsToUse is not None:
+            sequence_list = [sequence_list[i] for i in seqsToUse]
             
         self.sequence_data_list = []
         for sequence in sequence_list:
-            sequence_root = os.path.join(root, sequence)            
+            sequence_root = os.path.join(root, sequence)
+            if not os.path.exists(sequence_root):
+                print("{} does not exist, skip this sequence.".format(sequence))
+                continue
             self.sequence_data_list.append(
                 SequenceDataset(
                     root=sequence_root,
@@ -177,7 +183,7 @@ def get_sequence_dataloader(
 
 
 def get_dataloader(
-    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False
+    args, dataset_cfg, dataloader_cfg, is_distributed=False, defineSeqIdx=None, isDisableLmdbRead=False,
 ):
     """
     Args:

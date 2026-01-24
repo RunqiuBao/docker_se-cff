@@ -32,20 +32,6 @@ class Padding:
         return sample
 
 
-class Crop:
-    def __init__(self, crop_height, crop_width):
-        self.crop_height = crop_height
-        self.crop_width = crop_width
-
-    def __call__(self, sample, offset_x, offset_y):
-        start_y, end_y = offset_y, offset_y + self.crop_height
-        start_x, end_x = offset_x, offset_x + self.crop_width
-
-        sample = sample[start_y:end_y, start_x:end_x]
-
-        return sample
-
-
 class VerticalFlip:
     def __call__(self, sample):
         sample = np.copy(np.flipud(sample))

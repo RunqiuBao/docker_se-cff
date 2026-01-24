@@ -29,20 +29,25 @@ class EventDataset(torch.utils.data.Dataset):
         num_of_future_event=0,
         use_preprocessed_image=False,
         sequence_name="0",
-        sequence_length=0,
+        timestamps=None,
         lmdb_txn=None,
+        num_repeat=1,
+        event_h=None,
+        event_w=None,
         **kwargs,
     ):
+        self._num_repeat = num_repeat
         self.root = root
         self.num_of_event = num_of_event
         self.stack_method = stack_method
         self.stack_size = stack_size
         self.num_of_future_event = num_of_future_event
         self.use_preprocessed_image = use_preprocessed_image
-        self.event_h = constant.EVENT_HEIGHT
-        self.event_w = constant.EVENT_WIDTH
+        self.event_h = event_h
+        self.event_w = event_w
         self.event_channels = constant.EVENT_CHANNELS
-        self.sequence_length = sequence_length
+        self.sequence_length = len(timestamps)
+        self._timestamps = timestamps
         self.NO_VALUE = constant.STACK_NO_VALUE
 
         # moving events into lmdb
@@ -55,43 +60,54 @@ class EventDataset(torch.utils.data.Dataset):
                 event_path = os.path.join(root, location, "events.h5")
                 rectify_map_path = os.path.join(root, location, "rectify_map.h5")
                 self.event_slicer[location] = EventSlicer(
-                    event_path, rectify_map_path, num_of_event, num_of_future_event
+                    event_path,
+                    rectify_map_path,
+                    num_of_event,
+                    num_of_future_event,
+                    event_h=self.event_h,
+                    event_w=self.event_w
                 )
 
             self.stack_function = getattr(stack, stack_method)(
                 stack_size,
                 num_of_event,
-                constant.EVENT_HEIGHT,
-                constant.EVENT_WIDTH,
+                self.event_h,
+                self.event_w,
                 **kwargs,
             )
 
     def __len__(self):
-        return self.sequence_length
+        return self.sequence_length * self._num_repeat  # Note: data augmentation by repeat and random crop
 
-    def __getitem__(self, x):
-        idx, timestamp = x
+    def __getitem__(self, idx):
+        idx = idx % self.sequence_length
+        timestamp = self._timestamps[idx]
         if self.lmdb_txn is not None:
-            code = "%03d_%06d_l" % (int(self.sequence_name.split("seq")[-1]), idx)
+            code = "%03d_%06d" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             left_events = self.lmdb_txn.get(code)
-            left_events = np.frombuffer(left_events, dtype="int8")
+            try:
+                left_events = np.frombuffer(left_events, dtype="int8")
+            except:
+                print("code not existing: ", code)
+                return {"timestamp": str(timestamp)}
             left_events = left_events.reshape(
-                constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS
-            ).transpose(2, 0, 1)
+                constant.EVENT_CHANNELS, self.event_h, self.event_w
+            )
             code = "%03d_%06d_r" % (int(self.sequence_name.split("seq")[-1]), idx)
             code = code.encode()
             right_events = self.lmdb_txn.get(code)
             right_events = np.frombuffer(right_events, dtype="int8")
             right_events = right_events.reshape(
-                constant.EVENT_HEIGHT, constant.EVENT_WIDTH, constant.EVENT_CHANNELS
-            ).transpose(2, 0, 1)
-            event_data = {"left": right_events, "right": left_events}  # Note: hack for switching left, right.
+                constant.EVENT_CHANNELS, self.event_h, self.event_w
+            )
+            event_data = {"left": left_events, "right": right_events}
         else:
             event_data = self._pre_load_event_data(timestamp=timestamp)
             event_data = self._post_load_event_data(event_data)
             for key, value in event_data.items():
                 event_data[key] = value.squeeze().transpose(2, 0, 1)
+        event_data["timestamp"] = str(timestamp)  #self.sequence_name + "_" + str(timestamp)
         return event_data
 
     def _pre_load_event_data(self, timestamp):

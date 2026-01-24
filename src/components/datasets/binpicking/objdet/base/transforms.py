@@ -155,7 +155,6 @@ class VerticalFlip:
             bboxes_cformat[:, 8],
             y_keypt2_new,
         )
-        sample["keypts"][:, :, 1] = self.img_height - sample["keypts"][:, :, 1]
         return sample
 
 
@@ -190,7 +189,6 @@ class HorizontalFlip:
                 bboxes_cformat[:, 9],
             ]
         )
-        sample["keypts"][:, :, 0] = self.img_width - sample["keypts"][:, :, 0]
         return sample
 
 
@@ -232,8 +230,53 @@ class Padding:
                     mode="constant",
                     constant_values=self.no_objdet_value,
                 )
-        else:
-            raise NotImplementedError
+        elif "leftmasks" in sample and "rightmasks" in sample:
+            ori_height, ori_width = sample["leftmasks"][0].shape
+            bottom_pad = self.img_height - ori_height
+            right_pad = self.img_width - ori_width
+            padded_leftmasks, padded_rightmasks = [], []
+            for leftmask, rightmask in zip(sample["leftmasks"], sample["rightmasks"]):
+                if leftmask is not None:
+                    padded_leftmasks.append(
+                        np.lib.pad(
+                            leftmask,
+                            ((0, bottom_pad), (0, right_pad)),
+                            mode="constant",
+                            constant_values=self.no_objdet_value,
+                        )
+                    )
+                    padded_rightmasks.append(
+                        np.lib.pad(
+                            rightmask,
+                            ((0, bottom_pad), (0, right_pad)),
+                            mode="constant",
+                            constant_values=self.no_objdet_value,
+                        )
+                    )
+            sample["leftmasks"] = padded_leftmasks
+            sample["rightmasks"] = padded_rightmasks
+        elif "leftmasks" in sample:
+            ori_height, ori_width = sample["leftmasks"][0].shape
+            bottom_pad = self.img_height - ori_height
+            right_pad = self.img_width - ori_width
+            padded_leftmasks = []
+            for leftmask in sample["leftmasks"]:
+                if leftmask is not None:
+                    try:
+                        padded_leftmasks.append(
+                            np.lib.pad(
+                                leftmask,
+                                ((0, bottom_pad), (0, right_pad)),
+                                mode="constant",
+                                constant_values=self.no_objdet_value,
+                            )
+                        )
+                    except:
+                        print("baodebug: leftmask shape: {}. bottom_pad: {}, right_pad: {}".format(leftmask.shape, bottom_pad, right_pad))
+                        raise
+                else:
+                    padded_leftmasks.append(None)
+            sample["leftmasks"] = padded_leftmasks
 
         return sample
 
@@ -266,7 +309,7 @@ class ConvertBboxes:
         self.normalize = is_normalize
 
     def __call__(self, sample):
-        assert "boxes" in sample.get("left", None) and isinstance(sample["left"]["boxes"], torch.Tensor)
+        assert "bboxes" in sample.get("left", None) and isinstance(sample["left"]["bboxes"], torch.Tensor)
         spatial_size = (self.img_height, self.img_width)
         for side in sample.keys():
             sample[side]["boxes"] = self._ConvertBboxFormat(sample[side]["boxes"], self.output_fmt, spatial_size, self.normalize)
@@ -283,3 +326,26 @@ class ConvertBboxes:
         if normalize:
             bboxes = bboxes / torch.tensor(spatial_size[::-1]).tile(2)[None]
         return bboxes.float()
+
+
+class Crop:
+    def __init__(self):
+        pass
+
+    def __call__(self, sample, offset_x, offset_y):
+        start_y = offset_y
+        start_x = offset_x
+
+        sample["bboxes"][:, 0] -= start_x
+        sample["bboxes"][:, 1] -= start_y
+        sample["bboxes"][:, 2] -= start_x
+        sample["bboxes"][:, 3] -= start_y
+        sample["bboxes"][:, 4] -= start_x
+        sample["bboxes"][:, 5] -= start_x
+
+        sample["keypts"][..., 0] -= start_x
+        sample["keypts"][..., 1] -= start_y
+        sample["keypts_right"][..., 0] -= start_x
+        sample["keypts_right"][..., 1] -= start_y
+
+        return sample

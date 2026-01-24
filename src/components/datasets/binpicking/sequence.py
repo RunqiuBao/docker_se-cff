@@ -43,15 +43,15 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.crop_height = crop_height
         self.crop_width = crop_width
         self.num_workers = num_workers
-
+        self._num_repeat = kwargs.get("num_repeat", 1)
         self.sequence_name = root.split("/")[-1]
 
         # Timestamps
         if split in ["train", "valid", "test"]:   
             if split == "test":
-                self._PATH_DICT["timestamps"] = "timestamps.txt"
+                self._PATH_DICT["timestamps"] = "timestamps_slam.txt"
             else:
-                self._PATH_DICT["timestamps"] = "timestamps.txt"
+                self._PATH_DICT["timestamps"] = "timestamps_objdet.txt"
             self.timestamps = np.loadtxt(
                 os.path.join(root, self._PATH_DICT["timestamps"]), dtype="int64"
             )
@@ -63,12 +63,15 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         # Event Dataset
         event_module = getattr(event, event_cfg.NAME)
-        event_root = os.path.join(root, self._PATH_DICT["event"])        
+        event_root = os.path.join(root, self._PATH_DICT["event"])
         self.event_dataset = event_module.EventDataset(
             root=event_root,
             sequence_name=self.sequence_name,
-            sequence_length=len(self.timestamps),
+            timestamps=self.timestamps,
             lmdb_txn=lmdb_txn,
+            num_repeat=self._num_repeat if split == "train" else 1,
+            event_h=kwargs["event_height"] if lmdb_txn is not None else kwargs["event_raw_height"],
+            event_w=kwargs["event_width"] if lmdb_txn is not None else kwargs["event_raw_width"],
             **event_cfg.PARAMS,
         )
 
@@ -77,22 +80,30 @@ class SequenceDataset(torch.utils.data.Dataset):
         objdet_module = getattr(objdet, "base")
         self.objdet_dataset = objdet_module.StereoObjDetDataset(
             root=os.path.join(root, self._PATH_DICT["objdet"]),
-            imageHeight=self.event_dataset.event_h,
-            imageWidth=self.event_dataset.event_w,
-            isLoadCOCOFormat=isLoadCOCOFormat
+            imageHeight=kwargs["event_rectified_height"],
+            imageWidth=kwargs["event_rectified_width"],
+            isLoadCOCOFormat=isLoadCOCOFormat,
+            num_repeat=self._num_repeat if split == "train" else 1,
+            timestamps=self.timestamps,
+            dataset_type=split,
+            max_num_keypoints=kwargs.get("max_num_keypoints", None)
         )
 
-        # # Disparity Dataset
-        # disparity_module = getattr(disparity, "base")
-        # img_metadata = {
-        #     # 'h': self.event_dataset.event_h,
-        #     # 'w': self.event_dataset.event_w,
-        #     "h": crop_height,
-        #     "w": crop_width
-        # }
-        # self.disparity_dataset = disparity_module.DisparityDataset(
-        #     img_metadata=img_metadata
-        # )
+        # Disparity Dataset
+        disparity_module = getattr(disparity, "base")
+        img_metadata = {
+            # 'h': self.event_dataset.event_h,
+            # 'w': self.event_dataset.event_w,
+            "h": crop_height,  # Note: disparity generation is based on objdet after cropping or padding.
+            "w": crop_width,
+            "h_recti": kwargs["event_rectified_height"],
+            "w_recti": kwargs["event_rectified_width"]
+        }
+        self.disparity_dataset = disparity_module.DisparityDataset(
+            img_metadata=img_metadata,
+            event_data_sequence_length=len(self.event_dataset),
+            num_repeat=self._num_repeat if split == "train" else 1
+        )
 
         # self.timestamps = self.timestamps[[idx for idx in range(0, len(self.timestamps), sampling_ratio)]]  # Bug: timestamp_to_index will be wrong.
 
@@ -104,66 +115,88 @@ class SequenceDataset(torch.utils.data.Dataset):
                 transformsList.append(
                     transforms.RandomHorizontalFlip(
                         event_module=event_module,
+                        disparity_module=disparity_module,
                         objdet_module=objdet_module,
                         img_height=crop_height,
                         img_width=crop_width,
                     )
                 )
-            transformsList.append(
-                transforms.Padding(
-                    img_height=crop_height,
-                    img_width=crop_width,
-                    event_module=event_module,
-                    no_event_value=self.event_dataset.NO_VALUE,
-                    objdet_module=objdet_module,
-                    no_objdet_value=self.objdet_dataset.NO_VALUE
+            if kwargs.get("randomcrop", False):
+                transformsList.append(
+                    transforms.RandomCrop(
+                        event_module=event_module,
+                        objdet_module=objdet_module,
+                        crop_height=crop_height,
+                        crop_width=crop_width,
+                        no_value=self.objdet_dataset.NO_VALUE
+                    )
                 )
-            )
+            else:
+                transformsList.append(
+                    transforms.Padding(
+                        img_height=crop_height,
+                        img_width=crop_width,
+                        event_module=event_module,
+                        no_event_value=self.event_dataset.NO_VALUE,
+                        objdet_module=objdet_module,
+                        no_objdet_value=self.objdet_dataset.NO_VALUE,
+                        disparity_module=disparity_module,
+                        no_disparity_value=self.disparity_dataset.NO_VALUE,
+                    )
+                )
             transformsList.append(
                 transforms.ToTensor(
                     event_module=event_module,
+                    disparity_module=disparity_module,
                     objdet_module=objdet_module,
-                )
-            )
-            transformsList.append(
-                transforms.ConvertBboxes(
-                    img_height=crop_height,
-                    img_width=crop_width,
-                    objdet_module=objdet_module
                 )
             )
             self.transforms = transforms.Compose(transformsList)
         elif split in ["valid", "test"]:
-            self.transforms = transforms.Compose(
-                [
+            transformsList = []
+            if kwargs.get("randomcrop", False):
+                transformsList.append(
+                    transforms.RandomCrop(
+                        event_module=event_module,
+                        objdet_module=objdet_module,
+                        crop_height=crop_height,
+                        crop_width=crop_width,
+                        no_value=self.objdet_dataset.NO_VALUE
+                    )
+                )
+            else:
+                transformsList.append(
                     transforms.Padding(
                         event_module=event_module,
                         img_height=crop_height,
                         img_width=crop_width,
                         no_event_value=self.event_dataset.NO_VALUE,
                         objdet_module=objdet_module,
-                        no_objdet_value=self.objdet_dataset.NO_VALUE
-                    ),
-                    transforms.ToTensor(
-                        event_module=event_module,
-                        objdet_module=objdet_module,
-                    ),
-                    transforms.ConvertBboxes(
-                        img_height=crop_height,
-                        img_width=crop_width,
-                        objdet_module=objdet_module
+                        no_objdet_value=self.objdet_dataset.NO_VALUE,
+                        disparity_module=disparity_module,
+                        no_disparity_value=self.disparity_dataset.NO_VALUE
                     )
-                ]
+                )
+            transformsList.append(
+                transforms.ToTensor(
+                    event_module=event_module,
+                    disparity_module=disparity_module,
+                    objdet_module=objdet_module,
+                )
             )
+            self.transforms = transforms.Compose(transformsList)
         else:
             raise NotImplementedError
 
     def __len__(self):
-        return len(self.timestamps)
+        return len(self.event_dataset)
 
     def __getitem__(self, idx):
         data = self.load_data(idx)
-        data = self.transforms(data)
+        if data["event"].get("left", None) is not None:  # event must exist
+            data = self.transforms(data)
+        # print("baodebug: event timestamp: ", data['event']['timestamp'])
+        # print("baodebug2: objdet timestamp: ", data['objdet']['timestamp'])
         return data
 
     def collate_fn(self, batch):
@@ -178,12 +211,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         # objdet
         domain = "objdet"
         if domain in batch[0].keys():
-            output[domain] = {}
-            output[domain]["left"] = self.objdet_dataset.collate_fn(
-                [oneInstance[domain]["left"] for oneInstance in batch]
-            )
-            output[domain]["right"] = self.objdet_dataset.collate_fn(
-                [oneInstance[domain]["right"] for oneInstance in batch]
+            output[domain] = self.objdet_dataset.collate_fn(
+                [oneInstance[domain] for oneInstance in batch]
             )
 
         # Others
@@ -196,8 +225,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         output["image_metadata"] = {
             "h": self.crop_height,
             "w": self.crop_width,
-            "h_cam": self.event_dataset.event_h,
-            "w_cam": self.event_dataset.event_w
+            "h_recti": self.event_dataset.event_h,
+            "w_recti": self.event_dataset.event_w
         }
         if "EVENT_TENSOR_TYPE" in self.event_cfg and self.event_cfg.EVENT_TENSOR_TYPE == "secff":
             output["event"]["left"] = (
@@ -216,10 +245,10 @@ class SequenceDataset(torch.utils.data.Dataset):
             )
         else:
             output["event"]["left"] = (
-                output["event"]["left"].to(torch.float32)
+                output["event"]["left"].to(torch.float32) if "left" in output["event"] else None
             )
             output["event"]["right"] = (
-                output["event"]["right"].to(torch.float32)
+                output["event"]["right"].to(torch.float32) if "right" in output["event"] else None
             )
 
         if 'disparity' in output or 'objdet' in output:
@@ -232,15 +261,17 @@ class SequenceDataset(torch.utils.data.Dataset):
 
     def load_data(self, idx):
         data = {}
-        event_data = self.event_dataset[(idx, self.timestamps[idx])]
+
+        event_data = self.event_dataset[idx]
         objdet_data = self.objdet_dataset[idx]
-        disparity_data = None  #self.disparity_dataset[(idx, objdet_data)]
+        disparity_data = self.disparity_dataset[(idx, objdet_data)]
 
         data["file_index"] = idx
-        data["end_timestamp"] = self.timestamps[idx]
+        data["end_timestamp"] = event_data['timestamp']
         if event_data is not None:
             data["event"] = event_data
         if objdet_data is not None:
+            assert event_data['timestamp'] == objdet_data['timestamp'], "Error: event ({}) and objdet timestamp ({}) do not match.".format(event_data['timestamp'], objdet_data['timestamp'])
             data["objdet"] = objdet_data
         if disparity_data is not None:
             data["disparity"] = disparity_data
