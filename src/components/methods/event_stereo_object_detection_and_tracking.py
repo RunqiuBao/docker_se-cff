@@ -2,6 +2,7 @@ import os.path
 import torch
 import cv2
 import copy
+from torchmetrics.detection import MeanAveragePrecision
 import torchvision
 from torchvision.ops import nms
 import time
@@ -13,6 +14,7 @@ from ..models.utils.misc import DetachCopyNested
 from .base import batch_to_cuda
 from ..models.yolo_pose_utils import non_max_suppression
 from .event_stereo_object_detection_with_yolo_pose import FilterBadDetections, FilterTemporal, SaveTestResultsAndVisualize
+from ..models.utils.objdet_utils import evaluate_results_with_gt
 
 import logging
 logger = logging.getLogger(__name__)
@@ -44,19 +46,25 @@ def test(
     
     pbar = tqdm(total=len(data_loader))
     data_iter = iter(data_loader)
-    previous_preds = None
     prediction_dict = None
     start_collect_onnx = False  # start collecting when enough detections emerged.
     batch_data_for_onnx = None
     infer_time = []
     num_final_detections = {}
+    evals_input = {
+        "TP": [],
+        "FP": [],
+        "FN": [],
+        "GT": [],
+    }
+    iou_threshold = 0.75
     for indexBatch in range(len(data_loader.dataset)):
         batch_data = batch_to_cuda(next(data_iter))
         if not batch_data['event'] or batch_data['event'].get('left') is None:
             pbar.update(1)
             logger.warning("batch {} has no event data.".format(indexBatch))
             continue
-
+        
         if is_save_onnx and start_collect_onnx and batch_data_for_onnx is not None:
             batch_data = batch_data_for_onnx
         
@@ -77,14 +85,14 @@ def test(
                 models['concentration_net'].module,
                 (
                     batch_data["event"]["left"],
-                    batch_data["event"]["right"]
+                    batch_data["event"]["right"],
                 ),
                 os.path.join(save_root, "concentration_net.onnx"),
                 export_params=True,
                 opset_version=16,
                 do_constant_folding=True,
-                input_names=["left_img", "right_img"],
-                output_names=["left_preds", "right_preds"],
+                input_names=["left_right_inputs",],
+                output_names=["left_right_sharps",],
             )
             
 
@@ -123,6 +131,7 @@ def test(
             onnx_inputs["objdet_head"] = {
                 "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
             }
+            import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
             torch.onnx.export(
                 models['objdet_head'].module,
                 (
@@ -161,9 +170,6 @@ def test(
                 batch_track_refined_bboxes,
                 batch_track_refined_scores,
                 batch_track_predicted_keypts,
-                rpn_cls_scores,
-                rpn_bbox_preds,
-                batch_rpn_hypotheses,
             ) = models["local_tracking_head"].module.predict(
                 batch_data["event"]["left"],
                 [previous_detections[..., :4]],
@@ -187,16 +193,17 @@ def test(
                     opset_version=16,
                     do_constant_folding=True,
                     input_names=["left_event_voxel", "left_bboxes", "disp_prior", "batch_hypotheses_bboxes", "batch_hypotheses_target_ids"],
-                    output_names=["batch_sbboxes_priors", "batch_refined_bboxes", "batch_refined_scores", "batch_predicted_keypts", "rpn_cls_scores", "rpn_bbox_preds"]
+                    output_names=["batch_sbboxes_priors", "batch_refined_bboxes", "batch_refined_scores", "batch_predicted_keypts",]
                 )
                 onnx_inputs["local_tracking_head"] = {
                     "left_event_voxel": batch_data["event"]["left"].detach().cpu().numpy(),
                     "left_bboxes": previous_detections[..., :4].detach().cpu().numpy(),
                     "batch_hypotheses_bboxes": batch_rpn_hypotheses[0].numpy().get_dict()["bboxes"],
                     "batch_hypotheses_target_ids": batch_rpn_hypotheses[0].numpy().get_dict()["target_ids"],
-                }     
+                }
             
             if batch_track_bboxes_priors[0] is not None:
+                max_num_keypoints = models["local_tracking_head"].module.config["max_num_keypoints"]
                 (
                     mask_track_nonbackground,
                     tracked_bboxes_nobkg,
@@ -206,8 +213,11 @@ def test(
                     batch_track_bboxes_priors[0].squeeze(0),
                     batch_track_refined_bboxes[0].view(-1, num_classes, 4),
                     batch_track_refined_scores[0],
-                    batch_track_predicted_keypts[0].view(-1, num_classes, models["local_tracking_head"].module.config["max_num_keypoints"] * 3)
+                    batch_track_predicted_keypts[0].view(-1, num_classes, max_num_keypoints * 3),
                 )
+                # if batch_data['end_timestamp'][0] == '2821053':
+                #     import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+                # logger.critical("batch_data['end_timestamp']: %s", batch_data['end_timestamp'][0])
                 if mask_track_nonbackground is not None and mask_track_nonbackground.sum() > 0:
                     corresponding_previousdets_indices = batch_corresponding_previousdet_ids[0][mask_track_nonbackground]
                     corresponding_previousdets = previous_detections[corresponding_previousdets_indices]
@@ -215,13 +225,22 @@ def test(
                     tracked_confidences = corresponding_previousdets[:, 9].unsqueeze(-1)
                     # filter these tracked bboxes with tracking threshold (same magitude as stereo threshold)
                     score_threshold = models["local_tracking_head"].module.config["right_confidence_threshold_inference"]
-                    mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)  # Hack:  do not track the class:0
-                    # mask_good_tracked = tracked_scores.view(-1) >= score_threshold
-                    tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
-                    tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
-                    tracked_class_labels = tracked_class_labels[mask_good_tracked]
-                    tracked_confidences = tracked_confidences[mask_good_tracked]
-                    corresponding_previousdets = corresponding_previousdets[mask_good_tracked]
+                    # mask_good_tracked = torch.logical_and(tracked_scores.view(-1) >= score_threshold, tracked_class_labels.squeeze() != 0)  # Hack:  do not track the class:0
+                    mask_good_tracked = tracked_scores.view(-1) >= score_threshold
+                    # filter by width diff change
+                    width_diff = torch.abs((tracked_bboxes_nobkg[:, 6] - tracked_bboxes_nobkg[:, 4]) - (tracked_bboxes_nobkg[:, 2] - tracked_bboxes_nobkg[:, 0])) / (tracked_bboxes_nobkg[:, 2] - tracked_bboxes_nobkg[:, 0])
+                    mask_good_tracked = torch.logical_and(
+                        mask_good_tracked,
+                        width_diff < (models["local_tracking_head"].module.config["left_right_width_diff_threshold"]- 1),
+                    )
+                    if mask_good_tracked.sum().item() > 0:
+                        tracked_bboxes_nobkg = tracked_bboxes_nobkg[mask_good_tracked]
+                        tracked_keypts_nobkg = tracked_keypts_nobkg[mask_good_tracked]
+                        tracked_class_labels = tracked_class_labels[mask_good_tracked]
+                        tracked_confidences = tracked_confidences[mask_good_tracked]
+                        corresponding_previousdets = corresponding_previousdets[mask_good_tracked]
+                        corresponding_previousdets[:, :4] = tracked_bboxes_nobkg[:, 4:]
+                        corresponding_previousdets[:, 11:(11 + max_num_keypoints * 3)] = tracked_keypts_nobkg.view(tracked_keypts_nobkg.shape[0], -1)
 
         refined_sbboxes_nobkg = None
         if left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0:
@@ -229,7 +248,7 @@ def test(
             left_bboxes_nmsed_topked = [one_batch[..., :4] for one_batch in left_bboxesClsKeypts_nmsed_topked]
             left_confidences_nmsed_topked = torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0].unsqueeze(-1)
             if mask_track_nonbackground is not None and mask_track_nonbackground.sum() > 0:
-                left_bboxes_nmsed_topked[0] = torch.concat([left_bboxes_nmsed_topked[0], tracked_bboxes_nobkg[:, :4]], dim=0)
+                left_bboxes_nmsed_topked[0] = torch.concat([left_bboxes_nmsed_topked[0], tracked_bboxes_nobkg[:, 4:]], dim=0)
                 left_confidences = left_confidences_nmsed_topked + 1.0  # prioritize current detections.
                 keep_indices = nms(
                     left_bboxes_nmsed_topked[0],
@@ -297,7 +316,7 @@ def test(
                     batch_sbboxes_priors[0].squeeze(0),
                     batch_refined_right_bboxes[0].view(-1, num_classes, 4),
                     batch_refined_right_scores[0],
-                    batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3)
+                    batch_predicted_right_keypts[0].view(-1, num_classes, models["stereo_detection_head"].module.config["max_num_keypoints"] * 3),
                 )
 
         logger.info("one infer time: {} sec.".format(time.time() - starttime))
@@ -305,7 +324,7 @@ def test(
         if is_save_onnx and (left_bboxesClsKeypts_nmsed_topked[0].shape[0] > 0) and start_collect_onnx:
             print("==================================== finished onnx model (event_stereo_object_detection_with_yolo_pose) export! ====================================")
             break
-
+        
         if refined_sbboxes_nobkg is not None:
             # (l_tl_x, l_tl_y, l_br_x, l_br_y,
             #                                  r_tl_x, r_tl_y, r_br_x, r_br_y,
@@ -384,7 +403,7 @@ def test(
             left_keep_indices = nms(
                 raw_preds[:, 0:4],
                 raw_preds[:, 9],
-                iou_threshold=models["objdet_head"].module.config["confidence_threshold_inference"]
+                iou_threshold=models["objdet_head"].module.config["confidence_threshold_inference"],
             )
             raw_preds = raw_preds[left_keep_indices]
 
@@ -432,7 +451,7 @@ def test(
                     "objdet": [preds],
                     "concentrate": {
                         "left": left_event_sharp,
-                        "right": right_event_sharp
+                        "right": right_event_sharp,
                     },
                     "ts": batch_data["end_timestamp"][0],
                     "disp": cv2.cvtColor(pred_disparity_pyramid[-1].detach().cpu().numpy().astype('uint8')[0], cv2.COLOR_GRAY2BGR),
@@ -448,7 +467,7 @@ def test(
                 num_final_detections[batch_data["end_timestamp"][0]] = preds.shape[0]
 
                 if is_save_onnx and not start_collect_onnx:
-                    if preds.shape[0] >= 7:
+                    if preds.shape[0] >= 1:
                         start_collect_onnx = True
                         batch_data_for_onnx = copy.deepcopy(batch_data)
                         print("start to collect onnx inputs and outputs...")
@@ -458,14 +477,34 @@ def test(
                 # h = h // 2
                 # cv2.imwrite("/root/data/debug_test/" + str(previous_prediction_dict['ts']) + ".png", numpy.vstack([previous_prediction_dict['disp'][:h, :w], stereo_visz[0]]))
                 # # -------------- debug code --------------
-
-                previous_preds = preds
             else:
                 prediction_dict = None
                 logger.error("batch {} has no valid detections.".format(indexBatch))
         else:
             prediction_dict = None
             logger.error("batch {} has no valid detections.".format(indexBatch))
+
+        # update evals_input
+        if batch_data.get('gt_labels', None) is not None:
+            if prediction_dict is None:
+                evals_input["FN"].append(
+                    batch_data['gt_labels']['objdet'][0]['bboxes'].shape[0]
+                )
+                evals_input["TP"].append(0)
+                evals_input["FP"].append(0)
+                evals_input["GT"].append(batch_data['gt_labels']['objdet'][0]['bboxes'].shape[0])
+            else:
+                TP, FP, FN = evaluate_results_with_gt(
+                    prediction_dict['objdet'][0][:, :8],
+                    prediction_dict['objdet'][0][:, 8],
+                    batch_data['gt_labels']['objdet'][0]['bboxes'][:, [0, 1, 2, 3, 4, 1, 5, 3]],
+                    batch_data['gt_labels']['objdet'][0]['labels'],
+                    iou_threshold,
+                )
+                evals_input["TP"].append(TP)
+                evals_input["FP"].append(FP)
+                evals_input["FN"].append(FN)
+                evals_input["GT"].append(batch_data['gt_labels']['objdet'][0]['bboxes'].shape[0])
 
         # if no detection, save an empty stereo image
         if prediction_dict is None:
@@ -491,7 +530,148 @@ def test(
         pbar.update(1)
     print("average infer time: {} sec.".format(sum(infer_time) / len(infer_time)))
     print("mean detections: {}".format(numpy.array(list(num_final_detections.values())).mean()))
+    if evals_input["GT"]:
+        # dump eval_results if gt available
+        with open(os.path.join(save_root, f"{sequence_name}_eval_counts.pkl"), "wb") as f:
+            pickle.dump(evals_input, f)
+# import os
+# import pickle
+# with open(os.path.join('/root/code/docker_pytorch_trainnn/experiments/traffic_signs/', "seq0_eval_counts.pkl"), "rb") as f:
+#     seq0_evals_input = pickle.load(f)
+# with open(os.path.join('/root/code/docker_pytorch_trainnn/experiments/traffic_signs/', "seq1_eval_counts.pkl"), "rb") as f:
+#     seq1_evals_input = pickle.load(f)
+# seq0_evals_input
+# seq0_evals_input.keys()
+# TPs = seq0_evals_input['TP'] + seq1_evals_input['TP']
+# FPs = seq0_evals_input['FP'] + seq1_evals_input['FP']
+# FNs = seq0_evals_input['FN'] + seq1_evals_input['FN']
+# TTP = sum(TPs)
+# TFP = sum(FPs)
+# TFN = sum(FNs)
+# TTP
+# TFP
+# TFN
+# precision = TTP / (TTP + TFP)
+# recall = TTP / (TTP + TFN)
+
     with open(os.path.join(save_root, f"{sequence_name}_num_final_detections.pkl"), "wb") as f:
         pickle.dump(num_final_detections, f)
     pbar.close()
     return
+
+
+def evaluate_mAP(
+    models,
+    data_loader,
+    sequence_name,
+    save_root,
+    is_save_onnx = False
+):
+    for model in models.values():
+        model.module.eval()
+
+    pbar = tqdm(total=len(data_loader))
+    data_iter = iter(data_loader)
+    prediction_dict = None
+    start_collect_onnx = False  # start collecting when enough detections emerged.
+    batch_data_for_onnx = None
+
+    max_detection_threshold = 100  # from torchmetrics
+    iou_threshold = 0.1  # initial iou threshold
+
+    pred_bboxes = {
+        "left": [],
+        "update": [],
+        "stereo": [],
+    }
+    pred_scores = copy.deepcopy(pred_bboxes)
+    pred_labels = copy.deepcopy(pred_bboxes)
+    target_bboxes = copy.deepcopy(pred_bboxes)
+    target_labels = copy.deepcopy(pred_bboxes)
+    for indexBatch in range(len(data_loader.dataset)):
+        batch_data = batch_to_cuda(next(data_iter))
+        if not batch_data['event'] or batch_data['event'].get('left') is None:
+            pbar.update(1)
+            logger.warning("batch {} has no event data.".format(indexBatch))
+            continue
+        
+        if is_save_onnx and start_collect_onnx and batch_data_for_onnx is not None:
+            batch_data = batch_data_for_onnx
+        
+        starttime = time.time()
+        # ---------- concentration net ----------
+        start_subtime = time.time()
+        left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
+        print("concentration_net costs: {} sec.".format(time.time() - start_subtime))
+        right_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["right"])
+
+        imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
+        batch_img_metas = {"h": imageHeight, "w": imageWidth}
+        num_classes = models["objdet_head"].module.config["num_classes"]
+
+        # ---------- disp pred net ----------
+        start_subtime = time.time()
+        pred_disparity_pyramid = models["disp_head"].module.predict(left_event_sharp, right_event_sharp)
+        print("disp_head costs: {} sec.".format(time.time() - start_subtime))
+
+        # ---------- objdet net ----------
+        start_subtime = time.time()
+        left_detections = models["objdet_head"].module.predict(batch_data["event"]["left"])
+        print("objdet_head costs: {} sec.".format(time.time() - start_subtime))
+
+        left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
+        left_bboxesClsKeypts_nmsed_topked, nms_topk_mask = non_max_suppression(
+            left_detections_multilevels_detachcopy,
+            conf_thres=0.0,  # for evaluation, do not filter with confidence here.
+            iou_thres=iou_threshold,
+            labels=[],
+            nc=models["objdet_head"].module.config["num_classes"],
+            multi_label=False,
+            agnostic=False,
+            max_det=max_detection_threshold,
+            end2end=False,
+        )
+        pred_bboxes['left'].append(
+            left_bboxesClsKeypts_nmsed_topked[0][:, :4]
+        )
+        pred_scores['left'].append(
+            torch.max(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)[0]
+        )
+        left_labels = torch.argmax(left_bboxesClsKeypts_nmsed_topked[0][:, 4:(4 + num_classes)], dim=-1)
+        pred_labels['left'].append(
+            left_labels
+        )
+        target_bboxes['left'].append(
+            batch_data['gt_labels']['objdet'][0]['bboxes'][:, :4]
+        )
+        target_labels['left'].append(
+            batch_data['gt_labels']['objdet'][0]['labels'].to(dtype=torch.int64)
+        )
+
+    preds = [
+        dict(
+        boxes=bboxes,
+        scores=scores,
+        labels=labels,
+        ) for bboxes, scores, labels in zip(pred_bboxes['left'], pred_scores['left'], pred_labels['left'])
+    ]
+    target = [
+        dict(
+        boxes=bboxes,
+        labels=labels,
+        ) for bboxes, labels in zip(target_bboxes['left'], target_labels['left'])
+    ]
+    metric = MeanAveragePrecision(iou_type="bbox")
+    metric.update(preds, target)
+    print("left network:")
+    print(metric.compute())
+
+    evals_input = {
+        'pred_bboxes': pred_bboxes['left'],
+        'pred_scores': pred_scores['left'],
+        'pred_labels': pred_labels['left'],
+        'target_bboxes': target_bboxes['left'],
+        'target_labels': target_labels['left'],
+    }
+    with open(os.path.join(save_root, f"{sequence_name}_mAP_inputs.pkl"), "wb") as f:
+        pickle.dump(evals_input, f)
