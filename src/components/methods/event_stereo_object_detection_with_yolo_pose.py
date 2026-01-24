@@ -787,6 +787,20 @@ def valid(
     return log_dict
 
 
+class StereoHeadOnnxExportWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, right_event_voxel: Tensor, left_bboxes: list[Tensor], disp_prior: list[Tensor]):
+        # Explicitly call predict with the inputs
+        return self.model.predict(
+            right_event_voxel,
+            left_bboxes,
+            disp_prior,
+        )
+
+
 @torch.no_grad()
 def test(
     models,
@@ -823,18 +837,22 @@ def test(
         left_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["left"])
         right_event_sharp = models["concentration_net"].module.predict(batch_data["event"]["right"])
         if is_save_onnx:
+            models['concentration_net'].module.forward = models['concentration_net'].module.predict
+            left_right_events = torch.cat([
+                batch_data["event"]["left"],
+                batch_data["event"]["right"],
+            ], dim=0)
             torch.onnx.export(
                 models['concentration_net'].module,
                 (
-                    batch_data["event"]["left"],
-                    batch_data["event"]["right"]
+                    left_right_events
                 ),
                 os.path.join(save_root, "concentration_net.onnx"),
                 export_params=True,
                 opset_version=16,
                 do_constant_folding=True,
-                input_names=["left_img", "right_img"],
-                output_names=["left_preds", "right_preds"]
+                input_names=["x",],
+                output_names=["left_right_sharps"],
             )
 
         imageHeight, imageWidth = batch_data["event"]["left"].shape[-2:]
@@ -875,8 +893,8 @@ def test(
                 export_params=True,
                 opset_version=16,
                 do_constant_folding=True,
-                input_names=["left_event_voxel", "right_event_voxel"],
-                output_names=["preds0", "preds100", "preds101", "preds102", "preds11", "artifacts00", "artifacts01", "artifacts02"]
+                input_names=["left_event_voxel"],
+                output_names=["preds0", "preds100", "preds101", "preds102", "preds11"],
             )
 
         left_detections_multilevels_detachcopy = DetachCopyNested(left_detections)
@@ -902,30 +920,36 @@ def test(
                 batch_refined_right_bboxes,
                 batch_refined_right_scores,
                 batch_predicted_right_keypts,
-                rpn_cls_scores,
-                rpn_bbox_preds,
-                batch_hypotheses,
             ) = models["stereo_detection_head"].module.predict(
                 batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
-                batch_img_metas
             )
             if is_save_onnx:
-                torch.onnx.export(
-                    models['stereo_detection_head'].module,
+                torch.onnx.log_graph_at_error = True
+                wrapped_model = StereoHeadOnnxExportWrapper(models['stereo_detection_head'].module)
+                traced_model = torch.jit.trace(
+                    wrapped_model,
                     (
                         batch_data["event"]["right"],
                         left_bboxes_nmsed_topked,
                         pred_disparity_pyramid[-1],
-                        batch_img_metas,
+                    )
+                )
+                import IPython; import inspect; print('baodebug: file ({}) -- func ({})'.format(__file__, inspect.stack()[0].function)); IPython.embed()
+                torch.onnx.export(
+                    wrapped_model,
+                    (
+                        batch_data["event"]["right"],
+                        left_bboxes_nmsed_topked,
+                        pred_disparity_pyramid[-1],
                     ),
                     os.path.join(save_root, "stereo_detection_head.onnx"),
                     export_params=True,
                     opset_version=16,
                     do_constant_folding=True,
-                    input_names=["right_feat", "left_bboxes", "disp_prior", "batch_img_metas"],
-                    output_names=["batch_sbboxes_priors", "batch_refined_right_bboxes", "batch_refined_right_scores", "batch_predicted_right_keypts"]
+                    input_names=["right_event_voxel", "left_bboxes", "disp_prior",],
+                    output_names=["batch_sbboxes_priors", "batch_corresponding_leftdet_ids", "batch_refined_right_bboxes", "batch_refined_right_scores", "batch_predicted_right_keypts",]
                 )
 
             assert left_event_sharp.shape[0] == 1  # batch size should be 1
