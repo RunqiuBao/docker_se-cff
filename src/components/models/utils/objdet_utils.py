@@ -16,6 +16,38 @@ from mmdet.registry import TASK_UTILS
 from mmcv.ops import batched_nms
 
 
+def evaluate_results_with_gt(
+    pred_bboxes: torch.Tensor,
+    pred_labels: torch.Tensor,
+    gt_bboxes: torch.Tensor,
+    gt_labels: torch.Tensor,
+    iou_threshold: float,
+):
+    """
+    Args:
+        pred_bboxes: (N, 8) tensor, [x1, y1, x2, y2, x1_r, y1_r, x2_r, y2_r]
+        pred_labels: (N,) tensor
+        gt_bboxes: (M, 8) tensor, [x1, y1, x2, y2, x1_r, y1_r, x2_r, y2_r]
+        gt_labels: (M,) tensor
+    """
+    ious = compute_ious_pertarget(pred_bboxes[:, :4], gt_bboxes[:, :4])   # (N, M)
+    ious_r = compute_ious_pertarget(pred_bboxes[:, 4:], gt_bboxes[:, 4:])   # (N, M)
+    ious_min = torch.min(ious, ious_r)
+
+    matched_gt = set()
+    TP, FP, FN = 0, 0, 0
+    for idxP in range(pred_bboxes.shape[0]):
+        iou_per_pred = ious_min[idxP]   # (M,)
+        max_iou, max_iou_idx = torch.max(iou_per_pred, dim=0)
+        if max_iou >= iou_threshold and pred_labels[idxP] == gt_labels[max_iou_idx] and (max_iou_idx.item() not in matched_gt):
+            TP += 1
+            matched_gt.add(max_iou_idx.item())
+        else:
+            FP += 1
+    FN = gt_bboxes.shape[0] - len(matched_gt)
+    return TP, FP, FN
+
+
 def compute_ious_pertarget(bboxes_pred: torch.Tensor, bboxes_ref: torch.Tensor) -> torch.Tensor:
     """
     Args:
