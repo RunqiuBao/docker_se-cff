@@ -306,7 +306,8 @@ def train(
             # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
             if tensorBoardLogger is not None and left_selected_boxes is not None:
                 leftimage_visz = RenderImageWithBboxesAndKeypts(
-                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    # left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    batch_data["event"]["left"][0, 1].detach().squeeze().cpu().numpy(),
                     {
                         "bboxes": left_selected_boxes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
@@ -316,7 +317,8 @@ def train(
                 )
                 tensorBoardLogger.add_image("(train) left sharp with bboxes", leftimage_visz)
                 leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    # left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    batch_data["event"]["left"][0, 1].detach().squeeze().cpu().numpy(),
                     {
                         "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy(),
                         "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
@@ -380,7 +382,8 @@ def train(
                                 right_bboxes_one = artifacts[0][indexInBatch].detach()
                                 right_bboxes_one = right_bboxes_one[..., [4, 5, 6, 7]]
                                 rightimage_visz = RenderImageWithBboxesAndKeypts(
-                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    # right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    batch_data["event"]["right"][indexInBatch, 1].detach().squeeze().cpu().numpy(),
                                     {
                                         "bboxes": right_bboxes_one.detach().cpu().numpy(),
                                         "classes": -1 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
@@ -394,7 +397,8 @@ def train(
                                 right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
                                 right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
                                 rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    # right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    batch_data["event"]["right"][indexInBatch, 1].detach().squeeze().cpu().numpy(),
                                     {
                                         "bboxes": right_bboxes,
                                         "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
@@ -608,7 +612,8 @@ def valid(
             # @@@@@@@@@@@@@@@@@@@@ VISUALIZATION @@@@@@@@@@@@@@@@@@@@
             if tensorBoardLogger is not None and left_selected_boxes is not None:
                 leftimage_visz = RenderImageWithBboxesAndKeypts(
-                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    # left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    batch_data["event"]["left"][0, 1].detach().squeeze().cpu().numpy(),
                     {
                         "bboxes": left_selected_boxes[left_selected_batchidx == 0].detach().cpu().numpy(),
                         "classes": left_selected_classes[left_selected_batchidx == 0].detach().cpu().numpy(),
@@ -618,7 +623,8 @@ def valid(
                 )
                 tensorBoardLogger.add_image("(valid) left sharp with bboxes", leftimage_visz)
                 leftimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                    left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    # left_event_sharp[0].detach().squeeze().cpu().numpy(),
+                    batch_data["event"]["left"][0, 1].detach().squeeze().cpu().numpy(),
                     {
                         "bboxes": batch_data["gt_labels"]["objdet"][0]["bboxes"].detach().cpu().numpy(),
                         "classes": batch_data["gt_labels"]["objdet"][0]["labels"].detach().cpu().numpy(),
@@ -685,7 +691,8 @@ def valid(
                                 right_bboxes_one = artifacts[0][indexInBatch].detach()
                                 right_bboxes_one = right_bboxes_one[..., [4, 5, 6, 7]] 
                                 rightimage_visz = RenderImageWithBboxesAndKeypts(
-                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    # right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    batch_data["event"]["right"][indexInBatch, 1].detach().squeeze().cpu().numpy(),
                                     {
                                         "bboxes": right_bboxes_one.detach().cpu().numpy(),
                                         "classes": -1 * torch.ones_like(right_bboxes_one[:, 0]).cpu().numpy(),
@@ -699,7 +706,8 @@ def valid(
                                 right_bboxes = batch_data["gt_labels"]["objdet"][indexInBatch]["bboxes"].detach().cpu().numpy()
                                 right_bboxes[:, [0, 2]] = right_bboxes[:, [4, 5]]
                                 rightimage_gt_visz = RenderImageWithBboxesAndKeypts(
-                                    right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    # right_event_sharp[indexInBatch].detach().squeeze().cpu().numpy(),
+                                    batch_data["event"]["right"][indexInBatch, 1].detach().squeeze().cpu().numpy(),
                                     {
                                         "bboxes": right_bboxes,
                                         "classes": batch_data["gt_labels"]["objdet"][indexInBatch]["labels"].detach().cpu().numpy(),
