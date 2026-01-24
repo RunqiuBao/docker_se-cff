@@ -84,24 +84,6 @@ def DecodeKeypts(
     return decoded_keypts
 
 
-class OnnxStyleNetwork(nn.Module):
-    def __init__(self, model):
-        super(OnnxStyleNetwork, self).__init__()
-        self.model = model
-
-    def forward(self, left_event: Tensor, right_event: Tensor, h_cam: Tensor, w_cam: Tensor):
-        h_tensor, w_tensor = left_event.shape[-2:]
-        batch_img_metas = {"h_cam": h_cam.item(), "w_cam": w_cam.item(), "h": h_tensor, "w": w_tensor}
-        preds, losses = self.model(left_event, right_event, None, batch_img_metas)
-        output_concentrate_left = preds["concentrate"]["left"]
-        output_concentrate_right = preds["concentrate"]["right"]
-        output_disparity = preds["disparity"][0]
-        output_objdet = preds["objdet"][0]  # Note: should only use batch_size = 1 when doing inference.
-        output_facets = preds["objdet_facets"][0]
-        output_facets_right = preds["objdet_facets_right"][0]
-        return output_objdet, output_facets, output_facets_right, output_concentrate_left, output_concentrate_right, output_disparity
-
-
 @dataclass
 class RPNHypothesesGroup:
     bboxes: Optional[Tensor] = None
@@ -290,14 +272,16 @@ class RPNWithTargetsHead(RPNBaseClass):
         listfeat_rpn_cls_score,
         listfeat_rpn_bbox_pred,
         batch_targets,
-        batch_img_metas,
+        imageHeight,
+        imageWidth,
         min_iou_with_target,
     ):
         list_hypotheses = self._allocate_hypotheses_to_targets(
             listfeat_rpn_cls_score,
             listfeat_rpn_bbox_pred,
             batch_targets,
-            batch_img_metas,
+            imageHeight,
+            imageWidth,
             min_iou_with_target=min_iou_with_target,
         )
         return list_hypotheses
@@ -307,7 +291,8 @@ class RPNWithTargetsHead(RPNBaseClass):
         listfeat_cls_score: list[Tensor],
         listfeat_bbox_pred: list[Tensor],
         targets: List[Tensor],
-        batch_img_metas: Dict,
+        imageHeight,
+        imageWidth,
         nms_pred: int = 2000,
         max_hypotheses_per_img: int = 1000,
         min_iou_with_target: float = 0.0,
@@ -318,7 +303,6 @@ class RPNWithTargetsHead(RPNBaseClass):
         """
         num_images_in_batch = len(targets)
         num_levels = len(listfeat_cls_score)
-        imageHeight, imageWidth = batch_img_metas["h"], batch_img_metas["w"]
 
         featmap_sizes = [listfeat_cls_score[i].shape[-2:] for i in range(num_levels)]
         mlvl_priors = self.prior_generator.grid_priors(
@@ -885,7 +869,6 @@ class StereoDetectionHead(nn.Module):
         right_event_voxel: Tensor,
         left_bboxes: List[Tensor],
         disp_prior: Tensor,
-        batch_img_metas: Dict,
         batch_hypotheses: Optional[List[RPNHypothesesGroup]] = None
     ) -> Tuple[List[Optional[Tensor]], List[Optional[Tensor]], List[Optional[Tensor]]]:
         """
@@ -904,9 +887,18 @@ class StereoDetectionHead(nn.Module):
         right_feats = self.backbone(right_event_voxel)
         right_feats = self.neck(right_feats)
         if batch_hypotheses is None:
-            warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=batch_img_metas['h'], imageWidth=batch_img_metas['w'])
+            device = right_event_voxel.device
+            imageHeight, imageWidth = right_event_voxel.shape[-2:]
+            warped_left_bboxes = self.warp_bboxes(left_bboxes, disp_prior, imageHeight=imageHeight, imageWidth=imageWidth)
             rpn_cls_scores, rpn_bbox_preds = self.rpn_head.predict(right_feats)
-            batch_hypotheses = self.rpn_head.allocate_hypotheses_to_targets(rpn_cls_scores, rpn_bbox_preds, warped_left_bboxes, batch_img_metas, self.rpn_head.config["rpn_min_iou_with_target"])
+            batch_hypotheses = self.rpn_head.allocate_hypotheses_to_targets(
+                rpn_cls_scores,
+                rpn_bbox_preds,
+                warped_left_bboxes,
+                imageHeight,
+                imageWidth,
+                self.rpn_head.config["rpn_min_iou_with_target"]
+            )
         else:
             # batch_hypotheses is given. Probably during ONNX export.
             rpn_cls_scores, rpn_bbox_preds = None, None
@@ -1437,7 +1429,7 @@ class StereoDetectionHead(nn.Module):
         
         Returns:
             mask_nonbackground: (num_detections,) shape.
-            refined_sbboxes: (<num_detections>, 6) shape, <num_detections> == mask_nonbackground.sum().
+            refined_sbboxes: (<num_detections>, 8) shape, <num_detections> == mask_nonbackground.sum().
             refined_right_scores_pred: (<num_detections>, 1) shape.
             right_keypts_pred: (<num_detections>, num_keypts*3) shape.
         """
