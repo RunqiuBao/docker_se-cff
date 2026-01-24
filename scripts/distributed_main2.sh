@@ -2,15 +2,15 @@
 
 set -x
 
-cuda_idx='0,1,2,3'
+cuda_idx='1'
 
-config_path=/root/code/docker_pytorch_trainnn/configs/config_trafficsigns.yaml
-data_root=/root/data/traffic_signs/objdet/
-save_root=/root/code/docker_pytorch_trainnn/experiments/traffic_signs/
+config_path=/root/code/docker_pytorch_trainnn/configs/config_binpicking.yaml
+data_root=/root/data/events_driven_control/
+save_root=/root/code/docker_pytorch_trainnn/experiments/binpicking2/
 num_workers=4
-NUM_PROC=4
+NUM_PROC=1
 
-CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --save_term 100 --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} --resume_cpt /root/code/docker_pytorch_trainnn/weights_objdet_trafficsigns/best2.pth --only_resume_weight #--only_test  # --not_resume_weight_from stereo_detection_head # --only_test # --only_test # --is_save_onnx  --only_resume_weight_from concentration_net
+CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --save_term 100 --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} #--resume_cpt /root/code/docker_pytorch_trainnn/weights_disp_unitree/best2.pth --only_resume_weight #--only_test #--do_evaluate_mAP #--is_save_onnx # --not_resume_weight_from stereo_detection_head # --only_test # --only_test # --is_save_onnx  --only_resume_weight_from concentration_net
 
 # # generate onnx model
 # CUDA_VISIBLE_DEVICES=${cuda_idx} python3 -m torch.distributed.launch --nproc_per_node=$NUM_PROC --master_port=$RANDOM ../src/distributed_main.py --config_path ${config_path} --data_root ${data_root} --save_root ${save_root} --num_workers ${num_workers} --resume_cpt /root/code/docker_pytorch_trainnn/weights_keypts_unitree_usevoxel/best.pth --only_resume_weight --only_test --is_save_onnx
