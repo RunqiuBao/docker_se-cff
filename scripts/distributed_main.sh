@@ -4,7 +4,7 @@ set -x
 
 cuda_idx='0,1,2,3'
 
-config_path=/root/code/docker_pytorch_trainnn/configs/config_binpicking.yaml
+config_path=/root/code/docker_pytorch_trainnn/configs/config_binpicking_detAndTrack.yaml
 data_root=/root/data/events_driven_control/
 save_root=/root/code/docker_pytorch_trainnn/experiments/binpicking/
 num_workers=4
