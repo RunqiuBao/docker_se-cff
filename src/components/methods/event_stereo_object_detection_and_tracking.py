@@ -170,11 +170,13 @@ def test(
                 batch_track_refined_bboxes,
                 batch_track_refined_scores,
                 batch_track_predicted_keypts,
+                rpn_cls_scores,
+                rpn_bbox_preds,
+                batch_hypotheses,
             ) = models["local_tracking_head"].module.predict(
                 batch_data["event"]["left"],
                 [previous_detections[..., :4]],
                 torch.zeros((1, imageHeight, imageWidth), device=device, dtype=dtype),
-                batch_img_metas,
             )
             print("local_tracking_head costs: {} sec.".format(time.time() - start_subtime))
 
@@ -276,7 +278,6 @@ def test(
                 batch_data["event"]["right"],
                 left_bboxes_nmsed_topked,
                 pred_disparity_pyramid[-1],
-                batch_img_metas,
             )
             print("stereo_detection_head costs: {} sec.".format(time.time() - start_subtime))
             if is_save_onnx and start_collect_onnx:

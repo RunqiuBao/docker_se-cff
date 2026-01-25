@@ -973,16 +973,15 @@ class StereoDetectionHead(nn.Module):
         """
         Note that gt bboxes in labels should align with left_bboxes and have same number (left detections are from detr).
         """
-        batch_img_metas = {"h": disp_prior.shape[-2], "w": disp_prior.shape[-1]}
         if labels is not None:
             left_bboxes = self.mask_lefttargets_withnogt(left_bboxes, labels["left_fg_mask"], labels["left_nms_topk_mask"])
 
         if torch.onnx.is_in_onnx_export():
             assert batch_hypotheses_bboxes is not None and batch_hypotheses_target_ids is not None, "need given batch_hypotheses during onnx export."
             batch_hypotheses = [{"bboxes": batch_hypotheses_bboxes[indexInBatch], "target_ids": batch_hypotheses_target_ids[indexInBatch]} for indexInBatch in range(len(batch_hypotheses_bboxes))]
-            preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas, batch_hypotheses)
+            preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_hypotheses)
         else:
-            preds = self.predict(right_event_voxel, left_bboxes, disp_prior, batch_img_metas)
+            preds = self.predict(right_event_voxel, left_bboxes, disp_prior)
 
         losses = None
         artifacts = None
