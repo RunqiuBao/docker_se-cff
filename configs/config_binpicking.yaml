@@ -1,4 +1,4 @@
-TOTAL_EPOCH: 300
+TOTAL_EPOCH: 450
 METHOD: event_stereo_object_detection_with_yolo_pose
 DATASET:
   TRAIN:
@@ -18,7 +18,7 @@ DATASET:
       randomcrop: False
       num_repeat: 1
       isLoadCOCOFormat: False
-      max_num_keypoints: 4
+      max_num_keypoints: 2
       config_name: binpicking
       seqsToUse: [0]
       event_cfg:
@@ -44,7 +44,7 @@ DATASET:
       randomcrop: False
       num_repeat: 1
       isLoadCOCOFormat: False
-      max_num_keypoints: 4
+      max_num_keypoints: 2
       config_name: binpicking
       seqsToUse: [0]
       event_cfg:
@@ -173,7 +173,7 @@ MODEL:
       act_cfg:
         type: ReLU
       # right bbox regression
-      right_roi_feat_size: 28
+      right_roi_feat_size: 7
       r_iou_bkg: 0.3
       r_iou_threshold: 0.8
       rpn_min_iou_with_target: 0.5
