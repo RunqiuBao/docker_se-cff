@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class CostVolume(nn.Module):
@@ -43,15 +44,34 @@ class CostVolume(nn.Module):
                     )
 
         elif self.feature_similarity == "correlation":
-            cost_volume = left_feature.new_zeros(b, self.max_disp, h, w)
+            # cost_volume = left_feature.new_zeros(b, self.max_disp, h, w)
 
+            # for i in range(self.max_disp):
+            #     if i > 0:
+            #         cost_volume[:, i, :, i:] = (
+            #             left_feature[:, :, :, i:] * right_feature[:, :, :, :-i]
+            #         ).mean(dim=1)
+            #     else:
+            #         cost_volume[:, i, :, :] = (left_feature * right_feature).mean(dim=1)
+
+            # Need these to solve error during tensorrt exporting. No in-place op. 
+            # 1. Create a list to hold the result for each disparity level
+            disparity_slices = []
             for i in range(self.max_disp):
                 if i > 0:
-                    cost_volume[:, i, :, i:] = (
-                        left_feature[:, :, :, i:] * right_feature[:, :, :, :-i]
-                    ).mean(dim=1)
+                    # Calculation: (B, C, H, W-i) -> mean -> (B, H, W-i)
+                    term = (left_feature[:, :, :, i:] * right_feature[:, :, :, :-i]).mean(dim=1)
+                    
+                    # Pad the missing 'i' pixels on the LEFT to get back to width W
+                    # pad args are (left, right, top, bottom)
+                    slice_i = F.pad(term, (i, 0, 0, 0), "constant", 0)
                 else:
-                    cost_volume[:, i, :, :] = (left_feature * right_feature).mean(dim=1)
+                    # i=0 case: Full width, no padding needed
+                    slice_i = (left_feature * right_feature).mean(dim=1)
+                disparity_slices.append(slice_i)
+            # 2. Stack them all at once into shape (B, max_disp, H, W)
+            # This inherits the device automatically from the inputs
+            cost_volume = torch.stack(disparity_slices, dim=1)
         elif self.feature_similarity == "correlation2":
             cost_volume = left_feature.new_zeros(b, self.max_disp + 1, h, w)
             cost_volume[:, 0, :, :] = (left_feature * 1).mean(dim=1)
