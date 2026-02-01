@@ -206,7 +206,8 @@ class DLManager:
                 data_loader=sequence_dataloader,
                 sequence_name=sequence_name,  # Note: for saving debug images
                 save_root=self.args.save_root,
-                is_save_onnx=self.args.is_save_onnx
+                is_save_onnx=self.args.is_save_onnx,
+                is_save_trt=self.args.is_save_trt,
             )
 
     # def save(self, name):

@@ -25,6 +25,7 @@ parser.add_argument("--only_resume_weight", action='store_true', help="whether o
 parser.add_argument("--only_resume_weight_from", type=str, default=None, help="only resume network weights for this subnet.")
 parser.add_argument("--not_resume_weight_from", type=str, default=None, help="not resume network weights for this subnet.")
 parser.add_argument("--is_save_onnx", action='store_true', help="simply save the model to a onnx model at 'data_root'")
+parser.add_argument("--is_save_trt", action='store_true', help="simply save the model to a tensorrt model at 'data_root'")
 parser.add_argument(
     "--local-rank", type=int, default=0
 )  # Note: deprecated. But required by torch.distributed.launch
@@ -33,7 +34,7 @@ parser.add_argument("--do_evaluate_mAP", action="store_true", help="evaluate mAP
 args = parser.parse_args()
 assert int(os.environ["WORLD_SIZE"]) >= 1
 
-if args.is_save_onnx:
+if args.is_save_onnx or args.is_save_trt:
     args.only_test = True
 
 args.local_rank = int(os.environ["LOCAL_RANK"])
