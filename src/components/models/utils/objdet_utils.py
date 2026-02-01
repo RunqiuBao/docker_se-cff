@@ -6,6 +6,7 @@ from typing import Sequence, Tuple, List, Dict, Union, Optional
 import time
 import torch.profiler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from dataclasses import dataclass
 
 from mmdet.structures.bbox import cat_boxes
 from mmdet.models.task_modules.prior_generators import MlvlPointGenerator
@@ -449,3 +450,336 @@ def EvaluateObjDetPerformance(preds: List[dict], targets: List[dict]):
     metric = MeanAveragePrecision(iou_type="bbox")
     metric.update(preds, targets)
     return metric.compute()
+
+
+
+@dataclass
+class RPNHypothesesGroup:
+    bboxes: Optional[Tensor] = None
+    scores: Optional[Tensor] = None
+    level_ids: Optional[Tensor] = None
+    target_ids: Optional[Tensor] = None
+
+    def __getitem__(self, maskOrIndicesOrString: Tensor) -> Union['RPNHypothesesGroup', dict]:
+        """
+        Args:
+            maskOrIndicesOrString: mask tensor or indices tensor of existing hypotheses.
+
+        Returns:
+            - attr: behave like a dict if key is a string same as an attr variable.
+            - RPNHypothesesGroup with all member variables filtered by mask or indices tensor.
+        """
+        if isinstance(maskOrIndicesOrString, str):
+            # behave like a dict if key is a string
+            return getattr(self, maskOrIndicesOrString)
+        else:
+            return RPNHypothesesGroup(
+                bboxes=self.bboxes[maskOrIndicesOrString],
+                scores=self.scores[maskOrIndicesOrString],
+                level_ids=self.level_ids[maskOrIndicesOrString],
+                target_ids=self.target_ids[maskOrIndicesOrString]
+            )
+
+    def __add__(self, other: 'RPNHypothesesGroup') -> 'RPNHypothesesGroup':
+        return RPNHypothesesGroup(
+            bboxes=torch.cat([self.bboxes, other.bboxes], dim=0) if self.bboxes is not None and other.bboxes is not None else None,
+            scores=torch.cat([self.scores, other.scores], dim=0) if self.scores is not None and other.scores is not None else None,
+            level_ids=torch.cat([self.level_ids, other.level_ids], dim=0) if self.level_ids is not None and other.level_ids is not None else None,
+            target_ids=torch.cat([self.target_ids, other.target_ids], dim=0) if self.target_ids is not None and other.target_ids is not None else None,
+        )
+    
+    def zero(self) -> 'RPNHypothesesGroup':
+        device = self.bboxes.device if self.bboxes is not None else 'cpu'
+        return RPNHypothesesGroup(
+            bboxes=torch.zeros((0, 4), dtype=torch.float32, device=device),
+            scores=torch.zeros((0,), dtype=torch.float32, device=device),
+            level_ids=torch.zeros((0,), dtype=torch.long, device=device),
+            target_ids=torch.zeros((0,), dtype=torch.long, device=device)
+        )
+
+    def numpy(self) -> 'RPNHypothesesGroup':
+        return RPNHypothesesGroup(
+            bboxes=self.bboxes.detach().cpu().numpy() if self.bboxes is not None else None,
+            scores=self.scores.detach().cpu().numpy() if self.scores is not None else None,
+            level_ids=self.level_ids.detach().cpu().numpy() if self.level_ids is not None else None,
+            target_ids=self.target_ids.detach().cpu().numpy() if self.target_ids is not None else None,
+        )
+    
+    def get_dict(self) -> dict:
+        dictData = {
+            "bboxes": self.bboxes,
+            "scores": self.scores,
+            "target_ids": self.target_ids
+        }
+        if self.level_ids is not None:
+            dictData["level_ids"] = self.level_ids
+        return dictData
+
+
+def prune_hypotheses_equally_for_targets(hypotheses: RPNHypothesesGroup, max_hypotheses_per_image: int) -> RPNHypothesesGroup:
+    unique_target_ids = torch.unique(hypotheses.target_ids)
+    max_hypotheses_per_target = max_hypotheses_per_image // unique_target_ids.numel()
+    pruned_hypotheses = []
+    for tid in unique_target_ids:
+        mask = hypotheses.target_ids == tid
+        # sort by scores and keep the top max_hypotheses_per_target
+        sorted_scores, sorted_indices = hypotheses.scores[mask].sort(descending=True)
+        if mask.sum() > max_hypotheses_per_target:
+            top_indices = sorted_indices[:max_hypotheses_per_target]
+            mask = torch.zeros_like(hypotheses.target_ids, dtype=torch.bool)
+            mask[torch.where(hypotheses.target_ids == tid)[0][top_indices]] = True
+            pruned_hypotheses.append(hypotheses[mask])
+        else:
+            pruned_hypotheses.append(hypotheses[mask][sorted_indices])
+    pruned_hypotheses = sum(pruned_hypotheses, hypotheses.zero())
+    return pruned_hypotheses
+
+
+def AllocateHypothesesToTargets(
+    listfeat_cls_score: list[Tensor],
+    listfeat_bbox_pred: list[Tensor],
+    targets: List[Tensor],
+    imageHeight,
+    imageWidth,
+    num_classes,  # number of object types
+    nms_pred: int = 2000,
+    max_hypotheses_per_img: int = 1000,
+    min_iou_with_target: float = 0.0,
+    min_bbox_size: float = 0.,
+    prior_generator = None,
+    bbox_coder = None,
+) -> List[RPNHypothesesGroup]:
+    """
+    Allocate K best hypotheses to each target.
+    """
+    if prior_generator is None:
+        anchors_ratios = [0.5, 1.0, 2.0]
+        prior_generator = TASK_UTILS.build(
+            {
+                'type': 'AnchorGenerator',
+                'scales': [8],
+                'ratios': anchors_ratios,
+                'strides': [4, 8, 16, 32]
+            }
+        )
+    if bbox_coder is None:
+        bbox_coder = TASK_UTILS.build(
+            {
+                'type': 'DeltaXYWHBBoxCoder',
+                'target_means': [0.0, 0.0, 0.0, 0.0],
+                'target_stds': [1.0, 1.0, 1.0, 1.0]
+            }
+        )
+
+    cls_out_channels = num_classes
+    num_images_in_batch = len(targets)
+    num_levels = len(listfeat_cls_score)
+
+    featmap_sizes = [listfeat_cls_score[i].shape[-2:] for i in range(num_levels)]
+    mlvl_priors = prior_generator.grid_priors(
+        featmap_sizes,
+        dtype=listfeat_cls_score[0].dtype,
+        device=listfeat_cls_score[0].device)
+
+    reg_dim = bbox_coder.encode_size
+    batch_results = []
+    for indexInBatch in range(num_images_in_batch):
+        mlvl_bbox_preds = []
+        mlvl_valid_priors = []
+        mlvl_scores = []
+        level_ids = []  # need for nms in separating level
+        cls_score_singleimage = [cls_score[indexInBatch] for cls_score in listfeat_cls_score]
+        bbox_pred_singleimage = [bbox_pred[indexInBatch] for bbox_pred in listfeat_bbox_pred]
+        for indexLevel, (cls_score_onelvl, bbox_pred_onelvl, priors) in enumerate(zip(cls_score_singleimage, bbox_pred_singleimage, mlvl_priors)):
+            bbox_pred_onelvl = bbox_pred_onelvl.permute(1, 2, 0).reshape(-1, reg_dim)
+            cls_score_onelvl = cls_score_onelvl.permute(1, 2, 0).reshape(-1, cls_out_channels)
+            scores = cls_score_onelvl.sigmoid()
+
+            scores = torch.squeeze(scores)
+            if 0 < nms_pred < scores.shape[0]:
+                # sort is faster than topk
+                ranked_scores, rank_inds = scores.sort(descending=True)
+                topk_inds = rank_inds[:nms_pred]
+                scores = ranked_scores[:nms_pred]
+                bbox_pred_onelvl = bbox_pred_onelvl[topk_inds, :]
+                priors = priors[topk_inds]
+
+            mlvl_bbox_preds.append(bbox_pred_onelvl)
+            mlvl_valid_priors.append(priors)
+            mlvl_scores.append(scores)
+
+            # use level id to implement the separate level nms
+            level_ids.append(
+                scores.new_full(
+                    (scores.size(0),),
+                    indexLevel,
+                    dtype=torch.long
+                )
+            )
+        bbox_pred = torch.cat(mlvl_bbox_preds)  # [N, 4]
+        priors = torch.cat(mlvl_valid_priors)  # [N, 4]
+        # restore bboxes to image pixel coordinates
+        bboxes_xyxy = bbox_coder.decode(priors, bbox_pred, max_shape=(imageHeight, imageWidth))
+        num_targets = targets[indexInBatch].shape[0]
+
+        foundNoResults = False
+        if num_targets == 0:
+            foundNoResults = True
+        else:
+            ious = compute_ious_pertarget(bboxes_xyxy, targets[indexInBatch])
+            # remove targets with no ious larger than 0
+            notarget_mask = ious.max(dim=1).values <= min_iou_with_target
+            bboxes_xyxy = bboxes_xyxy[~notarget_mask]
+            mlvl_scores = torch.cat(mlvl_scores)[~notarget_mask]
+            level_ids = torch.cat(level_ids)[~notarget_mask]
+            target_ids = ious.argmax(dim=1)[~notarget_mask]
+            results = RPNHypothesesGroup(bboxes=bboxes_xyxy, scores=mlvl_scores, level_ids=level_ids, target_ids=target_ids)
+
+            # filter small size bboxes
+            w, h = results.bboxes[:, 2] - results.bboxes[:, 0], results.bboxes[:, 3] - results.bboxes[:, 1]
+            valid_mask = (w > min_bbox_size) & (h > min_bbox_size)
+            if not valid_mask.all():
+                results = results[valid_mask]
+
+            # another round of nms to reduce number to max_hypotheses_per_img
+            if results.bboxes.numel() > 0:
+                det_bboxes, keep_idxs = batched_nms(
+                    results.bboxes,
+                    results.scores,
+                    results.level_ids * num_targets + results.target_ids,  # Note: hypotheses of differnet level and different target id will not merge.
+                    {'type': 'nms', 'iou_threshold': 0.7}
+                )
+                results = results[keep_idxs]
+                results.scores = det_bboxes[:, -1]
+                results = prune_hypotheses_equally_for_targets(results, max_hypotheses_per_img)
+                del results.level_ids
+                results.bboxes = results.bboxes.detach().clone()  # in RPN, no need to use prediction results to compute losses.
+                results.scores = results.scores.detach().clone()
+            else:
+                foundNoResults = True
+
+        if foundNoResults:
+            # To avoid some potential error
+            results_ = RPNHypothesesGroup()
+            results_.bboxes = bbox_pred.new_zeros(0)
+            results_.scores = bbox_pred[:, 0].new_zeros(0)
+            results = results_
+        batch_results.append(results)
+    return batch_results
+
+
+def WarpBboxes(
+    left_bboxes: List[Tensor],
+    disp_prior: Tensor,
+    imageHeight: int,
+    imageWidth: int,
+):
+    """
+    Args:
+        left_bboxes: batch of tensor, bboxes in left images.
+        disp_prior: (B, h, w).
+    """
+    warped_bboxes = []
+    left_bboxes = [bboxes.detach().clone() for bboxes in left_bboxes]  # avoid inplace operation
+    for indexInBatch, bboxes_oneimage in enumerate(left_bboxes):
+        xindi = ((bboxes_oneimage[..., 0] + bboxes_oneimage[..., 2]) / 2).to(torch.int).clamp(0, imageWidth - 1).squeeze()
+        yindi = ((bboxes_oneimage[..., 1] + bboxes_oneimage[..., 3]) / 2).to(torch.int).clamp(0, imageHeight - 1).squeeze()
+        bbox_disps = disp_prior[indexInBatch][yindi, xindi]
+        if bbox_disps.dim() == 0:
+            bbox_disps = bbox_disps.unsqueeze(0)
+        bboxes_oneimage[..., [0, 2]] -= bbox_disps.unsqueeze(-1).expand(-1, 2)
+        warped_bboxes.append(bboxes_oneimage)
+    return warped_bboxes
+
+
+def DecodeKeypts(
+    bbox_priors: Tensor,
+    keypts_pred: Tensor,
+    means: Optional[Sequence] = [0.0, 0.0],
+    stds: Optional[Sequence] = [0.1, 0.1]
+) -> Tensor:
+    """
+    Decode keypoints given bbox_priors and keypts_pred (deltas).
+    """
+    deltas = keypts_pred.view(-1, 2)
+
+    means = deltas.new_tensor(means).view(1, -1)
+    stds = deltas.new_tensor(stds).view(1, -1)
+    denorm_deltas = deltas * stds + means
+
+    dxy = denorm_deltas[:, :2]
+    pxy = ((bbox_priors[:, :2] + bbox_priors[:, 2:]) * 0.5)
+    pwh = (bbox_priors[:, 2:] - bbox_priors[:, :2])
+
+    dxy_wh = pwh * dxy
+    decoded_keypts = pxy + dxy_wh
+    return decoded_keypts
+
+
+def ExtractStereoInferenceResults(
+    sbboxes_priors: Tensor,
+    refined_right_bboxes: Tensor,
+    refined_right_scores: Tensor,
+    right_keypts_pred: Tensor,
+    max_num_keypoints: int,
+    bbox_coder=None, 
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Extract inference results from the model's predictions.
+    Args:
+        sbboxes_priors: (num_hypotheses_gtexist, 8) shape, containing the right priors from preivous network.
+        refined_right_bboxes: (num_hypotheses_gtexist, num_classes, 4) shape.
+        refined_right_scores: (num_hypotheses_gtexist, num_classes+1) shape.
+        right_keypts_pred: (num_hypotheses_gtexist, num_classes, num_keypts*3) shape.
+    
+    Returns:
+        mask_nonbackground: (num_detections,) shape.
+        refined_sbboxes: (<num_detections>, 8) shape, <num_detections> == mask_nonbackground.sum().
+        refined_right_scores_pred: (<num_detections>, 1) shape.
+        right_keypts_pred: (<num_detections>, num_keypts*3) shape.
+    """
+    if bbox_coder is None:
+        bbox_coder = TASK_UTILS.build(
+            {
+                'type': 'DeltaXYWHBBoxCoder',
+                'target_means': [0.0, 0.0, 0.0, 0.0],
+                'target_stds': [1.0, 1.0, 1.0, 1.0]
+            }
+        )
+
+    num_hypotheses_gtexist = sbboxes_priors.shape[:2]
+    num_classes = refined_right_bboxes.shape[-2]
+
+    best_scores_of_classes, best_class_labels = torch.max(F.softmax(refined_right_scores, dim=-1), dim=-1)
+    class_labels_pred = best_class_labels
+    mask_nonbackground = class_labels_pred != num_classes
+    if mask_nonbackground.sum() == 0:
+        print("Warning: all detections are classified as bkground, no valid detections.")
+        return mask_nonbackground, None, None, None
+    else:
+        sbboxes_priors_nobkg = sbboxes_priors[mask_nonbackground]
+        refined_sbboxes_nobkg = sbboxes_priors_nobkg.view(-1, 8).clone()
+        refined_right_bboxes_nobkg = refined_right_bboxes[mask_nonbackground]
+        right_keypts_pred_nobkg = right_keypts_pred[mask_nonbackground]
+        class_labels_pred_nobkg = class_labels_pred[mask_nonbackground]
+        # select the highest score as confidence score
+        refined_right_scores_pred = best_scores_of_classes[mask_nonbackground]
+        # select data based on the class label
+        refined_right_bboxes_nobkg = refined_right_bboxes_nobkg[
+            torch.arange(mask_nonbackground.sum()),
+            class_labels_pred_nobkg
+        ]
+        right_priors_nobkg = sbboxes_priors_nobkg[..., 4:]  # (num_hypotheses_nobkg, 4)
+        refined_right_bboxes_nobkg_decoded = bbox_coder.decode(right_priors_nobkg, refined_right_bboxes_nobkg.view(-1, 4))
+        refined_sbboxes_nobkg[:, 4:] = refined_right_bboxes_nobkg_decoded
+        # select best keypoints
+        right_keypts_pred_nobkg = right_keypts_pred_nobkg[
+            torch.arange(mask_nonbackground.sum()),
+            class_labels_pred_nobkg
+        ]
+        for indexKeypt in range(max_num_keypoints):
+            right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)] = DecodeKeypts(
+                right_priors_nobkg,
+                right_keypts_pred_nobkg[:, (3 * indexKeypt):(2 + 3 * indexKeypt)],
+            )
+        return mask_nonbackground, refined_sbboxes_nobkg, refined_right_scores_pred, right_keypts_pred_nobkg.view(mask_nonbackground.sum(), -1, 3)
