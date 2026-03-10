@@ -1,0 +1,228 @@
+TOTAL_EPOCH: &TOTAL_EPOCH 500
+METHOD: mujinextended_detection
+DATASET:
+  TRAIN:
+    NAME: mujinextended
+    PARAMS:
+      split: train
+      include_masks: &SEG_HEAD False
+      original_height: 2048
+      original_width: 2448
+      resolution: 576
+      multi_scale: True
+      expanded_scales: True
+      do_random_resize_via_padding: False
+      patch_size: 16
+      num_windows: 2
+      num_repeat: 1
+  VALID:
+    NAME: mujinextended
+    PARAMS:
+      split: valid
+      include_masks: *SEG_HEAD
+      original_height: 2048
+      original_width: 2448
+      resolution: 576
+      multi_scale: True
+      expanded_scales: True
+      do_random_resize_via_padding: False
+      patch_size: 16
+      num_windows: 2
+      num_repeat: 1
+  TEST:
+    NAME: mujinextended
+    PARAMS:
+      split: test
+      include_masks: *SEG_HEAD
+      original_height: 2048
+      original_width: 2448
+      resolution: 576
+      multi_scale: True
+      expanded_scales: True
+      do_random_resize_via_padding: False
+      patch_size: 16
+      num_windows: 2
+      num_repeat: 1
+DATALOADER:
+  TRAIN:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: True
+      drop_last: False
+  VALID:
+    NAME: get_multi_epochs_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: False
+  TEST:
+    NAME: get_sequence_dataloader
+    PARAMS:
+      batch_size: 1
+      shuffle: False
+      drop_last: False
+MODEL:
+  rfdetr_cfg:
+    DICTKEY: rfdetr
+    CLASSNAME: RFDETR
+    is_freeze: False
+    PARAMS:
+      num_classes: 82 
+      num_queries: 300
+      aux_loss: True
+      group_detr: 13
+      two_stage: True
+      lite_refpoint_refine: True
+      bbox_reparam: True
+      backbone:
+        network_class: Backbone
+        params:
+          encoder: 'dinov2_windowed_small'
+          vit_encoder_num_layers: 12
+          pretrained_encoder: null
+          window_block_indexes: null
+          drop_path: 0
+          out_channels: 256
+          out_feature_indexes: [3, 6, 9, 12]
+          projector_scale: ['P4']
+          use_cls_token: False
+          hidden_dim: 256
+          position_embedding: 'sine'
+          freeze_encoder: False
+          layer_norm: True
+          target_shape: [576, 576]
+          rms_norm: False
+          backbone_lora: False
+          force_no_pretrain: False
+          gradient_checkpointing: False
+          load_dinov2_weights: False
+          patch_size: 16
+          num_windows: 2
+          positional_encoding_size: 36
+      transformer:
+        network_class: Transformer
+        params:
+          d_model: 256
+          sa_nhead: 8
+          ca_nhead: 16
+          num_queries: 300
+          dropout: 0
+          dim_feedforward: 2048
+          num_decoder_layers: 4
+          return_intermediate_dec: True
+          group_detr: 13
+          two_stage: True
+          num_feature_levels: 1
+          dec_n_points: 2
+          lite_refpoint_refine: True
+          decoder_norm_type: 'LN'
+          bbox_reparam: True
+      segmentation_head:
+        network_class: SegmentationHead
+        enabled: *SEG_HEAD
+        params:
+          in_dim: 256
+          num_blocks: 4
+          downsample_ratio: 4
+LOSSES:
+  rfdetr_cfg:
+    type: SetCriterion
+    PARAMS:
+      grad_accum_steps: &GRAD_ACCUM_STEPS 1
+      segmentation_head: *SEG_HEAD
+      set_cost_class: 2
+      set_cost_bbox: 5
+      set_cost_giou: 2
+      focal_alpha: 0.25
+      cls_loss_coef: 1.0
+      bbox_loss_coef: 5
+      giou_loss_coef: 2
+      mask_ce_loss_coef: 5.0
+      mask_dice_loss_coef: 5.0
+      mask_point_sample_ratio: 16
+      aux_loss: True
+      dec_layers: 4
+      two_stage: True
+      sum_group_losses: False
+      focal_alpha: 0.25
+      group_detr: 13
+      use_varifocal_loss: False
+      use_position_supervised_loss: False
+      ia_bce_loss: True
+OPTIMIZER:
+  # one type of optimizer being enabled
+  optimizer0:
+    is_enable: False
+    NAME: AdamW
+    PARAMS:
+      lr: 0.0005
+      weight_decay: 0.0001
+  optimizer1:
+    is_enable: False
+    NETWORK_TYPE: DETR
+    NAME: AdamW
+    PARAMS:
+      params: 
+        - 
+          params: '^(?=.*backbone)(?!.*norm|bn).*$'
+          lr: 0.000001
+        - 
+          params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn)).*$'
+          weight_decay: 0.
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.0001
+  optimizer2:
+    is_enable: True
+    NETWORK_TYPE: RFDETR
+    NAME: AdamW
+    PARAMS:
+      lr: 0.0001
+      weight_decay: 0.0001
+LEARNING_CONFIG:
+  clip_max_norm: 0.1
+  use_amp: True  # Automatic Mixed Precision
+  amp:
+    type: GradScaler
+  use_ema: False # Exponential Moving Average
+  ema:
+    type: 
+    params:
+      decay: 0.993
+      warmups: 100
+SCHEDULER:
+# one type of scheduler being enabled at a time
+  scheduler0:
+    is_enable: False
+    NAME: CosineAnnealingWarmupRestarts
+    PARAMS:
+      cycle_mult: 1.0
+      first_cycle_steps: 100
+      gamma: 1.0
+      lr_ratio: 0.0001
+      warmup_steps: 3
+  scheduler1:
+    is_enable: False
+    NAME: DETR_SCHEDULER
+    PARAMS:
+      lr_scheduler:
+        type: MultiStepLR
+        params:
+          milestones: [1000]
+          gamma: 0.1
+      lr_warmup_scheduler:
+        type: LinearWarmup
+        params:
+          warmup_duration: 2000
+  scheduler2:
+    is_enable: True
+    NAME: RFDetrRestarts
+    PARAMS:
+        grad_accum_steps: *GRAD_ACCUM_STEPS
+        epochs: 100           # Epochs of one cycle
+        total_epochs: *TOTAL_EPOCH     # Total number of epochs for the whole run
+        warmup_epochs: 0.0
+        lr_scheduler_type: 'step'
+        lr_min_factor: 0.0
+        lr_drop_epoch: 90

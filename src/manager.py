@@ -16,7 +16,7 @@ from components import datasets
 from components import methods
 
 from utils.logger import ExpLogger, TimeCheck
-from utils.metrics import SummationMeter, Metric
+from utils.metrics import SummationMeter, Metric, AverageMeter, ValidMetrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -34,11 +34,23 @@ class DLManager:
         if self.cfg is not None:
             self._init_from_cfg(cfg)
 
-        self.current_epoch = 0
-
     def _init_from_cfg(self, cfg):
         assert cfg is not None
         self.cfg = cfg
+
+        # # profiling the network
+        # for key, model_cfg in self.cfg.MODEL.items():
+        #     netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
+        #     parameters = model_cfg.PARAMS
+        #     loss_cfg = self.cfg.LOSSES[key]
+        #     profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
+        #     flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
+        #     if self.args.is_master:
+        #         self.logger.write(
+        #             "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
+        #             % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
+        #         )
+        #     del profile_model
 
         self.models = _prepare_models(
             self.cfg.MODEL,
@@ -46,15 +58,37 @@ class DLManager:
             is_distributed=self.args.is_distributed,
             local_rank=self.args.local_rank if self.args.is_distributed else None,
             logger=self.logger,
+            only_test=self.args.only_test,
+        )
+        self.get_train_loader = getattr(
+            datasets, self.cfg.DATASET.TRAIN.NAME
+        ).get_dataloader
+        self.get_valid_loader = getattr(
+            datasets, self.cfg.DATASET.VALID.NAME
+        ).get_dataloader
+        self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
+        self.train_loader = self.get_train_loader(
+            args=self.args,
+            dataset_cfg=self.cfg.DATASET.TRAIN,
+            dataloader_cfg=self.cfg.DATALOADER.TRAIN,
+            is_distributed=self.args.is_distributed,
+        )
+        self.valid_loader = self.get_valid_loader(
+            args=self.args,
+            dataset_cfg=self.cfg.DATASET.VALID,
+            dataloader_cfg=self.cfg.DATALOADER.VALID,
+            is_distributed=self.args.is_distributed,
         )
 
         self.optimizer = _prepare_optimizer(self.cfg.OPTIMIZER, self.models)
-        self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer)
+        self.scheduler = _prepare_scheduler(self.cfg.SCHEDULER, self.optimizer, len(self.train_loader.dataset), self.cfg.DATALOADER.TRAIN.PARAMS.batch_size, self.args.world_size)
         if "LEARNING_CONFIG" in self.cfg:
             # techniques to boost training performance
             self.scaler = _prepare_scaler(self.cfg.LEARNING_CONFIG)  # for amp training
             self.ema = _prepare_ema(self.cfg.LEARNING_CONFIG, self.models)
 
+        self.smallestValidEPE = sys.float_info.max
+        self.smallestValidEPEEpoch = -1
         if self.args.resume_cpt is not None:
             device = torch.device(f"cuda:{self.args.local_rank}")
             checkpoint = torch.load(self.args.resume_cpt, map_location=device, weights_only=False)
@@ -65,16 +99,18 @@ class DLManager:
             # FIXME: adding 'module.' to each key in model state dict
             for keyModel, model in self.models.items():
                 model_statedict = model.state_dict()
+                if self.args.not_resume_weight_from is not None:
+                    if self.args.not_resume_weight_from in keyModel:
+                        logger.info("Skipping parameters from {} due to not_resume_weight_from".format(keyModel))
+                        continue
                 for key, value in checkpoint["models"][keyModel].items():
                     if self.args.only_resume_weight_from is not None:
                         if self.args.only_resume_weight_from not in key:
                             continue
-                    # if 'keypt1_predictor' in key or 'keypt2_predictor' in key or '_keypt_feature_extraction_net' in key:
-                    #     continue
                     if "module." + key in model_statedict and model_statedict["module." + key].size() == value.size():
                         model_statedict["module." + key] = value
                     else:
-                        print("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
+                        logger.info("Skipping parameter {} due to not previously exist or size mismatch.".format(key))
                 self.models[keyModel].load_state_dict(model_statedict)
             if not self.args.only_resume_weight:
                 for key, optimizer in self.optimizer.items():
@@ -82,81 +118,52 @@ class DLManager:
                 for key, scheduler in self.scheduler.items():
                     self.scheduler[key].load_state_dict(checkpoint["scheduler"][key])
                 self.args.start_epoch = checkpoint["epoch"] + 1
-                self.current_epoch = self.args.start_epoch
-                print("resumed old training states.")  
-
-        self.get_train_loader = getattr(
-            datasets, self.cfg.DATASET.TRAIN.NAME
-        ).get_dataloader
-        self.get_valid_loader = getattr(
-            datasets, self.cfg.DATASET.VALID.NAME
-        ).get_dataloader
-        self.get_test_loader = getattr(datasets, self.cfg.DATASET.TEST.NAME).get_dataloader
+                self.smallestValidEPE = checkpoint["best_value"]
+                self.smallestValidEPEEpoch = checkpoint["best_value_epoch"]
+                logger.info("resumed old training states at epoch {}".format(self.args.start_epoch - 1))
 
         self.method = getattr(methods, self.cfg.METHOD)
 
     def trainAndValid(self):
         if self.args.is_master:
             self._log_before_train()
-        train_loader = self.get_train_loader(
-            args=self.args,
-            dataset_cfg=self.cfg.DATASET.TRAIN,
-            dataloader_cfg=self.cfg.DATALOADER.TRAIN,
-            is_distributed=self.args.is_distributed,
-        )
-        valid_loader = self.get_valid_loader(
-            args=self.args,
-            dataset_cfg=self.cfg.DATASET.VALID,
-            dataloader_cfg=self.cfg.DATALOADER.VALID,
-            is_distributed=self.args.is_distributed,
-        )
-
-        # profiling the network
-        for key, model_cfg in self.cfg.MODEL.items():
-            netWorkClass = getattr(MODELCLASSES, model_cfg.CLASSNAME)
-            parameters = model_cfg.PARAMS
-            loss_cfg = self.cfg.LOSSES[key]
-            profile_model = netWorkClass(parameters, loss_cfg, model_cfg["is_freeze"], logger=self.logger, is_distributed=self.args.is_distributed)
-            # torch.Size([4, 1, 360, 576, 1, 10])
-            flops, numParams = netWorkClass.ComputeCostProfile(profile_model)
-            if self.args.is_master:
-                self.logger.write(
-                    "[Profile] model(%s) computation cost: gFlops %f | numParams %f M"
-                    % (model_cfg.CLASSNAME, float(flops / 10**9), float(numParams / 10**6))
-                )
-            del profile_model
+        train_loader = self.train_loader
+        valid_loader = self.valid_loader
 
         # freeze model gradients if static:
         self.method.freeze_static_components(self.models)
 
         time_checker = TimeCheck(self.cfg.TOTAL_EPOCH)
         time_checker.start()
-        smallestValidEPE = sys.float_info.max
+
         for epoch in range(self.args.start_epoch, self.cfg.TOTAL_EPOCH):
             if self.args.is_distributed:
                 dist.barrier()
                 train_loader.sampler.set_epoch(epoch)
-
+            
             train_log_dict = self.method.train(
                 models=self.models,
                 data_loader=train_loader,
                 optimizer=self.optimizer,
+                tensorBoardLogger=self.logger,
                 scaler=self.scaler,
                 ema=self.ema,
                 clip_max_norm=self.cfg.LEARNING_CONFIG.clip_max_norm if self.scaler is not None else None,
                 is_distributed=self.args.is_distributed,
                 world_size=self.args.world_size,
                 epoch=epoch,
-                tensorBoardLogger=self.logger
             )
 
             for key, scheduler in self.scheduler.items():
-                scheduler.step()
                 if self.args.is_master:
+                    learning_rate_log_dict = {}
+                    learning_rate_log_dict["lr_" + key] = scheduler.get_lr()[0]
                     print(key + "'s lr: {}".format(scheduler.get_lr()))
+                scheduler.step()
             if self.args.is_distributed:
                 train_log_dict = self._gather_log(train_log_dict)
             if self.args.is_master:
+                train_log_dict.update(learning_rate_log_dict)
                 self._log_after_epoch(
                     epoch + 1, time_checker, train_log_dict, "train", isSaveFinal=False
                 )
@@ -164,7 +171,7 @@ class DLManager:
             if self.args.is_distributed:
                 dist.barrier()
                 valid_loader.sampler.set_epoch(epoch)
-            
+
             valid_log_dict = self.method.valid(
                 models={key: one_ema_model.module for key, one_ema_model in self.ema.items()} if self.ema else {key: model.module for key, model in self.models.items()},
                 data_loader=valid_loader,
@@ -182,13 +189,12 @@ class DLManager:
                     time_checker,
                     valid_log_dict,
                     "valid",
-                    isSaveBest=valid_log_dict["Loss"].avg < smallestValidEPE,
+                    isSaveBest=valid_log_dict["BestIndex"].avg < self.smallestValidEPE,
                 )
 
-            if valid_log_dict["Loss"].avg < smallestValidEPE:
-                smallestValidEPE = valid_log_dict["Loss"].avg
-
-            self.current_epoch += 1
+            if valid_log_dict["BestIndex"].avg < self.smallestValidEPE:
+                self.smallestValidEPE = valid_log_dict["BestIndex"].avg
+                self.smallestValidEPEEpoch = epoch
 
     def test(self):
         test_loader = self.get_test_loader(
@@ -196,21 +202,22 @@ class DLManager:
             dataset_cfg=self.cfg.DATASET.TEST,
             dataloader_cfg=self.cfg.DATALOADER.TEST,
         )
-
         self.logger.test()
-
+        
         for sequence_dataloader in test_loader:            
             self.method.test(
                 models={key: model.module for key, model in self.models.items()},
                 data_loader=sequence_dataloader,
                 dataset_name=self.cfg.DATASET.TEST.NAME,
                 save_root=self.args.save_root,
-                is_save_onnx=self.args.is_save_onnx
+                is_save_onnx=self.args.is_save_onnx,
             )
+            if self.args.is_save_onnx:
+                break
 
-    def save(self, name):
-        checkpoint = self._make_checkpoint()
-        self.logger.save_checkpoint(checkpoint, name)
+    # def save(self, name):
+    #     checkpoint = self._make_checkpoint()
+    #     self.logger.save_checkpoint(checkpoint, name)
 
     def load(self, name):
         checkpoint = self.logger.load_checkpoint(name)
@@ -218,29 +225,28 @@ class DLManager:
 
         self.model.module.load_state_dict(checkpoint["model"])
 
-    def _make_checkpoint(self):
+    def _make_checkpoint(self, epoch):
         models_checkpoint = {key: model.module.state_dict() for key, model in self.models.items()}
         optimizers_checkpoint = {key: optimizer.state_dict() for key, optimizer in self.optimizer.items()}
         schedulers_checkpoint = {key: scheduler.state_dict() for key, scheduler in self.scheduler.items()}
         checkpoint = {
-            "epoch": self.current_epoch,
+            "epoch": epoch,
             "args": self.args,
             "cfg": self.cfg,
             "models": models_checkpoint,
             "optimizer": optimizers_checkpoint,
             "scheduler": schedulers_checkpoint,
+            "best_value": self.smallestValidEPE,
+            "best_value_epoch": self.smallestValidEPEEpoch,
         }
 
         return checkpoint
-
     def _gather_log(self, log_dict):
         if log_dict is None:
             return None
 
         for key in log_dict.keys():
-            if isinstance(log_dict[key], SummationMeter) or isinstance(
-                log_dict[key], Metric
-            ):
+            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric) or isinstance(log_dict[key], ValidMetrics):
                 log_dict[key].all_gather(self.args.world_size)
 
         return log_dict
@@ -271,9 +277,7 @@ class DLManager:
         log = "%5s" % part
         for key in log_dict.keys():
             log += " | %s: %s" % (key, str(log_dict[key]))
-            if isinstance(log_dict[key], SummationMeter) or isinstance(
-                log_dict[key], Metric
-            ):
+            if isinstance(log_dict[key], SummationMeter) or isinstance(log_dict[key], Metric) or isinstance(log_dict[key], ValidMetrics):
                 self.logger.add_scalar(
                     "%s/%s" % (part, key), log_dict[key].value, epoch
                 )
@@ -283,7 +287,7 @@ class DLManager:
 
         if isSaveFinal:
             # Make Checkpoint
-            checkpoint = self._make_checkpoint()
+            checkpoint = self._make_checkpoint(epoch)
 
             # Save Checkpoint
             self.logger.save_checkpoint(checkpoint, "final.pth")
@@ -296,7 +300,7 @@ class DLManager:
                 )
 
 
-def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = False, local_rank: Optional[int] = None, logger=None):
+def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = False, local_rank: Optional[int] = None, logger=None, only_test: bool=False):
     models = {}
     for key, model_cfg in models_cfg.items():
         classname = model_cfg.CLASSNAME
@@ -304,10 +308,18 @@ def _prepare_models(models_cfg: dict, losses_cfg: dict, is_distributed: bool = F
         loss_cfg = losses_cfg[key]
 
         model = getattr(MODELCLASSES, classname)(parameters, loss_cfg, model_cfg["is_freeze"], logger=logger, is_distributed=is_distributed)
+        singleGPU = torch.distributed.get_world_size() > 1
+        if is_distributed and not only_test and singleGPU:
+            # Note: this causes problem when exporting trt
+            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
         if is_distributed:
-            model = nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
-            model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+            model = nn.parallel.DistributedDataParallel(
+                model.cuda(),
+                device_ids=[local_rank],
+                find_unused_parameters=True,
+                broadcast_buffers=False if singleGPU else True,
+            )
         else:
             model = nn.DataParallel(model).cuda()
         
@@ -327,28 +339,28 @@ def _prepare_optimizer(optimizers_cfg: dict, models):
                 params = get_optim_params(optimizer_cfg.PARAMS, model)
                 module_kwargs = {
                     "params": params,
-                    "lr": optimizer_cfg.PARAMS.lr,
-                    "betas": optimizer_cfg.PARAMS.betas,
-                    "weight_decay": optimizer_cfg.PARAMS.weight_decay
                 }
+                optional_keys = ["lr", "betas", "weight_decay"]
+                for key in optional_keys:
+                    if hasattr(optimizer_cfg.PARAMS, key):
+                        module_kwargs[key] = getattr(optimizer_cfg.PARAMS, key)
                 optimizer = getattr(optim, name)(**module_kwargs)
                 dict_optimizer[key] = optimizer
             else:
-                # keypt prediction network
                 parameters = optimizer_cfg.PARAMS
                 learning_rate = parameters.lr
 
                 if hasattr(model.module, "get_params_group"):
                     params_group = model.module.get_params_group(learning_rate)
                 else:
-                    params_group = get_optim_params(optimizer_cfg.PARAMS, model)
-                optimizer = getattr(optim, name)(params_group, **parameters.PARAMS)
+                    params_group = get_optim_params(parameters, model)
+                optimizer = getattr(optim, name)(params_group, **parameters)
                 dict_optimizer[key] = optimizer
         break
     return dict_optimizer
 
 
-def _prepare_scheduler(schedulers_cfg: dict, optimizers):
+def _prepare_scheduler(schedulers_cfg: dict, optimizers: dict, dataset_size: int, batch_size: int, world_size: int):
     for key, scheduler_cfg in schedulers_cfg.items():
         if not scheduler_cfg.is_enable:
             continue
@@ -364,14 +376,14 @@ def _prepare_scheduler(schedulers_cfg: dict, optimizers):
             elif scheduler_cfg.get("NAME", None) == "CosineAnnealingWarmupRestarts":
                 name = scheduler_cfg.NAME
                 parameters = scheduler_cfg.PARAMS
-
-                if name == "CosineAnnealingWarmupRestarts":
-                    from utils.scheduler import CosineAnnealingWarmupRestarts
-
-                    scheduler = CosineAnnealingWarmupRestarts(optimizer, **parameters)
-                else:
-                    scheduler = getattr(optim.lr_scheduler, name)(optimizer, **parameters)
-
+                from utils.scheduler import CosineAnnealingWarmupRestarts
+                scheduler = CosineAnnealingWarmupRestarts(optimizer, **parameters)
+                dict_scheduler[key] = scheduler
+            elif scheduler_cfg.get("NAME", None) == "RFDetrRestarts":
+                name = scheduler_cfg.NAME
+                parameters = scheduler_cfg.PARAMS
+                from utils.scheduler import RFDetrRestarts
+                scheduler = RFDetrRestarts(optimizer, dataset_size, batch_size, world_size, **parameters)
                 dict_scheduler[key] = scheduler
             else:
                 raise NotImplementedError
@@ -384,7 +396,7 @@ def _prepare_scaler(learning_cfg):
     prepare scaler for automatic mixed precision learning
     """
     if learning_cfg.use_amp:
-        scaler = torch.cuda.amp.grad_scaler.GradScaler()
+        scaler = torch.amp.grad_scaler.GradScaler('cuda', enabled=True)
         return scaler
     else:
         return None
@@ -401,19 +413,6 @@ def _prepare_ema(learning_cfg, models):
         return ema
     else:
         return None
-
-
-class CustomStepLRScheduler(_LRScheduler):
-    def __init__(self, optimizer: Optimizer, milestones: list, factor: float = 0.1, last_epoch: int = -1):
-        self.milestones = milestones
-        self.factor = factor
-        super().__init__(optimizer, last_epoch)
-
-    def get_lr(self):
-        if self.last_epoch in self.milestones:
-            return [base_lr * self.factor for base_lr in self.base_lrs]
-        else:
-            return [group['lr'] for group in self.optimizer.param_groups]
 
 
 def get_optim_params(cfg: dict, model: nn.Module):

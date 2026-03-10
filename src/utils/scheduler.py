@@ -2,7 +2,7 @@
 
 import math
 import torch
-from torch.optim.lr_scheduler import _LRScheduler
+from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 
 
 class CosineAnnealingWarmupRestarts(_LRScheduler):
@@ -128,3 +128,47 @@ class CosineAnnealingWarmupRestarts(_LRScheduler):
         self.last_epoch = math.floor(epoch)
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group["lr"] = lr
+
+
+class RFDetrRestarts(LambdaLR):
+    def __init__(
+        self, 
+        optimizer, 
+        dataset_size, 
+        batch_size, 
+        world_size, 
+        grad_accum_steps, 
+        epochs,           # Epochs of one cycle
+        total_epochs,     # Total number of epochs for the whole run
+        warmup_epochs, 
+        lr_scheduler_type,  # 'step' or 'cosine' 
+        lr_min_factor, 
+        lr_drop_epoch,
+    ):        
+        def lr_lambda(current_epoch: int):
+            # Hard stop if we exceed total_epochs
+            if current_epoch >= total_epochs:
+                return lr_min_factor
+
+            # Reset the 'clock' at the start of every cycle
+            epoch_in_cycle = current_epoch % epochs
+            
+            # --- Original Logic Applied to Cycle ---
+            if epoch_in_cycle < warmup_epochs:
+                # Linear warmup
+                return float(epoch_in_cycle) / float(max(1, warmup_epochs))
+            
+            else:
+                if lr_scheduler_type == 'cosine':
+                    # progress calculated based on steps within the current cycle
+                    progress = float(epoch_in_cycle - warmup_epochs) / float(
+                        max(1, epochs - warmup_epochs)
+                    )
+                    return lr_min_factor + (1 - lr_min_factor) * 0.5 * (1 + math.cos(math.pi * progress))
+                
+                elif lr_scheduler_type == 'step':
+                    # Exact logic: 1.0 until drop_step within cycle, then 0.1
+                    return 1.0 if epoch_in_cycle < lr_drop_epoch else 0.1
+            return 1.0
+
+        super().__init__(optimizer, lr_lambda=lr_lambda)

@@ -39,7 +39,6 @@ class ModelEMA(object):
         for p in self.module.parameters():
             p.requires_grad_(False)
 
-
     def update(self, model: nn.Module):
         # Update EMA parameters
         with torch.no_grad():
@@ -50,7 +49,7 @@ class ModelEMA(object):
                 if v.dtype.is_floating_point:
                     v *= d
                     v += (1 - d) * msd[k].detach()
-            
+
     def to(self, *args, **kwargs):
         self.module = self.module.to(*args, **kwargs)
         return self
