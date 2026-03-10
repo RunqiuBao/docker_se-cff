@@ -9,9 +9,9 @@ docker run -it \
     --ipc=host \
     --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
     --volume="/usr/local:/usr/local" \
-    --volume="$(pwd)/..:/root/code:rw" \
-    --volume="/home/runqiu/datasets:/root/data:rw" \
+    --volume="$(pwd)/../..:/root/code:rw" \
+    --volume="/mydata:/root/data:rw" \
     --volume="/dev/shm:/dev/shm:rw" \
-    --name=dockerpytorch \
+    --name=mujinenv_dockerpytorch \
     dockerpytorch
 echo "done"
